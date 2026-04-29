@@ -50,6 +50,8 @@ pub trait BriefingStore: Send + Sync {
     async fn delete_briefing(&self, workspace_id: &str) -> Result<()>;
 }
 
+const MAX_PINNED_MEMORIES: usize = 25;
+
 /// Build the injected context for a new thread.
 pub async fn build_context(
     memory_store: &dyn MemoryStore,
@@ -72,18 +74,17 @@ pub async fn build_context(
         .await
         .unwrap_or_default();
 
-    // Merge, dedup by content
     let mut seen = std::collections::HashSet::new();
     let mut memories = Vec::new();
+    let mut pinned_count = 0usize;
 
-    // Pinned memories always included first
     for m in ws_memories.iter().chain(global_memories.iter()) {
-        if m.pinned && seen.insert(m.id.clone()) {
+        if m.pinned && pinned_count < MAX_PINNED_MEMORIES && seen.insert(m.id.clone()) {
+            pinned_count += 1;
             memories.push(m.clone());
         }
     }
 
-    // Then ranked memories within budget
     let mut token_count = memories
         .iter()
         .map(|m| m.content.len() / 4)
@@ -177,5 +178,25 @@ mod tests {
             .unwrap();
 
         let _ = ctx;
+    }
+
+    #[tokio::test]
+    async fn test_build_context_caps_pinned_at_25() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+        for i in 0..30 {
+            let mems = store.add(&format!("pinned memory number {i}"), Some("ws1"), &format!("t{i}")).await.unwrap();
+            store.pin(&mems[0].id, true).await.unwrap();
+        }
+
+        let ctx = build_context(&store, &store, "pinned memory", "ws1", 50000)
+            .await
+            .unwrap();
+
+        let pinned_count = ctx.memories.iter().filter(|m| m.pinned).count();
+        assert!(
+            pinned_count <= super::MAX_PINNED_MEMORIES,
+            "pinned count {pinned_count} should be capped at {}",
+            super::MAX_PINNED_MEMORIES,
+        );
     }
 }

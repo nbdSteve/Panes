@@ -92,13 +92,15 @@ def health():
 
 
 @app.post("/v1/memories/")
-def add_memories(req: AddRequest):
+async def add_memories(req: AddRequest):
     if not mem0_instance:
         raise HTTPException(503, "Mem0 not initialized")
     metadata = {"thread_id": req.thread_id}
     if req.workspace_id:
         metadata["workspace_id"] = req.workspace_id
-    result = mem0_instance.add(
+    import asyncio
+    result = await asyncio.to_thread(
+        mem0_instance.add,
         req.transcript,
         user_id=req.user_id,
         metadata=metadata,
@@ -107,38 +109,47 @@ def add_memories(req: AddRequest):
 
 
 @app.post("/v1/memories/search/")
-def search_memories(req: SearchRequest):
+async def search_memories(req: SearchRequest):
     if not mem0_instance:
         raise HTTPException(503, "Mem0 not initialized")
-    result = mem0_instance.search(
+    import asyncio
+    result = await asyncio.to_thread(
+        mem0_instance.search,
         req.query,
         filters={"user_id": req.user_id},
-        limit=req.limit,
+        top_k=req.limit,
     )
     return result
 
 
 @app.get("/v1/memories/")
-def get_all_memories(user_id: str):
+async def get_all_memories(user_id: str, limit: int = 100):
     if not mem0_instance:
         raise HTTPException(503, "Mem0 not initialized")
-    result = mem0_instance.get_all(filters={"user_id": user_id})
+    import asyncio
+    result = await asyncio.to_thread(
+        mem0_instance.get_all,
+        filters={"user_id": user_id},
+        top_k=limit,
+    )
     return result
 
 
 @app.put("/v1/memories/{memory_id}/")
-def update_memory(memory_id: str, req: UpdateRequest):
+async def update_memory(memory_id: str, req: UpdateRequest):
     if not mem0_instance:
         raise HTTPException(503, "Mem0 not initialized")
-    result = mem0_instance.update(memory_id, req.data)
+    import asyncio
+    result = await asyncio.to_thread(mem0_instance.update, memory_id, req.data)
     return result
 
 
 @app.delete("/v1/memories/{memory_id}/")
-def delete_memory(memory_id: str):
+async def delete_memory(memory_id: str):
     if not mem0_instance:
         raise HTTPException(503, "Mem0 not initialized")
-    result = mem0_instance.delete(memory_id)
+    import asyncio
+    result = await asyncio.to_thread(mem0_instance.delete, memory_id)
     return result
 
 

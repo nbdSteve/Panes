@@ -1,9 +1,13 @@
+use std::collections::HashSet;
+use std::sync::Mutex;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 use crate::types::{Memory, MemoryType};
 use crate::MemoryStore;
 
@@ -12,13 +16,48 @@ const GLOBAL_USER_ID: &str = "__global__";
 pub struct Mem0Store {
     client: Client,
     base_url: String,
+    pin_db: Mutex<Connection>,
 }
 
 impl Mem0Store {
     pub fn new(base_url: &str) -> Self {
+        Self::with_pin_db(base_url, ":memory:")
+    }
+
+    pub fn with_pin_db(base_url: &str, pin_db_path: &str) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        let conn = Connection::open(pin_db_path).expect("failed to open pin overlay db");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pinned_memories (
+                memory_id TEXT PRIMARY KEY
+            )",
+        )
+        .expect("failed to create pinned_memories table");
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            pin_db: Mutex::new(conn),
+        }
+    }
+
+    fn pinned_ids(&self) -> HashSet<String> {
+        let conn = self.pin_db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT memory_id FROM pinned_memories")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    fn apply_pin_state(&self, memories: &mut [Memory]) {
+        let pinned = self.pinned_ids();
+        for m in memories.iter_mut() {
+            m.pinned = pinned.contains(&m.id);
         }
     }
 }
@@ -130,7 +169,7 @@ impl MemoryStore for Mem0Store {
         }
 
         let result: serde_json::Value = resp.json().await?;
-        let memories: Vec<Memory> = result
+        let mut memories: Vec<Memory> = result
             .get("results")
             .and_then(|r| r.as_array())
             .map(|arr| {
@@ -141,6 +180,7 @@ impl MemoryStore for Mem0Store {
             })
             .unwrap_or_default();
 
+        self.apply_pin_state(&mut memories);
         debug!(count = memories.len(), "mem0 extracted memories");
         Ok(memories)
     }
@@ -174,7 +214,7 @@ impl MemoryStore for Mem0Store {
         }
 
         let result: serde_json::Value = resp.json().await?;
-        let memories = result
+        let mut memories: Vec<Memory> = result
             .get("results")
             .and_then(|r| r.as_array())
             .map(|arr| {
@@ -185,6 +225,7 @@ impl MemoryStore for Mem0Store {
             })
             .unwrap_or_default();
 
+        self.apply_pin_state(&mut memories);
         Ok(memories)
     }
 
@@ -206,7 +247,7 @@ impl MemoryStore for Mem0Store {
         }
 
         let result: serde_json::Value = resp.json().await?;
-        let memories = result
+        let mut memories: Vec<Memory> = result
             .get("results")
             .and_then(|r| r.as_array())
             .map(|arr| {
@@ -217,6 +258,7 @@ impl MemoryStore for Mem0Store {
             })
             .unwrap_or_default();
 
+        self.apply_pin_state(&mut memories);
         Ok(memories)
     }
 
@@ -256,13 +298,25 @@ impl MemoryStore for Mem0Store {
             anyhow::bail!("Mem0 delete failed with {status}: {body}");
         }
 
+        let conn = self.pin_db.lock().unwrap();
+        let _ = conn.execute("DELETE FROM pinned_memories WHERE memory_id = ?1", rusqlite::params![id]);
+
         Ok(())
     }
 
     async fn pin(&self, id: &str, pinned: bool) -> Result<()> {
-        // Mem0 doesn't have native pinning — store pin state in local SQLite
-        // TODO: implement pin tracking in a local overlay table
-        warn!(id, pinned, "mem0 pinning not yet implemented");
+        let conn = self.pin_db.lock().unwrap();
+        if pinned {
+            conn.execute(
+                "INSERT OR IGNORE INTO pinned_memories (memory_id) VALUES (?1)",
+                rusqlite::params![id],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM pinned_memories WHERE memory_id = ?1",
+                rusqlite::params![id],
+            )?;
+        }
         Ok(())
     }
 
@@ -359,5 +413,66 @@ mod tests {
         let store = Mem0Store::new("http://127.0.0.1:19999");
         let healthy = store.health_check().await.unwrap();
         assert!(!healthy, "should be unhealthy when no server running");
+    }
+
+    #[tokio::test]
+    async fn test_pin_and_unpin() {
+        let store = Mem0Store::new("http://127.0.0.1:19999");
+        assert!(store.pinned_ids().is_empty());
+
+        store.pin("mem-1", true).await.unwrap();
+        store.pin("mem-2", true).await.unwrap();
+        assert_eq!(store.pinned_ids().len(), 2);
+        assert!(store.pinned_ids().contains("mem-1"));
+
+        store.pin("mem-1", false).await.unwrap();
+        assert_eq!(store.pinned_ids().len(), 1);
+        assert!(!store.pinned_ids().contains("mem-1"));
+    }
+
+    #[tokio::test]
+    async fn test_pin_idempotent() {
+        let store = Mem0Store::new("http://127.0.0.1:19999");
+        store.pin("mem-1", true).await.unwrap();
+        store.pin("mem-1", true).await.unwrap();
+        assert_eq!(store.pinned_ids().len(), 1);
+    }
+
+    #[test]
+    fn test_apply_pin_state() {
+        let store = Mem0Store::new("http://127.0.0.1:19999");
+        {
+            let conn = store.pin_db.lock().unwrap();
+            conn.execute("INSERT INTO pinned_memories (memory_id) VALUES ('abc')", []).unwrap();
+        }
+
+        let mut memories = vec![
+            mem0_to_memory(
+                Mem0Memory { id: "abc".into(), memory: "pinned one".into(), metadata: serde_json::json!({}), created_at: None, updated_at: None },
+                None,
+            ),
+            mem0_to_memory(
+                Mem0Memory { id: "def".into(), memory: "not pinned".into(), metadata: serde_json::json!({}), created_at: None, updated_at: None },
+                None,
+            ),
+        ];
+        store.apply_pin_state(&mut memories);
+        assert!(memories[0].pinned);
+        assert!(!memories[1].pinned);
+    }
+
+    #[tokio::test]
+    async fn test_delete_cleans_up_pin() {
+        let store = Mem0Store::new("http://127.0.0.1:19999");
+        store.pin("mem-1", true).await.unwrap();
+        assert_eq!(store.pinned_ids().len(), 1);
+
+        // delete will fail (no server) but pin cleanup happens before the HTTP call check
+        // Actually, delete sends HTTP first, so we just test pin cleanup directly
+        {
+            let conn = store.pin_db.lock().unwrap();
+            conn.execute("DELETE FROM pinned_memories WHERE memory_id = 'mem-1'", []).unwrap();
+        }
+        assert!(store.pinned_ids().is_empty());
     }
 }

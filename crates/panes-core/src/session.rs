@@ -152,6 +152,7 @@ impl SessionManager {
         let event_tx = self.event_tx.clone();
         let cost_tracker = self.cost_tracker.clone();
         let active_threads = self.active_threads.clone();
+        let session_ids = self.session_ids.clone();
         let budget_cap = workspace.budget_cap;
         let db = self.db.clone();
 
@@ -161,6 +162,7 @@ impl SessionManager {
                 event_tx,
                 cost_tracker,
                 active_threads,
+                session_ids,
                 budget_cap,
                 event_stream,
                 db,
@@ -224,6 +226,7 @@ impl SessionManager {
         let event_tx = self.event_tx.clone();
         let cost_tracker = self.cost_tracker.clone();
         let active_threads = self.active_threads.clone();
+        let session_ids = self.session_ids.clone();
         let budget_cap = workspace.budget_cap;
         let db = self.db.clone();
 
@@ -233,6 +236,7 @@ impl SessionManager {
                 event_tx,
                 cost_tracker,
                 active_threads,
+                session_ids,
                 budget_cap,
                 event_stream,
                 db,
@@ -249,6 +253,7 @@ impl SessionManager {
         event_tx: mpsc::UnboundedSender<ThreadEvent>,
         cost_tracker: Arc<CostTracker>,
         active_threads: Arc<Mutex<HashMap<String, ActiveThread>>>,
+        session_ids: Arc<Mutex<HashMap<String, String>>>,
         budget_cap: Option<f64>,
         mut events_stream: std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send>>,
         db: Arc<std::sync::Mutex<Connection>>,
@@ -259,6 +264,12 @@ impl SessionManager {
             if let Some(cap) = budget_cap {
                 if cost_tracker.check_budget(&thread_id, cap) {
                     warn!(thread_id = %thread_id, cap, "budget cap exceeded — killing session");
+                    {
+                        let active = active_threads.lock().await;
+                        if let Some(thread) = active.get(&thread_id) {
+                            let _ = thread.session.cancel().await;
+                        }
+                    }
                     let _ = event_tx.send(ThreadEvent {
                         thread_id: thread_id.clone(),
                         timestamp: Utc::now(),
@@ -298,9 +309,12 @@ impl SessionManager {
             }
         }
 
-        // Clean up — session is done, remove from active map
+        // Clean up — session is done, remove from active map and session_ids
         let mut active = active_threads.lock().await;
         active.remove(&thread_id);
+        drop(active);
+        let mut sids = session_ids.lock().await;
+        sids.remove(&thread_id);
     }
 
     pub async fn approve(&self, thread_id: &str, tool_use_id: &str) -> Result<()> {
