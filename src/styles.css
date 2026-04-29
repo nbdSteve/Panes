@@ -1405,22 +1405,65 @@ body {
   color: var(--text-primary);
 }
 
+.markdown-body .table-wrap {
+  overflow-x: auto;
+  margin: 8px 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
 .markdown-body table {
   border-collapse: collapse;
-  margin: 8px 0;
   width: 100%;
   font-size: 13px;
+  line-height: 1.5;
 }
 
 .markdown-body th, .markdown-body td {
   border: 1px solid var(--border);
-  padding: 6px 10px;
+  padding: 8px 12px;
   text-align: left;
+  white-space: nowrap;
+}
+
+.markdown-body td {
+  white-space: normal;
+  word-break: break-word;
 }
 
 .markdown-body th {
   background: var(--bg-surface);
   font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--text-secondary);
+}
+
+.markdown-body tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.markdown-body tr:hover td {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.markdown-body table th:first-child,
+.markdown-body table td:first-child {
+  border-left: none;
+}
+
+.markdown-body table th:last-child,
+.markdown-body table td:last-child {
+  border-right: none;
+}
+
+.markdown-body table tr:first-child th {
+  border-top: none;
+}
+
+.markdown-body table tr:last-child td {
+  border-bottom: none;
 }
 
 /* ─── Scrollbar ─── */

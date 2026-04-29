@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceInfo, ThreadInfo, AgentEvent } from "../App";
 import GateCard from "./GateCard";
@@ -333,7 +334,14 @@ function renderEvents(
               </svg>
             </span>
             <div className="step-description text-content markdown-body">
-              <Markdown>{event.text || ""}</Markdown>
+              <Markdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  table: ({ children }) => (
+                    <div className="table-wrap"><table>{children}</table></div>
+                  ),
+                }}
+              >{event.text || ""}</Markdown>
             </div>
           </div>
         );
