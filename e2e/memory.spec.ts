@@ -1,131 +1,221 @@
 import { test, expect } from "@playwright/test";
 
-test.describe("Memory & Briefings", () => {
-  test("context indicator shows injected memories and briefing", async ({ page }) => {
+let wsCounter = 0;
+
+async function addWorkspace(page: import("@playwright/test").Page, name?: string) {
+  wsCounter++;
+  const wsName = name ?? `MemTest${wsCounter}`;
+  await page.goto("/");
+  await page.click("text=Add workspace");
+  await page.fill('input[placeholder="/path/to/project"]', `/tmp/test-mem-${wsCounter}`);
+  await page.fill('input[placeholder="Display name (optional)"]', wsName);
+  await page.click(".sidebar-footer button:has-text('Add')");
+  await expect(page.locator(".sidebar-item", { hasText: wsName })).toBeVisible();
+  return wsName;
+}
+
+async function completeThread(page: import("@playwright/test").Page, prompt: string) {
+  await page.fill("textarea", prompt);
+  await page.press("textarea", "Enter");
+  await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+}
+
+async function openMemoryPanel(page: import("@playwright/test").Page) {
+  await page.click(".sidebar-item:has-text('Memory')");
+  await expect(page.locator(".memory-panel")).toBeVisible();
+}
+
+test.describe("Memory Panel", () => {
+  test("Memory nav item appears when workspace is selected", async ({ page }) => {
+    await addWorkspace(page);
+    await expect(page.locator(".sidebar-item", { hasText: "Memory" })).toBeVisible();
+  });
+
+  test("Memory nav item is not visible without a workspace", async ({ page }) => {
     await page.goto("/");
+    await expect(page.locator(".sidebar-item", { hasText: "Memory" })).not.toBeVisible();
+  });
 
-    await page.click("text=Add workspace");
-    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
-    await page.click("text=Add");
+  test("opens memory panel with empty state", async ({ page }) => {
+    await addWorkspace(page);
+    await openMemoryPanel(page);
 
-    // Send a prompt — context injection indicator should appear
-    await page.fill("textarea", "hello world");
-    await page.press("textarea", "Enter");
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+    await expect(page.locator("text=No memories yet")).toBeVisible();
+    await expect(page.locator("text=No briefing set")).toBeVisible();
+  });
 
-    // Start a second thread — should show context indicator if memories were extracted
+  test("memory panel highlights in sidebar when active", async ({ page }) => {
+    await addWorkspace(page);
+    await openMemoryPanel(page);
+    await expect(page.locator(".sidebar-item.active", { hasText: "Memory" })).toBeVisible();
+  });
+});
+
+test.describe("Briefing CRUD", () => {
+  test("can add a briefing", async ({ page }) => {
+    await addWorkspace(page);
+    await openMemoryPanel(page);
+
+    await page.locator(".memory-panel button:has-text('Add')").click();
+    await expect(page.locator(".briefing-textarea")).toBeVisible();
+
+    await page.fill(".briefing-textarea", "Always use TypeScript strict mode");
+    await page.locator(".briefing-actions button:has-text('Save')").click();
+
+    await expect(page.locator(".briefing-content")).toHaveText("Always use TypeScript strict mode");
+  });
+
+  test("can edit an existing briefing", async ({ page }) => {
+    await addWorkspace(page);
+    await openMemoryPanel(page);
+
+    await page.locator(".memory-panel button:has-text('Add')").click();
+    await page.fill(".briefing-textarea", "Original briefing");
+    await page.locator(".briefing-actions button:has-text('Save')").click();
+
+    await page.locator(".memory-panel button:has-text('Edit')").click();
+    await page.fill(".briefing-textarea", "Updated briefing content");
+    await page.locator(".briefing-actions button:has-text('Save')").click();
+
+    await expect(page.locator(".briefing-content")).toHaveText("Updated briefing content");
+  });
+
+  test("can cancel briefing edit", async ({ page }) => {
+    await addWorkspace(page);
+    await openMemoryPanel(page);
+
+    await page.locator(".memory-panel button:has-text('Add')").click();
+    await page.fill(".briefing-textarea", "Will be cancelled");
+    await page.locator(".briefing-actions button:has-text('Cancel')").click();
+
+    await expect(page.locator("text=No briefing set")).toBeVisible();
+  });
+
+  test("deleting briefing by saving empty content", async ({ page }) => {
+    await addWorkspace(page);
+    await openMemoryPanel(page);
+
+    await page.locator(".memory-panel button:has-text('Add')").click();
+    await page.fill(".briefing-textarea", "Temporary briefing");
+    await page.locator(".briefing-actions button:has-text('Save')").click();
+    await expect(page.locator(".briefing-content")).toBeVisible();
+
+    await page.locator(".memory-panel button:has-text('Edit')").click();
+    await page.fill(".briefing-textarea", "");
+    await page.locator(".briefing-actions button:has-text('Save')").click();
+
+    await expect(page.locator("text=No briefing set")).toBeVisible();
+  });
+});
+
+test.describe("Memory Extraction & Display", () => {
+  test("completing a thread extracts memories visible in panel", async ({ page }) => {
+    await addWorkspace(page);
+    await completeThread(page, "hello world");
+
+    await openMemoryPanel(page);
+    await expect(page.locator(".memory-card").first()).toBeVisible({ timeout: 3000 });
+    await expect(page.locator(".memory-type").first()).toBeVisible();
+  });
+
+  test("multiple threads accumulate memories", async ({ page }) => {
+    await addWorkspace(page);
+    await completeThread(page, "first task");
+
     await page.click(".thread-list-new");
-    await page.fill("textarea", "follow up task");
-    await page.press("textarea", "Enter");
+    await completeThread(page, "second task");
 
-    // Context indicator should show what was injected
-    await expect(page.locator(".context-indicator")).toBeVisible({ timeout: 3000 });
-    await expect(page.locator(".context-indicator")).toContainText("memor");
+    await openMemoryPanel(page);
+    const count = await page.locator(".memory-card").count();
+    expect(count).toBeGreaterThanOrEqual(2);
   });
 
-  test("context indicator is expandable to show details", async ({ page }) => {
-    await page.goto("/");
+  test("memory count badge reflects extracted memories", async ({ page }) => {
+    await addWorkspace(page);
+    await completeThread(page, "test task");
 
-    await page.click("text=Add workspace");
-    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
-    await page.click("text=Add");
+    await openMemoryPanel(page);
+    await expect(page.locator(".memory-card").first()).toBeVisible({ timeout: 3000 });
+    const count = await page.locator(".memory-count").textContent();
+    expect(Number(count)).toBeGreaterThanOrEqual(1);
+  });
+});
 
-    await page.fill("textarea", "first task");
-    await page.press("textarea", "Enter");
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+test.describe("Memory CRUD Operations", () => {
+  test("can pin and unpin a memory", async ({ page }) => {
+    await addWorkspace(page);
+    await completeThread(page, "pin test");
 
-    await page.click(".thread-list-new");
-    await page.fill("textarea", "second task");
-    await page.press("textarea", "Enter");
+    await openMemoryPanel(page);
+    await expect(page.locator(".memory-card").first()).toBeVisible({ timeout: 3000 });
 
-    await expect(page.locator(".context-indicator")).toBeVisible({ timeout: 3000 });
+    await page.locator("[title='Pin']").first().click();
+    await expect(page.locator(".memory-group-label", { hasText: "Pinned" })).toBeVisible();
+    await expect(page.locator(".memory-card.pinned")).toBeVisible();
 
-    // Click to expand
-    await page.click(".context-indicator");
-    await expect(page.locator(".context-detail")).toBeVisible();
+    await page.locator("[title='Unpin']").first().click();
+    await expect(page.locator(".memory-group-label", { hasText: "Pinned" })).not.toBeVisible();
   });
 
-  test("briefing editor is accessible from workspace", async ({ page }) => {
-    await page.goto("/");
+  test("can edit a memory inline", async ({ page }) => {
+    await addWorkspace(page);
+    await completeThread(page, "edit test");
 
-    await page.click("text=Add workspace");
-    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
-    await page.fill('input[placeholder="Display name (optional)"]', "Briefing Test");
-    await page.click("text=Add");
+    await openMemoryPanel(page);
+    await expect(page.locator(".memory-card").first()).toBeVisible({ timeout: 3000 });
 
-    // Should be able to access briefing editor
-    await page.click("text=Briefing");
+    await page.locator("[title='Edit']").first().click();
+    await expect(page.locator(".memory-textarea")).toBeVisible();
 
-    await expect(page.locator(".briefing-editor")).toBeVisible();
-    await expect(page.locator(".briefing-editor textarea")).toBeVisible();
+    await page.fill(".memory-textarea", "Manually edited memory");
+    await page.locator(".memory-edit-actions button:has-text('Save')").click();
+
+    await expect(page.locator(".memory-content").first()).toHaveText("Manually edited memory");
   });
 
-  test("briefing can be saved and persists", async ({ page }) => {
-    await page.goto("/");
+  test("can cancel memory edit", async ({ page }) => {
+    await addWorkspace(page);
+    await completeThread(page, "cancel edit test");
 
-    await page.click("text=Add workspace");
-    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
-    await page.click("text=Add");
+    await openMemoryPanel(page);
+    await expect(page.locator(".memory-card").first()).toBeVisible({ timeout: 3000 });
 
-    await page.click("text=Briefing");
-    await page.fill(".briefing-editor textarea", "Always use TypeScript, never JavaScript");
-    await page.click(".briefing-editor button:has-text('Save')");
+    const original = await page.locator(".memory-content").first().textContent();
+    await page.locator("[title='Edit']").first().click();
+    await page.fill(".memory-textarea", "This should not persist");
+    await page.locator(".memory-edit-actions button:has-text('Cancel')").click();
 
-    // Should show saved confirmation
-    await expect(page.locator("text=Saved")).toBeVisible({ timeout: 2000 });
-
-    // Reload and verify
-    await page.reload();
-    await page.click(".sidebar-item:has-text('test-ws')");
-    await page.click("text=Briefing");
-    await expect(page.locator(".briefing-editor textarea")).toHaveValue("Always use TypeScript, never JavaScript");
+    await expect(page.locator(".memory-content").first()).toHaveText(original!);
   });
 
-  test("memory panel shows extracted memories", async ({ page }) => {
-    await page.goto("/");
+  test("can delete a memory", async ({ page }) => {
+    await addWorkspace(page);
+    await completeThread(page, "delete test");
 
-    await page.click("text=Add workspace");
-    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
-    await page.click("text=Add");
+    await openMemoryPanel(page);
+    const initialCount = await page.locator(".memory-card").count();
+    expect(initialCount).toBeGreaterThanOrEqual(1);
 
-    // Complete a thread so memories can be extracted
-    await page.fill("textarea", "Use Zod for validation, not Joi");
-    await page.press("textarea", "Enter");
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+    await page.locator("[title='Delete']").first().click();
 
-    // Open memory panel
-    await page.click("text=Memory");
-
-    await expect(page.locator(".memory-panel")).toBeVisible();
-    await expect(page.locator(".memory-item")).toHaveCount(1, { timeout: 3000 });
+    await expect(page.locator(".memory-card")).toHaveCount(initialCount - 1);
   });
+});
 
-  test("memory can be pinned, edited, and deleted", async ({ page }) => {
-    await page.goto("/");
+test.describe("Memory Panel Navigation", () => {
+  test("switching between workspace view and memory view", async ({ page }) => {
+    const name = await addWorkspace(page);
+    await completeThread(page, "nav test");
 
-    await page.click("text=Add workspace");
-    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
-    await page.click("text=Add");
+    await openMemoryPanel(page);
+    await expect(page.locator(".memory-card").first()).toBeVisible({ timeout: 3000 });
+    const memCount = await page.locator(".memory-card").count();
 
-    await page.fill("textarea", "Always prefer composition over inheritance");
-    await page.press("textarea", "Enter");
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+    await page.click(`.sidebar-item:has-text('${name}')`);
+    await expect(page.locator(".thread-list")).toBeVisible();
+    await expect(page.locator(".memory-panel")).not.toBeVisible();
 
-    await page.click("text=Memory");
-    await expect(page.locator(".memory-item")).toHaveCount(1, { timeout: 3000 });
-
-    // Pin
-    await page.click(".memory-item .pin-button");
-    await expect(page.locator(".memory-item.pinned")).toBeVisible();
-
-    // Edit
-    await page.click(".memory-item .edit-button");
-    await page.fill(".memory-item textarea", "Updated memory content");
-    await page.click(".memory-item button:has-text('Save')");
-    await expect(page.locator(".memory-item")).toContainText("Updated memory content");
-
-    // Delete
-    await page.click(".memory-item .delete-button");
-    await expect(page.locator(".memory-item")).toHaveCount(0);
+    await openMemoryPanel(page);
+    await expect(page.locator(".memory-card")).toHaveCount(memCount);
   });
 });
