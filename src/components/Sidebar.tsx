@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { WorkspaceInfo, ThreadInfo } from "../App";
+import appIcon from "../assets/icon.png";
 
 interface SidebarProps {
   workspaces: WorkspaceInfo[];
@@ -52,7 +53,10 @@ export default function Sidebar({
 
   return (
     <nav className="sidebar">
-      <div className="sidebar-header">Panes</div>
+      <div className="sidebar-header">
+        <img src={appIcon} alt="" className="sidebar-icon" />
+        Panes
+      </div>
 
       <div className="sidebar-section">
         <div

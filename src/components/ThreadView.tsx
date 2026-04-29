@@ -356,19 +356,28 @@ function renderEvents(
 
       case "tool_request":
         if (event.needs_approval) {
+          const gateId = event.id || "";
+          const hasResult = events.slice(i + 1).some(
+            (e) => (e.event_type === "tool_result" && e.id === gateId),
+          );
+          const wasRejected = !hasResult && events.slice(i + 1).some(
+            (e) => e.event_type === "complete" || e.event_type === "error",
+          );
+          const resolved = hasResult ? "approved" as const : wasRejected ? "rejected" as const : undefined;
           return (
             <GateCard
               key={i}
               description={event.description || ""}
               riskLevel={event.risk_level || "medium"}
-              toolUseId={event.id || ""}
+              toolUseId={gateId}
               toolName={event.tool_name || ""}
               runningCost={runningCost}
+              resolved={resolved}
               onApprove={() => {
-                invoke("approve_gate", { threadId, toolUseId: event.id || "" }).catch(console.error);
+                invoke("approve_gate", { threadId, toolUseId: gateId }).catch(console.error);
               }}
               onReject={() => {
-                invoke("reject_gate", { threadId, toolUseId: event.id || "", reason: "User rejected" }).catch(console.error);
+                invoke("reject_gate", { threadId, toolUseId: gateId, reason: "User rejected" }).catch(console.error);
               }}
               onSteer={() => {}}
             />

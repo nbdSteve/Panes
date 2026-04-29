@@ -1,4 +1,3 @@
-import { useState } from "react";
 import CostBadge from "./CostBadge";
 
 interface GateCardProps {
@@ -7,34 +6,22 @@ interface GateCardProps {
   toolUseId: string;
   toolName: string;
   runningCost: number;
+  resolved?: "approved" | "rejected";
   onApprove: () => void;
   onReject: () => void;
   onSteer: (feedback: string) => void;
 }
-
-type GateState = "pending" | "approved" | "rejected";
 
 export default function GateCard({
   description,
   riskLevel,
   toolName,
   runningCost,
+  resolved,
   onApprove,
   onReject,
 }: GateCardProps) {
-  const [state, setState] = useState<GateState>("pending");
-
-  const handleApprove = () => {
-    setState("approved");
-    onApprove();
-  };
-
-  const handleReject = () => {
-    setState("rejected");
-    onReject();
-  };
-
-  if (state === "approved") {
+  if (resolved === "approved") {
     return (
       <div className="card gate-card gate-resolved gate-approved">
         <div className="gate-resolved-row">
@@ -55,7 +42,7 @@ export default function GateCard({
     );
   }
 
-  if (state === "rejected") {
+  if (resolved === "rejected") {
     return (
       <div className="card gate-card gate-resolved gate-rejected">
         <div className="gate-resolved-row">
@@ -103,10 +90,10 @@ export default function GateCard({
       </div>
 
       <div className="gate-actions">
-        <button className="btn btn-success btn-sm" onClick={handleApprove}>
+        <button className="btn btn-success btn-sm" onClick={onApprove}>
           Approve
         </button>
-        <button className="btn btn-danger btn-sm" onClick={handleReject}>
+        <button className="btn btn-danger btn-sm" onClick={onReject}>
           Reject
         </button>
       </div>
