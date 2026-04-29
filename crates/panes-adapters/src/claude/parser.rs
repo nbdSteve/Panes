@@ -396,7 +396,12 @@ fn truncate_for_display(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let boundary = s.char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= max_len)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &s[..boundary])
     }
 }
 
@@ -480,5 +485,74 @@ mod tests {
         let input: Value = serde_json::json!({"file_path": "/tmp/hello.ts", "content": "..."});
         let desc = build_tool_description("Write", &input);
         assert_eq!(desc, "Create file: /tmp/hello.ts");
+    }
+
+    #[test]
+    fn test_truncate_ascii() {
+        assert_eq!(truncate_for_display("hello", 10), "hello");
+        assert_eq!(truncate_for_display("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_utf8_no_panic() {
+        // 'é' is 2 bytes, '日' is 3 bytes, '🦀' is 4 bytes
+        let s = "café日本語🦀";
+        for max in 0..s.len() + 2 {
+            let _ = truncate_for_display(s, max); // must not panic
+        }
+    }
+
+    #[test]
+    fn test_truncate_utf8_boundary() {
+        let s = "ab日c"; // 'ab' = 2 bytes, '日' = 3 bytes at position 2-4, 'c' = 1 byte at position 5
+        let result = truncate_for_display(s, 3);
+        // max_len=3 falls inside '日' (bytes 2,3,4), so we truncate before it
+        assert_eq!(result, "ab...");
+    }
+
+    #[test]
+    fn test_parse_user_tool_result_string() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","content":"file contents here","is_error":false}]}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        if let AgentEvent::ToolResult { id, success, output, .. } = &events[0] {
+            assert_eq!(id, "tool_1");
+            assert!(success);
+            assert_eq!(output, "file contents here");
+        } else {
+            panic!("expected ToolResult");
+        }
+    }
+
+    #[test]
+    fn test_parse_user_tool_result_array_content() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_2","content":[{"type":"text","text":"line1"},{"type":"text","text":"line2"}],"is_error":true}]}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        if let AgentEvent::ToolResult { id, success, output, .. } = &events[0] {
+            assert_eq!(id, "tool_2");
+            assert!(!success);
+            assert_eq!(output, "line1\nline2");
+        } else {
+            panic!("expected ToolResult");
+        }
+    }
+
+    #[test]
+    fn test_estimate_cost_basic() {
+        let cost = estimate_cost(1_000_000, 0, 0, 0);
+        assert!((cost - 15.0).abs() < 0.001); // 1M input tokens * $15/M
+
+        let cost = estimate_cost(0, 1_000_000, 0, 0);
+        assert!((cost - 75.0).abs() < 0.001); // 1M output tokens * $75/M
+    }
+
+    #[test]
+    fn test_estimate_cost_with_cache() {
+        let cost = estimate_cost(0, 0, 1_000_000, 0);
+        assert!((cost - 1.5).abs() < 0.001); // cache read at $1.50/M
+
+        let cost = estimate_cost(0, 0, 0, 1_000_000);
+        assert!((cost - 18.75).abs() < 0.001); // cache creation at $18.75/M
     }
 }

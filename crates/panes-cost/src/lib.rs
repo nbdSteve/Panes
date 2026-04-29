@@ -142,3 +142,191 @@ pub fn get_total_cost(conn: &Connection) -> Result<f64> {
     )?;
     Ok(total)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_cost_event(input: u64, output: u64, usd: f64) -> AgentEvent {
+        AgentEvent::CostUpdate {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_usd: usd,
+            model: "test-model".to_string(),
+        }
+    }
+
+    fn make_complete_event(cost: f64) -> AgentEvent {
+        AgentEvent::Complete {
+            summary: "done".to_string(),
+            total_cost_usd: cost,
+            duration_ms: 1000,
+            turns: 1,
+        }
+    }
+
+    #[test]
+    fn test_lifecycle_start_process_finalize() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.01));
+        assert!((tracker.get_running_cost("t1").unwrap() - 0.01).abs() < f64::EPSILON);
+
+        tracker.process_event("t1", &make_cost_event(200, 100, 0.02));
+        assert!((tracker.get_running_cost("t1").unwrap() - 0.03).abs() < f64::EPSILON);
+
+        let finalized = tracker.finalize("t1").unwrap();
+        assert_eq!(finalized.input_tokens, 300);
+        assert_eq!(finalized.output_tokens, 150);
+        assert!((finalized.total_usd - 0.03).abs() < f64::EPSILON);
+        assert_eq!(finalized.workspace_id, "ws1");
+    }
+
+    #[test]
+    fn test_complete_overrides_running_total() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.01));
+        tracker.process_event("t1", &make_cost_event(200, 100, 0.02));
+        // Running estimate: 0.03
+        // Complete event has authoritative total:
+        tracker.process_event("t1", &make_complete_event(0.057));
+
+        let finalized = tracker.finalize("t1").unwrap();
+        assert!((finalized.total_usd - 0.057).abs() < f64::EPSILON);
+        // Tokens are still accumulated, not overridden
+        assert_eq!(finalized.input_tokens, 300);
+    }
+
+    #[test]
+    fn test_budget_check() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.04));
+        assert!(!tracker.check_budget("t1", 0.05));
+
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.01));
+        assert!(tracker.check_budget("t1", 0.05)); // 0.05 >= 0.05
+
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.01));
+        assert!(tracker.check_budget("t1", 0.05)); // 0.06 >= 0.05
+    }
+
+    #[test]
+    fn test_budget_check_unknown_thread() {
+        let tracker = CostTracker::new();
+        assert!(!tracker.check_budget("nonexistent", 1.0));
+    }
+
+    #[test]
+    fn test_finalize_unknown_thread() {
+        let tracker = CostTracker::new();
+        assert!(tracker.finalize("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_running_cost_unknown_thread() {
+        let tracker = CostTracker::new();
+        assert!(tracker.get_running_cost("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_process_event_on_unknown_thread_is_noop() {
+        let tracker = CostTracker::new();
+        // Should not panic
+        tracker.process_event("nonexistent", &make_cost_event(100, 50, 0.01));
+    }
+
+    #[test]
+    fn test_multiple_threads_independent() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+        tracker.start_tracking("t2", "ws2");
+
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.01));
+        tracker.process_event("t2", &make_cost_event(500, 200, 0.10));
+
+        assert!((tracker.get_running_cost("t1").unwrap() - 0.01).abs() < f64::EPSILON);
+        assert!((tracker.get_running_cost("t2").unwrap() - 0.10).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_sqlite_save_and_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                total_usd REAL DEFAULT 0,
+                model TEXT,
+                timestamp TEXT NOT NULL
+            )"
+        ).unwrap();
+
+        let cost1 = ThreadCost {
+            thread_id: "t1".into(),
+            workspace_id: "ws1".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_usd: 0.05,
+            model: "test".into(),
+        };
+        let cost2 = ThreadCost {
+            thread_id: "t2".into(),
+            workspace_id: "ws1".into(),
+            input_tokens: 200,
+            output_tokens: 100,
+            total_usd: 0.10,
+            model: "test".into(),
+        };
+        let cost3 = ThreadCost {
+            thread_id: "t3".into(),
+            workspace_id: "ws2".into(),
+            input_tokens: 300,
+            output_tokens: 150,
+            total_usd: 0.20,
+            model: "test".into(),
+        };
+
+        save_cost(&conn, &cost1).unwrap();
+        save_cost(&conn, &cost2).unwrap();
+        save_cost(&conn, &cost3).unwrap();
+
+        let ws1_cost = get_workspace_cost(&conn, "ws1").unwrap();
+        assert!((ws1_cost - 0.15).abs() < f64::EPSILON);
+
+        let ws2_cost = get_workspace_cost(&conn, "ws2").unwrap();
+        assert!((ws2_cost - 0.20).abs() < f64::EPSILON);
+
+        let total = get_total_cost(&conn).unwrap();
+        assert!((total - 0.35).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_empty_workspace_cost() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                total_usd REAL DEFAULT 0,
+                model TEXT,
+                timestamp TEXT NOT NULL
+            )"
+        ).unwrap();
+
+        assert!((get_workspace_cost(&conn, "nonexistent").unwrap()).abs() < f64::EPSILON);
+        assert!((get_total_cost(&conn).unwrap()).abs() < f64::EPSILON);
+    }
+}

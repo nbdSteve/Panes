@@ -3,13 +3,18 @@ mod commands;
 use std::sync::Arc;
 
 use panes_adapters::claude::ClaudeAdapter;
+use panes_adapters::fake::{FakeAdapter, FakeScenario, FakeStep};
 use panes_core::session::SessionManager;
 use panes_cost::CostTracker;
-use panes_events::ThreadEvent;
+use panes_events::{RiskLevel, ThreadEvent};
 use tauri::Emitter;
 use tokio::sync::mpsc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+fn is_test_mode() -> bool {
+    std::env::var("PANES_TEST_MODE").is_ok()
+}
 
 pub fn run() {
     tracing_subscriber::fmt()
@@ -17,19 +22,24 @@ pub fn run() {
         .with_writer(std::io::stderr)
         .init();
 
-    eprintln!("[panes] app starting");
+    let test_mode = is_test_mode();
+    eprintln!("[panes] app starting (test_mode={})", test_mode);
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ThreadEvent>();
     let cost_tracker = Arc::new(CostTracker::new());
 
     let mut session_manager = SessionManager::new(cost_tracker.clone(), event_tx);
 
-    let adapter = ClaudeAdapter::with_cli_path("/Users/goodhill/.local/bin/claude")
-        .env("CLAUDE_CODE_USE_BEDROCK", "1")
-        .env("AWS_PROFILE", "bedrock-beta")
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default());
-    session_manager.register_adapter(Arc::new(adapter));
+    if test_mode {
+        register_fake_adapters(&mut session_manager);
+    } else {
+        let adapter = ClaudeAdapter::with_cli_path("/Users/goodhill/.local/bin/claude")
+            .env("CLAUDE_CODE_USE_BEDROCK", "1")
+            .env("AWS_PROFILE", "bedrock-beta")
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", std::env::var("HOME").unwrap_or_default());
+        session_manager.register_adapter(Arc::new(adapter));
+    }
 
     tauri::Builder::default()
         .manage(Arc::new(tokio::sync::Mutex::new(session_manager)))
@@ -52,6 +62,104 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error running panes");
+}
+
+fn register_fake_adapters(session_manager: &mut SessionManager) {
+    // The default "claude-code" adapter in test mode cycles through scenarios
+    // based on the prompt content, so tests can trigger specific behaviors.
+    session_manager.register_adapter(Arc::new(PromptRoutedFakeAdapter));
+}
+
+struct PromptRoutedFakeAdapter;
+
+#[async_trait::async_trait]
+impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
+    fn name(&self) -> &str {
+        "claude-code"
+    }
+
+    async fn spawn(
+        &self,
+        workspace_path: &std::path::Path,
+        prompt: &str,
+        context: &panes_events::SessionContext,
+    ) -> anyhow::Result<Box<dyn panes_adapters::AgentSession>> {
+        let scenario = route_prompt(prompt);
+        let adapter = FakeAdapter::new(scenario).with_delay(80);
+        adapter.spawn(workspace_path, prompt, context).await
+    }
+
+    async fn resume(
+        &self,
+        workspace_path: &std::path::Path,
+        session_id: &str,
+        prompt: &str,
+    ) -> anyhow::Result<Box<dyn panes_adapters::AgentSession>> {
+        let scenario = route_prompt(prompt);
+        let adapter = FakeAdapter::new(scenario).with_delay(80);
+        adapter.resume(workspace_path, session_id, prompt).await
+    }
+}
+
+fn route_prompt(prompt: &str) -> FakeScenario {
+    let lower = prompt.to_lowercase();
+
+    if lower.contains("error") || lower.contains("fail") {
+        FakeScenario::Error {
+            message: "Simulated error: something went wrong".to_string(),
+        }
+    } else if lower.contains("gate") || lower.contains("dangerous") || lower.contains("destructive") {
+        FakeScenario::GatedAction {
+            tool_name: "Bash".to_string(),
+            description: "rm -rf /tmp/test-directory".to_string(),
+            risk_level: RiskLevel::Critical,
+            response: "The dangerous operation has been completed successfully.".to_string(),
+        }
+    } else if lower.contains("edit") || lower.contains("write") || lower.contains("create file") {
+        FakeScenario::FileEdit {
+            files: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
+            response: "I've made the requested edits to the files.".to_string(),
+        }
+    } else if lower.contains("read") || lower.contains("explain") || lower.contains("analyze") {
+        FakeScenario::ReadAndRespond {
+            files: vec!["src/App.tsx".to_string(), "src/styles.css".to_string()],
+            response: "Based on my analysis of the files, here is what I found:\n\n- The App component manages thread state centrally\n- Styles use CSS custom properties for theming\n- The architecture follows a unidirectional data flow pattern".to_string(),
+        }
+    } else if lower.contains("multi") || lower.contains("complex") {
+        FakeScenario::MultiStep {
+            steps: vec![
+                FakeStep {
+                    tool_name: "Read".to_string(),
+                    description: "Read file: src/App.tsx".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "(file contents)".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Edit".to_string(),
+                    description: "Edit file: src/App.tsx".to_string(),
+                    risk_level: RiskLevel::Medium,
+                    needs_approval: false,
+                    success: true,
+                    output: "File edited".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Bash".to_string(),
+                    description: "Run command: npm test".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "All 42 tests passed".to_string(),
+                },
+            ],
+            response: "I've read the file, made edits, and verified the tests pass.".to_string(),
+        }
+    } else {
+        FakeScenario::TextOnly {
+            response: format!("I received your message: \"{}\"\n\nThis is a **fake response** from the test adapter. It supports:\n- `error` / `fail` → error scenario\n- `gate` / `dangerous` → gated action\n- `edit` / `write` → file edit with commit buttons\n- `read` / `explain` → read files then respond\n- `multi` / `complex` → multi-step tool use\n- anything else → this text response", prompt),
+        }
+    }
 }
 
 async fn forward_events(

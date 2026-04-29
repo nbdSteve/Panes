@@ -99,7 +99,7 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
               <span className="thread-prompt-text">{thread.prompt}</span>
             </div>
 
-            {thread.status === "starting" && visibleEvents.length === 0 && (
+            {isRunning && visibleEvents.length === 0 && (
               <div className="step-card">
                 <span className="step-icon icon-thinking">
                   <span className="spinner" />

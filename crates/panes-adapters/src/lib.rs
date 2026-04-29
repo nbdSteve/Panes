@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod fake;
 
 use std::path::Path;
 use std::pin::Pin;
