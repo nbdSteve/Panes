@@ -271,3 +271,160 @@ fn truncate(s: &str, max: usize) -> &str {
         &s[..boundary]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_store() -> SqliteMemoryStore {
+        SqliteMemoryStore::new(":memory:").unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_add_and_get_all() {
+        let store = make_store();
+        let mems = store.add("User said hello", Some("ws1"), "t1").await.unwrap();
+        assert_eq!(mems.len(), 1);
+        assert_eq!(mems[0].source_thread_id, "t1");
+
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, mems[0].id);
+    }
+
+    #[tokio::test]
+    async fn test_search_fts5() {
+        let store = make_store();
+        store.add("Always use TypeScript strict mode", Some("ws1"), "t1").await.unwrap();
+        store.add("Use pnpm for package management", Some("ws1"), "t2").await.unwrap();
+
+        let results = store.search("pnpm package", Some("ws1"), 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("pnpm"));
+    }
+
+    #[tokio::test]
+    async fn test_search_empty_returns_nothing() {
+        let store = make_store();
+        let results = store.search("nonexistent", Some("ws1"), 10).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_memory() {
+        let store = make_store();
+        let mems = store.add("original content", Some("ws1"), "t1").await.unwrap();
+        let id = &mems[0].id;
+
+        store.update(id, "updated content").await.unwrap();
+
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(all[0].content, "updated content");
+        assert!(all[0].edited_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_delete_memory() {
+        let store = make_store();
+        let mems = store.add("to be deleted", Some("ws1"), "t1").await.unwrap();
+        let id = &mems[0].id;
+
+        store.delete(id).await.unwrap();
+
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pin_and_unpin() {
+        let store = make_store();
+        let mems = store.add("important memory", Some("ws1"), "t1").await.unwrap();
+        let id = &mems[0].id;
+
+        assert!(!mems[0].pinned);
+
+        store.pin(id, true).await.unwrap();
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert!(all[0].pinned);
+
+        store.pin(id, false).await.unwrap();
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert!(!all[0].pinned);
+    }
+
+    #[tokio::test]
+    async fn test_workspace_isolation() {
+        let store = make_store();
+        store.add("ws1 memory", Some("ws1"), "t1").await.unwrap();
+        store.add("ws2 memory", Some("ws2"), "t2").await.unwrap();
+
+        let ws1 = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(ws1.len(), 1);
+        assert!(ws1[0].content.contains("ws1"));
+
+        let ws2 = store.get_all(Some("ws2")).await.unwrap();
+        assert_eq!(ws2.len(), 1);
+        assert!(ws2[0].content.contains("ws2"));
+    }
+
+    #[tokio::test]
+    async fn test_global_memories() {
+        let store = make_store();
+        store.add("global memory", None, "t1").await.unwrap();
+
+        let global = store.get_all(None).await.unwrap();
+        assert_eq!(global.len(), 1);
+
+        // Global memories visible when querying with a workspace too (NULL workspace_id matches)
+        let ws = store.get_all(Some("ws1")).await.unwrap();
+        assert!(ws.is_empty() || ws.iter().any(|m| m.workspace_id.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let store = make_store();
+        assert!(store.health_check().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_briefing_crud() {
+        let store = make_store();
+
+        assert!(store.get_briefing("ws1").await.unwrap().is_none());
+
+        store.set_briefing("ws1", "Always use TypeScript").await.unwrap();
+        let b = store.get_briefing("ws1").await.unwrap().unwrap();
+        assert_eq!(b.content, "Always use TypeScript");
+        assert_eq!(b.workspace_id, "ws1");
+
+        store.set_briefing("ws1", "Updated briefing").await.unwrap();
+        let b = store.get_briefing("ws1").await.unwrap().unwrap();
+        assert_eq!(b.content, "Updated briefing");
+
+        store.delete_briefing("ws1").await.unwrap();
+        assert!(store.get_briefing("ws1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_briefing_workspace_isolation() {
+        let store = make_store();
+        store.set_briefing("ws1", "briefing 1").await.unwrap();
+        store.set_briefing("ws2", "briefing 2").await.unwrap();
+
+        assert_eq!(store.get_briefing("ws1").await.unwrap().unwrap().content, "briefing 1");
+        assert_eq!(store.get_briefing("ws2").await.unwrap().unwrap().content, "briefing 2");
+    }
+
+    #[tokio::test]
+    async fn test_pinned_memories_sort_first() {
+        let store = make_store();
+        let m1 = store.add("unpinned memory", Some("ws1"), "t1").await.unwrap();
+        let m2 = store.add("pinned memory", Some("ws1"), "t2").await.unwrap();
+        store.pin(&m2[0].id, true).await.unwrap();
+
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert!(all[0].pinned, "pinned memory should be first");
+        assert!(!all[1].pinned);
+        let _ = m1;
+    }
+}

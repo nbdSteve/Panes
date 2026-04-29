@@ -25,33 +25,18 @@ impl Mem0Store {
 
 #[derive(Serialize)]
 struct AddRequest {
-    messages: Vec<Message>,
+    transcript: String,
     user_id: String,
-    metadata: AddMetadata,
-}
-
-#[derive(Serialize)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct AddMetadata {
     thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     workspace_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct SearchRequest {
     query: String,
-    filters: SearchFilters,
-    limit: usize,
-}
-
-#[derive(Serialize)]
-struct SearchFilters {
     user_id: String,
+    limit: usize,
 }
 
 #[derive(Deserialize)]
@@ -124,15 +109,10 @@ impl MemoryStore for Mem0Store {
         let user_id = to_user_id(workspace_id);
 
         let req = AddRequest {
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: transcript.to_string(),
-            }],
+            transcript: transcript.to_string(),
             user_id: user_id.clone(),
-            metadata: AddMetadata {
-                thread_id: thread_id.to_string(),
-                workspace_id: workspace_id.map(String::from),
-            },
+            thread_id: thread_id.to_string(),
+            workspace_id: workspace_id.map(String::from),
         };
 
         let resp = self
@@ -175,7 +155,7 @@ impl MemoryStore for Mem0Store {
 
         let req = SearchRequest {
             query: query.to_string(),
-            filters: SearchFilters { user_id },
+            user_id,
             limit,
         };
 
@@ -301,5 +281,83 @@ impl MemoryStore for Mem0Store {
                 Ok(false)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_user_id_workspace() {
+        assert_eq!(to_user_id(Some("my-workspace")), "ws:my-workspace");
+    }
+
+    #[test]
+    fn test_to_user_id_global() {
+        assert_eq!(to_user_id(None), "__global__");
+    }
+
+    #[test]
+    fn test_guess_memory_type_decision() {
+        assert_eq!(guess_memory_type("We decided to use React"), MemoryType::Decision);
+        assert_eq!(guess_memory_type("Team chose TypeScript"), MemoryType::Decision);
+    }
+
+    #[test]
+    fn test_guess_memory_type_preference() {
+        assert_eq!(guess_memory_type("User prefers tabs"), MemoryType::Preference);
+        assert_eq!(guess_memory_type("Always use pnpm"), MemoryType::Preference);
+        assert_eq!(guess_memory_type("Never use npm"), MemoryType::Preference);
+    }
+
+    #[test]
+    fn test_guess_memory_type_constraint() {
+        assert_eq!(guess_memory_type("API must be backwards compatible"), MemoryType::Constraint);
+        assert_eq!(guess_memory_type("Require strict mode"), MemoryType::Constraint);
+    }
+
+    #[test]
+    fn test_guess_memory_type_pattern_default() {
+        assert_eq!(guess_memory_type("Uses React with hooks"), MemoryType::Pattern);
+    }
+
+    #[test]
+    fn test_mem0_to_memory_basic() {
+        let m = Mem0Memory {
+            id: "abc".to_string(),
+            memory: "User prefers pnpm".to_string(),
+            metadata: serde_json::json!({"thread_id": "t1"}),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            updated_at: None,
+        };
+        let result = mem0_to_memory(m, Some("ws1"));
+        assert_eq!(result.id, "abc");
+        assert_eq!(result.content, "User prefers pnpm");
+        assert_eq!(result.workspace_id.as_deref(), Some("ws1"));
+        assert_eq!(result.source_thread_id, "t1");
+        assert_eq!(result.memory_type, MemoryType::Preference);
+        assert!(!result.pinned);
+    }
+
+    #[test]
+    fn test_mem0_to_memory_global() {
+        let m = Mem0Memory {
+            id: "def".to_string(),
+            memory: "Some pattern".to_string(),
+            metadata: serde_json::json!({}),
+            created_at: None,
+            updated_at: None,
+        };
+        let result = mem0_to_memory(m, None);
+        assert!(result.workspace_id.is_none());
+        assert_eq!(result.source_thread_id, "");
+    }
+
+    #[tokio::test]
+    async fn test_health_check_no_server() {
+        let store = Mem0Store::new("http://127.0.0.1:19999");
+        let healthy = store.health_check().await.unwrap();
+        assert!(!healthy, "should be unhealthy when no server running");
     }
 }

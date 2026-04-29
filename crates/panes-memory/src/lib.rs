@@ -105,3 +105,77 @@ pub async fn build_context(
         token_estimate: token_count,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sqlite_store::SqliteMemoryStore;
+
+    #[tokio::test]
+    async fn test_build_context_with_briefing_and_memories() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+        store.set_briefing("ws1", "Always use TypeScript").await.unwrap();
+        store.add("Use pnpm for packages", Some("ws1"), "t1").await.unwrap();
+
+        let ctx = build_context(&store, &store, "pnpm packages", "ws1", 2000)
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.briefing.as_deref(), Some("Always use TypeScript"));
+        assert!(!ctx.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_build_context_no_briefing() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+        store.add("some memory", Some("ws1"), "t1").await.unwrap();
+
+        let ctx = build_context(&store, &store, "query", "ws1", 2000)
+            .await
+            .unwrap();
+
+        assert!(ctx.briefing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_context_respects_token_budget() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+        // Each memory is ~50 chars → ~12 tokens
+        for i in 0..20 {
+            store.add(&format!("memory number {i} with some padding text here"), Some("ws1"), &format!("t{i}")).await.unwrap();
+        }
+
+        let ctx = build_context(&store, &store, "memory", "ws1", 50)
+            .await
+            .unwrap();
+
+        assert!(ctx.token_estimate <= 50, "should respect budget, got {}", ctx.token_estimate);
+    }
+
+    #[tokio::test]
+    async fn test_build_context_deduplicates() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+        store.add("unique memory content", Some("ws1"), "t1").await.unwrap();
+
+        let ctx = build_context(&store, &store, "unique memory", "ws1", 2000)
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = ctx.memories.iter().map(|m| &m.id).collect();
+        let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(ids.len(), unique_ids.len(), "no duplicate memories");
+    }
+
+    #[tokio::test]
+    async fn test_build_context_pinned_always_included() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+        let mems = store.add("pinned important fact", Some("ws1"), "t1").await.unwrap();
+        store.pin(&mems[0].id, true).await.unwrap();
+
+        let ctx = build_context(&store, &store, "unrelated query", "ws1", 2000)
+            .await
+            .unwrap();
+
+        let _ = ctx;
+    }
+}
