@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import Sidebar from "./components/Sidebar";
 import ThreadList from "./components/ThreadList";
 import ThreadView from "./components/ThreadView";
+import MemoryPanel from "./components/MemoryPanel";
 
 export interface WorkspaceInfo {
   id: string;
@@ -95,7 +96,7 @@ function App() {
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "feed">("feed");
+  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory">("feed");
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
@@ -161,6 +162,10 @@ function App() {
                 : mapped.event_type === "tool_request" && mapped.needs_approval
                   ? "gate" as const
                   : "running" as const;
+
+          if (newStatus === "complete" && mapped.event_type === "complete") {
+            extractMemoriesFromThread(t);
+          }
 
           if ((newStatus === "complete" || newStatus === "error") && t.queuedFollowUp) {
             pendingResumeRef.current = { threadId: t.id, prompt: t.queuedFollowUp };
@@ -297,6 +302,19 @@ function App() {
     [activeThread, threads, handleStartThread, handleResumeThread]
   );
 
+  const extractMemoriesFromThread = useCallback((thread: ThreadInfo) => {
+    const textEvents = thread.events
+      .filter((e) => e.event_type === "text" && e.text)
+      .map((e) => `Assistant: ${e.text}`)
+      .join("\n");
+    const transcript = `User: ${thread.prompt}\n${textEvents}`;
+    invoke("extract_memories", {
+      workspaceId: thread.workspaceId,
+      threadId: thread.id,
+      transcript,
+    }).catch(() => {});
+  }, []);
+
   const activeWs = workspaces.find((w) => w.id === activeWorkspace);
   const wsThreads = threads.filter((t) => t.workspaceId === activeWorkspace);
   const currentThread = threads.find((t) => t.id === activeThread);
@@ -307,6 +325,7 @@ function App() {
         workspaces={workspaces}
         threads={threads}
         activeWorkspace={activeWorkspace}
+        activeView={activeView}
         onSelectWorkspace={(id) => {
           setActiveWorkspace(id);
           setActiveView("workspace");
@@ -318,6 +337,10 @@ function App() {
         onSelectFeed={() => {
           setActiveWorkspace(null);
           setActiveView("feed");
+        }}
+        onSelectMemory={(wsId) => {
+          setActiveWorkspace(wsId);
+          setActiveView("memory");
         }}
         onAddWorkspace={async (ws) => {
           try {
@@ -371,6 +394,10 @@ function App() {
             onCancel={handleCancelThread}
             onQueueFollowUp={handleQueueFollowUp}
           />
+        )}
+
+        {activeView === "memory" && activeWs && (
+          <MemoryPanel workspaceId={activeWs.id} />
         )}
       </main>
     </div>

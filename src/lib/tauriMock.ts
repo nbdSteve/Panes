@@ -223,6 +223,19 @@ interface MockWorkspace {
 
 const mockWorkspaces: MockWorkspace[] = [];
 
+interface MockMemory {
+  id: string;
+  workspaceId: string | null;
+  memoryType: string;
+  content: string;
+  sourceThreadId: string;
+  pinned: boolean;
+  createdAt: string;
+}
+
+const mockMemories: MockMemory[] = [];
+const mockBriefings = new Map<string, { workspaceId: string; content: string }>();
+
 interface PausedThread {
   threadId: string;
   remainingEvents: Array<Record<string, unknown>>;
@@ -366,6 +379,61 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       if (idx >= 0) mockWorkspaces.splice(idx, 1);
       return null;
     }
+
+    case "get_memories":
+      return [...mockMemories.filter((m) => m.workspaceId === args?.workspaceId)];
+
+    case "search_memories":
+      return [...mockMemories.filter((m) =>
+        m.workspaceId === args?.workspaceId &&
+        m.content.toLowerCase().includes((args?.query as string || "").toLowerCase())
+      )];
+
+    case "extract_memories": {
+      const mem = {
+        id: crypto.randomUUID(),
+        workspaceId: args?.workspaceId as string,
+        memoryType: "pattern",
+        content: `Extracted from thread: ${(args?.transcript as string || "").slice(0, 80)}`,
+        sourceThreadId: args?.threadId as string,
+        pinned: false,
+        createdAt: new Date().toISOString(),
+      };
+      mockMemories.push(mem);
+      return [mem];
+    }
+
+    case "update_memory": {
+      const mi = mockMemories.findIndex((m) => m.id === args?.memoryId);
+      if (mi >= 0) mockMemories[mi].content = args?.content as string;
+      return null;
+    }
+
+    case "delete_memory": {
+      const di = mockMemories.findIndex((m) => m.id === args?.memoryId);
+      if (di >= 0) mockMemories.splice(di, 1);
+      return null;
+    }
+
+    case "pin_memory": {
+      const pi = mockMemories.findIndex((m) => m.id === args?.memoryId);
+      if (pi >= 0) mockMemories[pi].pinned = args?.pinned as boolean;
+      return null;
+    }
+
+    case "get_briefing":
+      return mockBriefings.get(args?.workspaceId as string) ?? null;
+
+    case "set_briefing":
+      mockBriefings.set(args?.workspaceId as string, {
+        workspaceId: args?.workspaceId as string,
+        content: args?.content as string,
+      });
+      return null;
+
+    case "delete_briefing":
+      mockBriefings.delete(args?.workspaceId as string);
+      return null;
 
     default:
       console.warn(`[tauriMock] unhandled invoke: ${cmd}`, args);

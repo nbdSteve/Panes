@@ -8,6 +8,7 @@ use panes_core::db;
 use panes_core::session::SessionManager;
 use panes_cost::CostTracker;
 use panes_events::{RiskLevel, ThreadEvent};
+use panes_memory::sqlite_store::SqliteMemoryStore;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -25,6 +26,14 @@ fn db_path() -> String {
     data_dir.join("panes.db").to_string_lossy().to_string()
 }
 
+fn memory_db_path() -> String {
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("dev.panes");
+    std::fs::create_dir_all(&data_dir).ok();
+    data_dir.join("memory.db").to_string_lossy().to_string()
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("panes=debug".parse().unwrap()))
@@ -36,6 +45,9 @@ pub fn run() {
 
     let conn = db::initialize(&db_path()).expect("failed to initialize database");
     let db = Arc::new(std::sync::Mutex::new(conn));
+
+    let memory_db_path = memory_db_path();
+    let memory_store = Arc::new(SqliteMemoryStore::new(&memory_db_path).expect("failed to initialize memory store"));
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ThreadEvent>();
     let cost_tracker = Arc::new(CostTracker::new());
@@ -57,6 +69,7 @@ pub fn run() {
         .manage(Arc::new(tokio::sync::Mutex::new(session_manager)))
         .manage(cost_tracker)
         .manage(db)
+        .manage(memory_store)
         .setup(|app| {
             let handle = app.handle().clone();
             let event_rx = Arc::new(tokio::sync::Mutex::new(event_rx));
@@ -75,6 +88,15 @@ pub fn run() {
             commands::commit_changes,
             commands::revert_changes,
             commands::get_workspaces,
+            commands::extract_memories,
+            commands::get_memories,
+            commands::search_memories,
+            commands::update_memory,
+            commands::delete_memory,
+            commands::pin_memory,
+            commands::get_briefing,
+            commands::set_briefing,
+            commands::delete_briefing,
         ])
         .run(tauri::generate_context!())
         .expect("error running panes");

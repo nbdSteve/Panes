@@ -41,7 +41,7 @@ pub struct Briefing {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InjectedContext {
     pub briefing: Option<String>,
     pub memories: Vec<Memory>,

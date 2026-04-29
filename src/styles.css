@@ -1441,3 +1441,199 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.15);
 }
+
+/* Memory Panel */
+.memory-panel {
+  padding: 24px;
+  overflow-y: auto;
+  max-height: 100%;
+}
+
+.memory-section {
+  margin-bottom: 28px;
+}
+
+.memory-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.memory-section-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.memory-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.briefing-content {
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--accent-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.briefing-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.briefing-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.briefing-textarea {
+  resize: vertical;
+  min-height: 80px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.briefing-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.memory-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 8px 0;
+}
+
+.memory-group {
+  margin-bottom: 16px;
+}
+
+.memory-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.memory-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  transition: border-color 0.15s;
+}
+
+.memory-card:hover {
+  border-color: var(--border-hover);
+}
+
+.memory-card.pinned {
+  border-left: 3px solid var(--accent);
+}
+
+.memory-content {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  margin-bottom: 6px;
+}
+
+.memory-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.memory-type {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: capitalize;
+}
+
+.memory-type.type-decision {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+}
+
+.memory-type.type-preference {
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+}
+
+.memory-type.type-constraint {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
+.memory-type.type-pattern {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+.memory-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.memory-card:hover .memory-actions {
+  opacity: 1;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.btn-icon.btn-danger:hover {
+  color: var(--error);
+}
+
+.memory-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-textarea {
+  resize: vertical;
+  min-height: 48px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.memory-edit-actions {
+  display: flex;
+  gap: 6px;
+}
