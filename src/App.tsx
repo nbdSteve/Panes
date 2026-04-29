@@ -99,9 +99,45 @@ function App() {
   const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory">("feed");
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
-  useEffect(() => {
-    invoke<WorkspaceInfo[]>("list_workspaces").then(setWorkspaces).catch(() => {});
+  const loadThreadsForWorkspace = useCallback(async (workspaceId: string) => {
+    try {
+      const persisted = await invoke<{
+        id: string;
+        workspaceId: string;
+        prompt: string;
+        status: string;
+        summary: string | null;
+        costUsd: number;
+        durationMs: number | null;
+        createdAt: string;
+        events: AgentEvent[];
+      }[]>("list_threads", { workspaceId });
+
+      setThreads((prev) => {
+        const liveIds = new Set(prev.filter((t) => t.workspaceId === workspaceId).map((t) => t.id));
+        const toAdd = persisted
+          .filter((p) => !liveIds.has(p.id))
+          .map((p) => ({
+            id: p.id,
+            workspaceId: p.workspaceId,
+            prompt: p.prompt,
+            status: (p.status === "completed" ? "complete" : p.status) as ThreadInfo["status"],
+            events: p.events,
+            createdAt: new Date(p.createdAt).getTime(),
+          }));
+        return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+      });
+    } catch {}
   }, []);
+
+  useEffect(() => {
+    invoke<WorkspaceInfo[]>("list_workspaces").then((ws) => {
+      setWorkspaces(ws);
+      for (const w of ws) {
+        loadThreadsForWorkspace(w.id);
+      }
+    }).catch(() => {});
+  }, [loadThreadsForWorkspace]);
 
   const handleCompletionAction = useCallback(
     (threadId: string, action: "committed" | "reverted" | "kept") => {
@@ -329,6 +365,7 @@ function App() {
         onSelectWorkspace={(id) => {
           setActiveWorkspace(id);
           setActiveView("workspace");
+          loadThreadsForWorkspace(id);
           const lastThread = threads
             .filter((t) => t.workspaceId === id)
             .sort((a, b) => b.createdAt - a.createdAt)[0];

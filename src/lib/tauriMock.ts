@@ -374,11 +374,17 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return [...mockWorkspaces];
 
     case "remove_workspace": {
-      const wsId = args?.workspace_id as string;
+      const wsId = args?.workspaceId as string ?? args?.workspace_id as string;
       const idx = mockWorkspaces.findIndex((w) => w.id === wsId);
       if (idx >= 0) mockWorkspaces.splice(idx, 1);
       return null;
     }
+
+    case "list_threads":
+      return [];
+
+    case "delete_thread":
+      return null;
 
     case "get_memories":
       return [...mockMemories.filter((m) => m.workspaceId === args?.workspaceId)];

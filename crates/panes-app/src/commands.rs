@@ -103,8 +103,106 @@ pub async fn remove_workspace(
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     conn.execute(
+        "DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)",
+        rusqlite::params![workspace_id],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM costs WHERE workspace_id = ?1",
+        rusqlite::params![workspace_id],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM threads WHERE workspace_id = ?1",
+        rusqlite::params![workspace_id],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
         "DELETE FROM workspaces WHERE id = ?1",
         rusqlite::params![workspace_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadInfo {
+    pub id: String,
+    pub workspace_id: String,
+    pub prompt: String,
+    pub status: String,
+    pub summary: Option<String>,
+    pub cost_usd: f64,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+    pub events: Vec<serde_json::Value>,
+}
+
+#[tauri::command]
+pub async fn list_threads(
+    db: tauri::State<'_, DbState>,
+    workspace_id: String,
+) -> Result<Vec<ThreadInfo>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
+         FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
+    ).map_err(|e| e.to_string())?;
+
+    let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![workspace_id], |row| {
+        Ok(ThreadInfo {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            prompt: row.get(2)?,
+            status: row.get(3)?,
+            summary: row.get(4)?,
+            cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
+            duration_ms: row.get(6)?,
+            created_at: row.get(7)?,
+            events: vec![],
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    let mut result = Vec::with_capacity(threads.len());
+    for mut thread in threads {
+        let mut evt_stmt = conn.prepare(
+            "SELECT data FROM events WHERE thread_id = ?1 ORDER BY id ASC"
+        ).map_err(|e| e.to_string())?;
+
+        let events: Vec<serde_json::Value> = evt_stmt.query_map(
+            rusqlite::params![thread.id], |row| {
+                let data: String = row.get(0)?;
+                Ok(serde_json::from_str(&data).unwrap_or(serde_json::Value::Null))
+            }
+        ).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .filter(|v| !v.is_null())
+        .collect();
+
+        thread.events = events;
+        result.push(thread);
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn delete_thread(
+    db: tauri::State<'_, DbState>,
+    thread_id: String,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM events WHERE thread_id = ?1",
+        rusqlite::params![thread_id],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM costs WHERE thread_id = ?1",
+        rusqlite::params![thread_id],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM threads WHERE id = ?1",
+        rusqlite::params![thread_id],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -69,14 +69,37 @@ impl SessionManager {
         event_tx: mpsc::UnboundedSender<ThreadEvent>,
         db: Arc<std::sync::Mutex<Connection>>,
     ) -> Self {
+        let session_ids = Self::load_session_ids(&db);
+
         Self {
             active_threads: Arc::new(Mutex::new(HashMap::new())),
-            session_ids: Arc::new(Mutex::new(HashMap::new())),
+            session_ids: Arc::new(Mutex::new(session_ids)),
             adapters: HashMap::new(),
             cost_tracker,
             event_tx,
             db,
         }
+    }
+
+    fn load_session_ids(db: &Arc<std::sync::Mutex<Connection>>) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Ok(conn) = db.lock() {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT id, session_id FROM threads WHERE session_id IS NOT NULL"
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    for row in rows.flatten() {
+                        map.insert(row.0, row.1);
+                    }
+                }
+            }
+        }
+        if !map.is_empty() {
+            info!(count = map.len(), "restored session_ids from database");
+        }
+        map
     }
 
     pub fn register_adapter(&mut self, adapter: Arc<dyn AgentAdapter>) {
@@ -119,10 +142,24 @@ impl SessionManager {
             .await
             .context("failed to spawn agent session")?;
 
+        let session_id = session.init().session_id.clone();
+
         // Store the claude session_id for resume
         {
             let mut sids = self.session_ids.lock().await;
-            sids.insert(thread_id.clone(), session.init().session_id.clone());
+            sids.insert(thread_id.clone(), session_id.clone());
+        }
+
+        // Persist thread to SQLite
+        {
+            let now = Utc::now().to_rfc3339();
+            if let Ok(conn) = self.db.lock() {
+                let _ = conn.execute(
+                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, started_at, created_at)
+                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?6)",
+                    rusqlite::params![thread_id, workspace.id, agent_name, prompt, session_id, now],
+                );
+            }
         }
 
         self.cost_tracker
@@ -152,7 +189,6 @@ impl SessionManager {
         let event_tx = self.event_tx.clone();
         let cost_tracker = self.cost_tracker.clone();
         let active_threads = self.active_threads.clone();
-        let session_ids = self.session_ids.clone();
         let budget_cap = workspace.budget_cap;
         let db = self.db.clone();
 
@@ -162,7 +198,6 @@ impl SessionManager {
                 event_tx,
                 cost_tracker,
                 active_threads,
-                session_ids,
                 budget_cap,
                 event_stream,
                 db,
@@ -200,9 +235,18 @@ impl SessionManager {
             .context("failed to resume agent session")?;
 
         // Update stored session_id in case it changed
+        let new_session_id = session.init().session_id.clone();
         {
             let mut sids = self.session_ids.lock().await;
-            sids.insert(thread_id.to_string(), session.init().session_id.clone());
+            sids.insert(thread_id.to_string(), new_session_id.clone());
+        }
+        {
+            if let Ok(conn) = self.db.lock() {
+                let _ = conn.execute(
+                    "UPDATE threads SET session_id = ?1, status = 'running' WHERE id = ?2",
+                    rusqlite::params![new_session_id, thread_id],
+                );
+            }
         }
 
         let active_thread = ActiveThread {
@@ -226,7 +270,6 @@ impl SessionManager {
         let event_tx = self.event_tx.clone();
         let cost_tracker = self.cost_tracker.clone();
         let active_threads = self.active_threads.clone();
-        let session_ids = self.session_ids.clone();
         let budget_cap = workspace.budget_cap;
         let db = self.db.clone();
 
@@ -236,7 +279,6 @@ impl SessionManager {
                 event_tx,
                 cost_tracker,
                 active_threads,
-                session_ids,
                 budget_cap,
                 event_stream,
                 db,
@@ -253,11 +295,12 @@ impl SessionManager {
         event_tx: mpsc::UnboundedSender<ThreadEvent>,
         cost_tracker: Arc<CostTracker>,
         active_threads: Arc<Mutex<HashMap<String, ActiveThread>>>,
-        session_ids: Arc<Mutex<HashMap<String, String>>>,
         budget_cap: Option<f64>,
         mut events_stream: std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send>>,
         db: Arc<std::sync::Mutex<Connection>>,
     ) {
+        let mut final_status = "completed";
+
         while let Some(event) = events_stream.next().await {
             cost_tracker.process_event(&thread_id, &event);
 
@@ -270,16 +313,31 @@ impl SessionManager {
                             let _ = thread.session.cancel().await;
                         }
                     }
+                    let error_event = AgentEvent::Error {
+                        message: format!("Budget cap of ${cap:.2} exceeded. Session terminated."),
+                        recoverable: false,
+                    };
+                    Self::persist_event(&db, &thread_id, &error_event);
                     let _ = event_tx.send(ThreadEvent {
                         thread_id: thread_id.clone(),
                         timestamp: Utc::now(),
-                        event: AgentEvent::Error {
-                            message: format!("Budget cap of ${cap:.2} exceeded. Session terminated."),
-                            recoverable: false,
-                        },
+                        event: error_event,
                         parent_tool_use_id: None,
                     });
+                    final_status = "error";
                     break;
+                }
+            }
+
+            Self::persist_event(&db, &thread_id, &event);
+
+            // Update thread status for gates
+            if matches!(&event, AgentEvent::ToolRequest { needs_approval: true, .. }) {
+                if let Ok(conn) = db.lock() {
+                    let _ = conn.execute(
+                        "UPDATE threads SET status = 'gate' WHERE id = ?1",
+                        rusqlite::params![thread_id],
+                    );
                 }
             }
 
@@ -294,8 +352,33 @@ impl SessionManager {
                 break;
             }
 
-            if matches!(event, AgentEvent::Complete { .. } | AgentEvent::Error { recoverable: false, .. }) {
-                break;
+            match &event {
+                AgentEvent::Complete { summary, total_cost_usd, duration_ms, .. } => {
+                    if let Ok(conn) = db.lock() {
+                        let now = Utc::now().to_rfc3339();
+                        let _ = conn.execute(
+                            "UPDATE threads SET status = 'completed', summary = ?1, cost_usd = ?2, duration_ms = ?3, completed_at = ?4 WHERE id = ?5",
+                            rusqlite::params![summary, total_cost_usd, *duration_ms as i64, now, thread_id],
+                        );
+                    }
+                    final_status = "completed";
+                    break;
+                }
+                AgentEvent::Error { recoverable: false, .. } => {
+                    final_status = "error";
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // Update final status if we exited without a Complete event
+        if final_status == "error" {
+            if let Ok(conn) = db.lock() {
+                let _ = conn.execute(
+                    "UPDATE threads SET status = 'error' WHERE id = ?1",
+                    rusqlite::params![thread_id],
+                );
             }
         }
 
@@ -309,12 +392,32 @@ impl SessionManager {
             }
         }
 
-        // Clean up — session is done, remove from active map and session_ids
+        // Clean up — session is done, remove from active map
+        // Keep session_ids so the thread can be resumed later
         let mut active = active_threads.lock().await;
         active.remove(&thread_id);
-        drop(active);
-        let mut sids = session_ids.lock().await;
-        sids.remove(&thread_id);
+    }
+
+    fn persist_event(db: &Arc<std::sync::Mutex<Connection>>, thread_id: &str, event: &AgentEvent) {
+        if let Ok(conn) = db.lock() {
+            let event_type = match event {
+                AgentEvent::Thinking { .. } => "thinking",
+                AgentEvent::Text { .. } => "text",
+                AgentEvent::ToolRequest { .. } => "tool_request",
+                AgentEvent::ToolResult { .. } => "tool_result",
+                AgentEvent::CostUpdate { .. } => "cost_update",
+                AgentEvent::Error { .. } => "error",
+                AgentEvent::SubAgentSpawned { .. } => "sub_agent_spawned",
+                AgentEvent::SubAgentComplete { .. } => "sub_agent_complete",
+                AgentEvent::Complete { .. } => "complete",
+            };
+            let data = serde_json::to_string(event).unwrap_or_default();
+            let now = Utc::now().to_rfc3339();
+            let _ = conn.execute(
+                "INSERT INTO events (thread_id, event_type, timestamp, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![thread_id, event_type, now, data],
+            );
+        }
     }
 
     pub async fn approve(&self, thread_id: &str, tool_use_id: &str) -> Result<()> {

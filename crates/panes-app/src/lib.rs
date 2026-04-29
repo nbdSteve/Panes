@@ -88,6 +88,8 @@ pub fn run() {
             commands::commit_changes,
             commands::revert_changes,
             commands::get_workspaces,
+            commands::list_threads,
+            commands::delete_thread,
             commands::extract_memories,
             commands::get_memories,
             commands::search_memories,

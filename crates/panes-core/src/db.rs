@@ -75,5 +75,20 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     )
     .context("failed to run database migrations")?;
 
+    // Incremental migrations
+    add_column_if_missing(conn, "threads", "session_id", "TEXT")?;
+
+    Ok(())
+}
+
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, col_type: &str) -> Result<()> {
+    let columns: Vec<String> = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !columns.iter().any(|c| c == column) {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {col_type}"))?;
+    }
     Ok(())
 }
