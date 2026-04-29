@@ -308,6 +308,14 @@ function renderEvents(
       segmentHasWrites = true;
     }
 
+    // Skip text event if the next event is complete with the same content
+    if (event.event_type === "text") {
+      const next = events[i + 1];
+      if (next?.event_type === "complete" && next.summary === event.text) {
+        return null;
+      }
+    }
+
     switch (event.event_type) {
       case "thinking":
         return (
