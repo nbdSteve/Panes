@@ -920,6 +920,88 @@ body {
   gap: 8px;
 }
 
+/* ─── Resolved gate ─── */
+
+.gate-resolved {
+  padding: 10px 14px;
+  margin: 2px 0;
+}
+
+.gate-resolved-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.gate-resolved-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.gate-resolved-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.gate-resolved-icon.approved {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.gate-resolved-icon.rejected {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.gate-resolved-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gate-resolved-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gate-approved .gate-resolved-label {
+  color: var(--success);
+}
+
+.gate-rejected .gate-resolved-label {
+  color: var(--error);
+}
+
+.gate-resolved-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.gate-resolved-tool {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+
+.gate-approved {
+  border-color: rgba(52, 211, 153, 0.15);
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(52, 211, 153, 0.02) 100%);
+}
+
+.gate-rejected {
+  border-color: rgba(248, 113, 113, 0.15);
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(248, 113, 113, 0.02) 100%);
+}
+
 .risk-badge {
   display: inline-flex;
   align-items: center;

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
+import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceInfo, ThreadInfo, AgentEvent } from "../App";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
@@ -107,7 +108,7 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
               </div>
             )}
 
-            {renderEvents(visibleEvents, runningCost)}
+            {renderEvents(visibleEvents, runningCost, thread.id)}
 
             {isRunning && visibleEvents.length > 0 && (
               <div className="step-card">
@@ -150,7 +151,7 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
 
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
 
-function renderEvents(events: AgentEvent[], runningCost: number) {
+function renderEvents(events: AgentEvent[], runningCost: number, threadId: string) {
   let segmentHasWrites = false;
 
   return events.map((event, i) => {
@@ -207,8 +208,12 @@ function renderEvents(events: AgentEvent[], runningCost: number) {
               toolUseId={event.id || ""}
               toolName={event.tool_name || ""}
               runningCost={runningCost}
-              onApprove={() => {}}
-              onReject={() => {}}
+              onApprove={() => {
+                invoke("approve_gate", { threadId, toolUseId: event.id || "" }).catch(console.error);
+              }}
+              onReject={() => {
+                invoke("reject_gate", { threadId, toolUseId: event.id || "", reason: "User rejected" }).catch(console.error);
+              }}
               onSteer={() => {}}
             />
           );

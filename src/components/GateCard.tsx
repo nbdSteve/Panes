@@ -1,3 +1,4 @@
+import { useState } from "react";
 import CostBadge from "./CostBadge";
 
 interface GateCardProps {
@@ -11,6 +12,8 @@ interface GateCardProps {
   onSteer: (feedback: string) => void;
 }
 
+type GateState = "pending" | "approved" | "rejected";
+
 export default function GateCard({
   description,
   riskLevel,
@@ -19,6 +22,60 @@ export default function GateCard({
   onApprove,
   onReject,
 }: GateCardProps) {
+  const [state, setState] = useState<GateState>("pending");
+
+  const handleApprove = () => {
+    setState("approved");
+    onApprove();
+  };
+
+  const handleReject = () => {
+    setState("rejected");
+    onReject();
+  };
+
+  if (state === "approved") {
+    return (
+      <div className="card gate-card gate-resolved gate-approved">
+        <div className="gate-resolved-row">
+          <span className="gate-resolved-icon approved">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </span>
+          <span className="gate-resolved-text">
+            <span className="gate-resolved-label">Approved</span>
+            <span className="gate-resolved-desc">
+              {toolName && <span className="gate-resolved-tool">{toolName}</span>}
+              {description}
+            </span>
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "rejected") {
+    return (
+      <div className="card gate-card gate-resolved gate-rejected">
+        <div className="gate-resolved-row">
+          <span className="gate-resolved-icon rejected">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </span>
+          <span className="gate-resolved-text">
+            <span className="gate-resolved-label">Rejected</span>
+            <span className="gate-resolved-desc">
+              {toolName && <span className="gate-resolved-tool">{toolName}</span>}
+              {description}
+            </span>
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="card gate-card">
       <div className="gate-label">
@@ -46,14 +103,11 @@ export default function GateCard({
       </div>
 
       <div className="gate-actions">
-        <button className="btn btn-success btn-sm" onClick={onApprove}>
+        <button className="btn btn-success btn-sm" onClick={handleApprove}>
           Approve
         </button>
-        <button className="btn btn-danger btn-sm" onClick={onReject}>
+        <button className="btn btn-danger btn-sm" onClick={handleReject}>
           Reject
-        </button>
-        <button className="btn btn-secondary btn-sm">
-          Steer...
         </button>
       </div>
     </div>
