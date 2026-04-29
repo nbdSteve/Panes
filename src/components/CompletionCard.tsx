@@ -33,13 +33,22 @@ export default function CompletionCard({
 
   return (
     <div className="card completion-card">
-      <div className="completion-label">
-        <span className="completion-label-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        </span>
-        <span className="completion-label-text">Complete</span>
+      <div className="completion-header">
+        <div className="completion-label">
+          <span className="completion-label-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </span>
+          <span className="completion-label-text">Complete</span>
+        </div>
+        <div className="completion-stats">
+          <span className="completion-stat" style={{ color: "var(--cost)" }}>{costStr}</span>
+          <span className="completion-stat-sep" />
+          <span className="completion-stat">{durationStr}</span>
+          <span className="completion-stat-sep" />
+          <span className="completion-stat">{turns} {turns === 1 ? "turn" : "turns"}</span>
+        </div>
       </div>
 
       {summary && (
@@ -54,21 +63,6 @@ export default function CompletionCard({
           >{summary}</Markdown>
         </div>
       )}
-
-      <div className="completion-stats">
-        <div className="completion-stat">
-          <span className="completion-stat-label">Cost</span>
-          <span className="completion-stat-value" style={{ color: "var(--cost)" }}>{costStr}</span>
-        </div>
-        <div className="completion-stat">
-          <span className="completion-stat-label">Duration</span>
-          <span className="completion-stat-value">{durationStr}</span>
-        </div>
-        <div className="completion-stat">
-          <span className="completion-stat-label">Turns</span>
-          <span className="completion-stat-value">{turns}</span>
-        </div>
-      </div>
 
       {hasFileChanges && completionAction && (
         <div className="completion-actions">

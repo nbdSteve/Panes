@@ -1095,11 +1095,17 @@ body {
   margin: 4px 0;
 }
 
+.completion-card .completion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
 .completion-card .completion-label {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
 }
 
 .completion-card .completion-label-icon {
@@ -1135,33 +1141,23 @@ body {
 
 .completion-card .completion-stats {
   display: flex;
-  gap: 16px;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
-}
-
-.completion-card .completion-stats:not(:last-child) {
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 14px;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .completion-card .completion-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  white-space: nowrap;
 }
 
-.completion-card .completion-stat-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.completion-card .completion-stat-value {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
+.completion-card .completion-stat-sep {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.5;
+  flex-shrink: 0;
 }
 
 .completion-card .completion-actions {
