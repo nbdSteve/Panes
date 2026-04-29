@@ -90,34 +90,29 @@ pub async fn list_workspaces(
 }
 
 #[tauri::command]
-pub async fn get_workspaces(
-    db: tauri::State<'_, DbState>,
-) -> Result<Vec<WorkspaceInfo>, String> {
-    list_workspaces(db).await
-}
-
-#[tauri::command]
 pub async fn remove_workspace(
     db: tauri::State<'_, DbState>,
     workspace_id: String,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
         "DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)",
         rusqlite::params![workspace_id],
     ).map_err(|e| e.to_string())?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM costs WHERE workspace_id = ?1",
         rusqlite::params![workspace_id],
     ).map_err(|e| e.to_string())?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM threads WHERE workspace_id = ?1",
         rusqlite::params![workspace_id],
     ).map_err(|e| e.to_string())?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM workspaces WHERE id = ?1",
         rusqlite::params![workspace_id],
     ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -192,18 +187,20 @@ pub async fn delete_thread(
     thread_id: String,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
         "DELETE FROM events WHERE thread_id = ?1",
         rusqlite::params![thread_id],
     ).map_err(|e| e.to_string())?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM costs WHERE thread_id = ?1",
         rusqlite::params![thread_id],
     ).map_err(|e| e.to_string())?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM threads WHERE id = ?1",
         rusqlite::params![thread_id],
     ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -327,16 +324,22 @@ pub async fn commit_changes(
 
 #[tauri::command]
 pub async fn revert_changes(
+    db: tauri::State<'_, DbState>,
     workspace_path: String,
+    thread_id: String,
 ) -> Result<(), String> {
+    let snapshot_hash: String = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT snapshot_ref FROM threads WHERE id = ?1",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("no snapshot for thread: {e}"))?
+    };
     let expanded = expand_tilde(&workspace_path);
     let path = PathBuf::from(&expanded);
-    let dummy_snapshot = git::SnapshotRef {
-        commit_hash: String::new(),
-        had_dirty_changes: false,
-        stash_ref: None,
-    };
-    git::revert(&path, &dummy_snapshot)
+    git::revert(&path, &git::SnapshotRef { commit_hash: snapshot_hash })
         .await
         .map_err(|e| e.to_string())
 }

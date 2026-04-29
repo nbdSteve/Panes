@@ -57,11 +57,14 @@ pub fn run() {
     if test_mode {
         register_fake_adapters(&mut session_manager);
     } else {
-        let adapter = ClaudeAdapter::with_cli_path("/Users/goodhill/.local/bin/claude")
-            .env("CLAUDE_CODE_USE_BEDROCK", "1")
-            .env("AWS_PROFILE", "bedrock-beta")
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", std::env::var("HOME").unwrap_or_default());
+        let cli_path = std::env::var("PANES_CLAUDE_PATH")
+            .unwrap_or_else(|_| "claude".to_string());
+        let mut adapter = ClaudeAdapter::with_cli_path(cli_path);
+        for key in ["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE", "PATH", "HOME"] {
+            if let Ok(val) = std::env::var(key) {
+                adapter = adapter.env(key, val);
+            }
+        }
         session_manager.register_adapter(Arc::new(adapter));
     }
 
@@ -87,7 +90,6 @@ pub fn run() {
             commands::cancel_thread,
             commands::commit_changes,
             commands::revert_changes,
-            commands::get_workspaces,
             commands::list_threads,
             commands::delete_thread,
             commands::extract_memories,

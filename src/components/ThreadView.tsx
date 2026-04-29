@@ -208,7 +208,7 @@ export default function ThreadView({ workspace, thread, onStartThread, onComplet
               className="btn btn-danger btn-sm"
               onClick={async () => {
                 try {
-                  await invoke("revert_changes", { workspacePath: workspace.path });
+                  await invoke("revert_changes", { workspacePath: workspace.path, threadId: revertConfirm });
                   onCompletionAction(revertConfirm, "reverted");
                 } catch (e) {
                   console.error("Revert failed:", e);

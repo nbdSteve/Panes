@@ -1,11 +1,14 @@
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
 use panes_events::{AgentEvent, RiskLevel, SessionContext, SessionInit};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::{AgentAdapter, AgentSession};
@@ -96,12 +99,16 @@ impl AgentAdapter for FakeAdapter {
             ],
         };
 
+        let has_gate = matches!(&self.scenario, FakeScenario::GatedAction { .. });
         let events = build_events(&self.scenario);
 
         Ok(Box::new(FakeSession {
             init_data: init,
             events: tokio::sync::Mutex::new(Some(events)),
             delay_ms: self.delay_ms,
+            gate_notify: Arc::new(Notify::new()),
+            gate_rejected: Arc::new(AtomicBool::new(false)),
+            has_gate,
         }))
     }
 
@@ -123,6 +130,9 @@ struct FakeSession {
     init_data: SessionInit,
     events: tokio::sync::Mutex<Option<Vec<AgentEvent>>>,
     delay_ms: u64,
+    gate_notify: Arc<Notify>,
+    gate_rejected: Arc<AtomicBool>,
+    has_gate: bool,
 }
 
 #[async_trait]
@@ -134,24 +144,48 @@ impl AgentSession for FakeSession {
     fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>> {
         let events = self.events.get_mut().take().unwrap_or_default();
         let delay = self.delay_ms;
+        let has_gate = self.has_gate;
+        let gate_notify = self.gate_notify.clone();
+        let gate_rejected = self.gate_rejected.clone();
 
         Box::pin(async_stream::stream! {
+            let mut waiting_for_gate = false;
             for event in events {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
+
+                if waiting_for_gate {
+                    // Wait for approve/reject signal before yielding post-gate events
+                    gate_notify.notified().await;
+                    if gate_rejected.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    waiting_for_gate = false;
+                }
+
+                let is_gate = matches!(&event, AgentEvent::ToolRequest { needs_approval: true, .. });
                 yield event;
+
+                if is_gate && has_gate {
+                    waiting_for_gate = true;
+                }
             }
         })
     }
 
     async fn approve(&self, _tool_use_id: &str) -> Result<()> {
+        self.gate_notify.notify_one();
         Ok(())
     }
 
     async fn reject(&self, _tool_use_id: &str, _reason: &str) -> Result<()> {
+        self.gate_rejected.store(true, Ordering::Relaxed);
+        self.gate_notify.notify_one();
         Ok(())
     }
 
     async fn cancel(&self) -> Result<()> {
+        self.gate_rejected.store(true, Ordering::Relaxed);
+        self.gate_notify.notify_one();
         Ok(())
     }
 }
@@ -393,7 +427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fake_gated_action() {
+    async fn test_fake_gated_action_with_approve() {
         let adapter = FakeAdapter::new(FakeScenario::GatedAction {
             tool_name: "Bash".to_string(),
             description: "rm -rf /tmp/test".to_string(),
@@ -405,17 +439,55 @@ mod tests {
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
 
-        let mut events: Vec<AgentEvent> = vec![];
         let mut stream = session.events();
+        let mut events: Vec<AgentEvent> = vec![];
+
+        // Collect events, approving the gate when we hit it
         while let Some(ev) = stream.next().await {
+            let is_gate = matches!(&ev, AgentEvent::ToolRequest { needs_approval: true, .. });
+            if let AgentEvent::ToolRequest { ref risk_level, needs_approval: true, .. } = ev {
+                assert_eq!(*risk_level, RiskLevel::Critical);
+            }
             events.push(ev);
+            if is_gate {
+                session.approve("gate_0").await.unwrap();
+            }
         }
 
-        let gate = events.iter().find(|e| matches!(e, AgentEvent::ToolRequest { needs_approval: true, .. }));
-        assert!(gate.is_some());
-        if let Some(AgentEvent::ToolRequest { risk_level, .. }) = gate {
-            assert_eq!(*risk_level, RiskLevel::Critical);
+        // Should have full sequence: Thinking, ToolRequest, ToolResult, CostUpdate, Text, Complete
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolRequest { needs_approval: true, .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolResult { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Complete { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_fake_gated_action_with_reject() {
+        let adapter = FakeAdapter::new(FakeScenario::GatedAction {
+            tool_name: "Bash".to_string(),
+            description: "rm -rf /tmp/test".to_string(),
+            risk_level: RiskLevel::Critical,
+            response: "Done.".to_string(),
+        }).with_delay(0);
+
+        let workspace = Path::new("/tmp");
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+
+        let mut stream = session.events();
+        let mut events: Vec<AgentEvent> = vec![];
+
+        while let Some(ev) = stream.next().await {
+            let is_gate = matches!(&ev, AgentEvent::ToolRequest { needs_approval: true, .. });
+            events.push(ev);
+            if is_gate {
+                session.reject("gate_0", "too dangerous").await.unwrap();
+            }
         }
+
+        // Should have: Thinking, ToolRequest — then stream ends (no ToolResult, no Complete)
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolRequest { needs_approval: true, .. })));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::ToolResult { .. })));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Complete { .. })));
     }
 
     #[tokio::test]

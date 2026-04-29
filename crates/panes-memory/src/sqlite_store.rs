@@ -104,9 +104,13 @@ impl MemoryStore for SqliteMemoryStore {
         workspace_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Memory>> {
+        let escaped = escape_fts5_query(query);
+        if escaped.is_empty() {
+            return Ok(vec![]);
+        }
+
         let conn = self.conn.lock().unwrap();
 
-        // FTS5 search with workspace filter
         let mut stmt = conn.prepare(
             "SELECT m.id, m.workspace_id, m.memory_type, m.content, m.source_thread_id, m.created_at, m.edited_at, m.pinned
              FROM memories m
@@ -117,7 +121,7 @@ impl MemoryStore for SqliteMemoryStore {
              LIMIT ?3",
         )?;
 
-        let rows = stmt.query_map(rusqlite::params![query, workspace_id, limit], |row| {
+        let rows = stmt.query_map(rusqlite::params![escaped, workspace_id, limit], |row| {
             Ok(Memory {
                 id: row.get(0)?,
                 workspace_id: row.get(1)?,
@@ -248,6 +252,14 @@ impl BriefingStore for SqliteMemoryStore {
         )?;
         Ok(())
     }
+}
+
+fn escape_fts5_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn parse_memory_type(s: &str) -> MemoryType {
@@ -413,6 +425,48 @@ mod tests {
 
         assert_eq!(store.get_briefing("ws1").await.unwrap().unwrap().content, "briefing 1");
         assert_eq!(store.get_briefing("ws2").await.unwrap().unwrap().content, "briefing 2");
+    }
+
+    #[tokio::test]
+    async fn test_search_special_characters() {
+        let store = make_store();
+        store.add("Use pnpm for packages", Some("ws1"), "t1").await.unwrap();
+
+        // These should not panic or error
+        let r = store.search("*", Some("ws1"), 10).await.unwrap();
+        assert!(r.is_empty() || !r.is_empty()); // just no error
+        let r = store.search("\"quoted\"", Some("ws1"), 10).await.unwrap();
+        assert!(r.is_empty() || !r.is_empty());
+        let r = store.search("(parens)", Some("ws1"), 10).await.unwrap();
+        assert!(r.is_empty() || !r.is_empty());
+        let r = store.search("AND OR NOT", Some("ws1"), 10).await.unwrap();
+        assert!(r.is_empty() || !r.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_empty_query() {
+        let store = make_store();
+        store.add("something", Some("ws1"), "t1").await.unwrap();
+        let r = store.search("", Some("ws1"), 10).await.unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_with_escaping_still_finds_results() {
+        let store = make_store();
+        store.add("Use pnpm for package management", Some("ws1"), "t1").await.unwrap();
+        let r = store.search("pnpm", Some("ws1"), 10).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].content.contains("pnpm"));
+    }
+
+    #[test]
+    fn test_escape_fts5_query() {
+        assert_eq!(escape_fts5_query("hello world"), "\"hello\" \"world\"");
+        assert_eq!(escape_fts5_query("say \"hi\""), "\"say\" \"\"\"hi\"\"\"");
+        assert_eq!(escape_fts5_query(""), "");
+        assert_eq!(escape_fts5_query("  "), "");
+        assert_eq!(escape_fts5_query("a*b"), "\"a*b\"");
     }
 
     #[tokio::test]

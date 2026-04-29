@@ -370,7 +370,6 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     }
 
     case "list_workspaces":
-    case "get_workspaces":
       return [...mockWorkspaces];
 
     case "remove_workspace": {

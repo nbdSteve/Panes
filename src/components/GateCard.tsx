@@ -31,7 +31,7 @@ export default function GateCard({
             </svg>
           </span>
           <span className="gate-resolved-text">
-            <span className="gate-resolved-label">Approved</span>
+            <span className="gate-resolved-label">Continued</span>
             <span className="gate-resolved-desc">
               {toolName && <span className="gate-resolved-tool">{toolName}</span>}
               {description}
@@ -52,7 +52,7 @@ export default function GateCard({
             </svg>
           </span>
           <span className="gate-resolved-text">
-            <span className="gate-resolved-label">Rejected</span>
+            <span className="gate-resolved-label">Aborted</span>
             <span className="gate-resolved-desc">
               {toolName && <span className="gate-resolved-tool">{toolName}</span>}
               {description}
@@ -91,10 +91,10 @@ export default function GateCard({
 
       <div className="gate-actions">
         <button className="btn btn-success btn-sm" onClick={onApprove}>
-          Approve
+          Continue
         </button>
         <button className="btn btn-danger btn-sm" onClick={onReject}>
-          Reject
+          Abort
         </button>
       </div>
     </div>

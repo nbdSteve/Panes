@@ -10,9 +10,21 @@ pub fn initialize(db_path: &str) -> Result<Connection> {
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
     run_migrations(&conn)?;
+    recover_stale_threads(&conn)?;
 
     info!(path = db_path, "database initialized");
     Ok(conn)
+}
+
+fn recover_stale_threads(conn: &Connection) -> Result<()> {
+    let count = conn.execute(
+        "UPDATE threads SET status = 'interrupted' WHERE status IN ('running', 'gate')",
+        [],
+    )?;
+    if count > 0 {
+        info!(count, "recovered stale threads from previous crash");
+    }
+    Ok(())
 }
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -91,4 +103,89 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, col_type:
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {col_type}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_db() -> Connection {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run_migrations(&conn).unwrap();
+        conn
+    }
+
+    fn insert_workspace(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, '2024-01-01')",
+            rusqlite::params![id, format!("/tmp/{id}"), id],
+        ).unwrap();
+    }
+
+    fn insert_thread(conn: &Connection, id: &str, workspace_id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at) VALUES (?1, ?2, 'claude-code', ?3, 'test', '2024-01-01')",
+            rusqlite::params![id, workspace_id, status],
+        ).unwrap();
+    }
+
+    fn get_status(conn: &Connection, thread_id: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM threads WHERE id = ?1",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn test_recover_stale_running_threads() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws1");
+        insert_thread(&conn, "t1", "ws1", "running");
+        insert_thread(&conn, "t2", "ws1", "gate");
+
+        recover_stale_threads(&conn).unwrap();
+
+        assert_eq!(get_status(&conn, "t1"), "interrupted");
+        assert_eq!(get_status(&conn, "t2"), "interrupted");
+    }
+
+    #[test]
+    fn test_recover_leaves_terminal_states_alone() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws1");
+        insert_thread(&conn, "t1", "ws1", "completed");
+        insert_thread(&conn, "t2", "ws1", "error");
+        insert_thread(&conn, "t3", "ws1", "interrupted");
+
+        recover_stale_threads(&conn).unwrap();
+
+        assert_eq!(get_status(&conn, "t1"), "completed");
+        assert_eq!(get_status(&conn, "t2"), "error");
+        assert_eq!(get_status(&conn, "t3"), "interrupted");
+    }
+
+    #[test]
+    fn test_initialize_creates_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = initialize(db_path.to_str().unwrap()).unwrap();
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='threads'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_add_column_if_missing_is_idempotent() {
+        let conn = setup_db();
+        // session_id already added by migrations
+        add_column_if_missing(&conn, "threads", "session_id", "TEXT").unwrap();
+        // Should not error on second call
+        add_column_if_missing(&conn, "threads", "session_id", "TEXT").unwrap();
+    }
 }

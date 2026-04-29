@@ -7,70 +7,34 @@ use tracing::info;
 #[derive(Debug, Clone)]
 pub struct SnapshotRef {
     pub commit_hash: String,
-    pub had_dirty_changes: bool,
-    pub stash_ref: Option<String>,
 }
 
 pub async fn is_git_repo(workspace_path: &Path) -> bool {
     workspace_path.join(".git").exists()
 }
 
-pub async fn snapshot(workspace_path: &Path, thread_id: &str) -> Result<SnapshotRef> {
+pub async fn snapshot(workspace_path: &Path) -> Result<SnapshotRef> {
     let commit_hash = run_git(workspace_path, &["rev-parse", "HEAD"])
         .await
         .context("failed to get HEAD commit hash")?;
 
-    // Check if working tree is dirty
-    let status = run_git(workspace_path, &["status", "--porcelain"]).await?;
-    let had_dirty_changes = !status.trim().is_empty();
-
-    let stash_ref = if had_dirty_changes {
-        let stash_msg = format!("panes:thread:{thread_id}:pre");
-        run_git(
-            workspace_path,
-            &["stash", "push", "-m", &stash_msg, "--include-untracked"],
-        )
-        .await
-        .context("failed to stash dirty changes")?;
-
-        // Get the stash ref
-        let stash_list = run_git(workspace_path, &["stash", "list", "--format=%H", "-1"]).await?;
-        let stash_hash = stash_list.trim().to_string();
-
-        // Pop the stash to restore working state (we just wanted to record the ref)
-        run_git(workspace_path, &["stash", "pop"]).await.ok();
-
-        info!(
-            thread_id,
-            stash = %stash_hash,
-            "stashed dirty changes before thread"
-        );
-        Some(stash_hash)
-    } else {
-        None
-    };
-
-    info!(
-        thread_id,
-        commit = %commit_hash.trim(),
-        dirty = had_dirty_changes,
-        "created pre-thread snapshot"
-    );
+    info!(commit = %commit_hash.trim(), "created pre-thread snapshot");
 
     Ok(SnapshotRef {
         commit_hash: commit_hash.trim().to_string(),
-        had_dirty_changes,
-        stash_ref,
     })
 }
 
-pub async fn revert(workspace_path: &Path, _snapshot: &SnapshotRef) -> Result<()> {
-    info!(workspace = %workspace_path.display(), "reverting all changes");
+pub async fn revert(workspace_path: &Path, snapshot: &SnapshotRef) -> Result<()> {
+    info!(
+        workspace = %workspace_path.display(),
+        commit = %snapshot.commit_hash,
+        "reverting to snapshot"
+    );
 
-    // Discard all changes since the snapshot
-    run_git(workspace_path, &["checkout", "."])
+    run_git(workspace_path, &["reset", "--hard", &snapshot.commit_hash])
         .await
-        .context("failed to checkout clean state")?;
+        .context("failed to reset to snapshot")?;
 
     run_git(workspace_path, &["clean", "-fd"])
         .await
@@ -117,4 +81,98 @@ async fn run_git(workspace_path: &Path, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    async fn make_git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init"]).await.unwrap();
+        run_git(dir.path(), &["config", "user.email", "test@test.com"]).await.unwrap();
+        run_git(dir.path(), &["config", "user.name", "Test"]).await.unwrap();
+
+        fs::write(dir.path().join("initial.txt"), "hello").unwrap();
+        run_git(dir.path(), &["add", "-A"]).await.unwrap();
+        run_git(dir.path(), &["commit", "-m", "initial"]).await.unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_records_head() {
+        let dir = make_git_repo().await;
+        let head = run_git(dir.path(), &["rev-parse", "HEAD"]).await.unwrap();
+        let snap = snapshot(dir.path()).await.unwrap();
+        assert_eq!(snap.commit_hash, head.trim());
+    }
+
+    #[tokio::test]
+    async fn test_revert_restores_to_snapshot() {
+        let dir = make_git_repo().await;
+        let snap = snapshot(dir.path()).await.unwrap();
+
+        // Agent makes changes and commits
+        fs::write(dir.path().join("new_file.txt"), "agent wrote this").unwrap();
+        commit(dir.path(), "agent commit").await.unwrap();
+
+        assert!(dir.path().join("new_file.txt").exists());
+
+        // Revert to snapshot
+        revert(dir.path(), &snap).await.unwrap();
+
+        assert!(!dir.path().join("new_file.txt").exists());
+        let head = run_git(dir.path(), &["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(head.trim(), snap.commit_hash);
+    }
+
+    #[tokio::test]
+    async fn test_revert_cleans_untracked_files() {
+        let dir = make_git_repo().await;
+        let snap = snapshot(dir.path()).await.unwrap();
+
+        // Create untracked file (not committed)
+        fs::write(dir.path().join("untracked.txt"), "junk").unwrap();
+
+        revert(dir.path(), &snap).await.unwrap();
+
+        assert!(!dir.path().join("untracked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_revert_noop_when_no_changes() {
+        let dir = make_git_repo().await;
+        let snap = snapshot(dir.path()).await.unwrap();
+
+        // No changes made — revert should be a no-op
+        revert(dir.path(), &snap).await.unwrap();
+
+        let head = run_git(dir.path(), &["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(head.trim(), snap.commit_hash);
+    }
+
+    #[tokio::test]
+    async fn test_is_git_repo() {
+        let dir = make_git_repo().await;
+        assert!(is_git_repo(dir.path()).await);
+
+        let non_git = tempfile::tempdir().unwrap();
+        assert!(!is_git_repo(non_git.path()).await);
+    }
+
+    #[tokio::test]
+    async fn test_commit_and_get_changed_files() {
+        let dir = make_git_repo().await;
+
+        fs::write(dir.path().join("test.txt"), "content").unwrap();
+        let changed = get_changed_files(dir.path()).await.unwrap();
+        assert!(!changed.is_empty());
+
+        let hash = commit(dir.path(), "add test file").await.unwrap();
+        assert!(!hash.is_empty());
+
+        let changed_after = get_changed_files(dir.path()).await.unwrap();
+        assert!(changed_after.is_empty());
+    }
 }

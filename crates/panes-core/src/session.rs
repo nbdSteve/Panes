@@ -9,11 +9,17 @@ use panes_adapters::{AgentAdapter, AgentSession};
 use panes_cost::{self, CostTracker};
 use panes_events::{AgentEvent, SessionContext, ThreadEvent};
 use rusqlite::Connection;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::git;
+
+#[derive(Debug)]
+pub enum GateDecision {
+    Continue,
+    Abort,
+}
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -47,11 +53,14 @@ impl std::fmt::Display for ThreadStatus {
     }
 }
 
+type GateSender = Arc<Mutex<Option<oneshot::Sender<GateDecision>>>>;
+
 struct ActiveThread {
     #[allow(dead_code)]
     workspace_id: String,
     session: Box<dyn AgentSession>,
     snapshot: Option<git::SnapshotRef>,
+    gate_tx: GateSender,
 }
 
 pub struct SessionManager {
@@ -121,8 +130,7 @@ impl SessionManager {
 
         // Git snapshot
         let snapshot = if git::is_git_repo(&workspace.path).await {
-            let thread_id_preview = "pending";
-            match git::snapshot(&workspace.path, thread_id_preview).await {
+            match git::snapshot(&workspace.path).await {
                 Ok(s) => Some(s),
                 Err(e) => {
                     warn!(error = %e, "failed to create git snapshot — continuing without rollback");
@@ -153,11 +161,12 @@ impl SessionManager {
         // Persist thread to SQLite
         {
             let now = Utc::now().to_rfc3339();
+            let snapshot_hash = snapshot.as_ref().map(|s| s.commit_hash.clone());
             if let Ok(conn) = self.db.lock() {
                 let _ = conn.execute(
-                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, started_at, created_at)
-                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?6)",
-                    rusqlite::params![thread_id, workspace.id, agent_name, prompt, session_id, now],
+                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, started_at, created_at)
+                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?7)",
+                    rusqlite::params![thread_id, workspace.id, agent_name, prompt, session_id, snapshot_hash, now],
                 );
             }
         }
@@ -165,10 +174,13 @@ impl SessionManager {
         self.cost_tracker
             .start_tracking(&thread_id, &workspace.id);
 
+        let gate_tx: GateSender = Arc::new(Mutex::new(None));
+
         let active_thread = ActiveThread {
             workspace_id: workspace.id.clone(),
             session,
             snapshot,
+            gate_tx: gate_tx.clone(),
         };
 
         {
@@ -176,9 +188,6 @@ impl SessionManager {
             active.insert(thread_id.clone(), active_thread);
         }
 
-        // Take the event stream out of the session while it's in the map.
-        // This lets consume_events own the stream without removing the session,
-        // so approve/reject/cancel can still find it.
         let event_stream = {
             let mut active = self.active_threads.lock().await;
             let thread = active.get_mut(&thread_id).expect("just inserted");
@@ -201,6 +210,7 @@ impl SessionManager {
                 budget_cap,
                 event_stream,
                 db,
+                gate_tx,
             )
             .await;
         });
@@ -249,10 +259,13 @@ impl SessionManager {
             }
         }
 
+        let gate_tx: GateSender = Arc::new(Mutex::new(None));
+
         let active_thread = ActiveThread {
             workspace_id: workspace.id.clone(),
             session,
             snapshot: None,
+            gate_tx: gate_tx.clone(),
         };
 
         {
@@ -282,6 +295,7 @@ impl SessionManager {
                 budget_cap,
                 event_stream,
                 db,
+                gate_tx,
             )
             .await;
         });
@@ -298,6 +312,7 @@ impl SessionManager {
         budget_cap: Option<f64>,
         mut events_stream: std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send>>,
         db: Arc<std::sync::Mutex<Connection>>,
+        gate_tx: GateSender,
     ) {
         let mut final_status = "completed";
 
@@ -331,8 +346,9 @@ impl SessionManager {
 
             Self::persist_event(&db, &thread_id, &event);
 
-            // Update thread status for gates
-            if matches!(&event, AgentEvent::ToolRequest { needs_approval: true, .. }) {
+            let is_gate = matches!(&event, AgentEvent::ToolRequest { needs_approval: true, .. });
+
+            if is_gate {
                 if let Ok(conn) = db.lock() {
                     let _ = conn.execute(
                         "UPDATE threads SET status = 'gate' WHERE id = ?1",
@@ -350,6 +366,40 @@ impl SessionManager {
 
             if event_tx.send(thread_event).is_err() {
                 break;
+            }
+
+            // Gate pausing: wait for user decision before consuming more events
+            if is_gate {
+                let (tx, rx) = oneshot::channel();
+                {
+                    let mut slot = gate_tx.lock().await;
+                    *slot = Some(tx);
+                }
+
+                info!(thread_id = %thread_id, "gate paused — waiting for user decision");
+
+                match rx.await {
+                    Ok(GateDecision::Continue) => {
+                        info!(thread_id = %thread_id, "gate continued — resuming event stream");
+                        if let Ok(conn) = db.lock() {
+                            let _ = conn.execute(
+                                "UPDATE threads SET status = 'running' WHERE id = ?1",
+                                rusqlite::params![thread_id],
+                            );
+                        }
+                    }
+                    Ok(GateDecision::Abort) | Err(_) => {
+                        info!(thread_id = %thread_id, "gate aborted — killing session");
+                        {
+                            let active = active_threads.lock().await;
+                            if let Some(thread) = active.get(&thread_id) {
+                                let _ = thread.session.cancel().await;
+                            }
+                        }
+                        final_status = "interrupted";
+                        break;
+                    }
+                }
             }
 
             match &event {
@@ -372,17 +422,15 @@ impl SessionManager {
             }
         }
 
-        // Update final status if we exited without a Complete event
-        if final_status == "error" {
+        if final_status == "error" || final_status == "interrupted" {
             if let Ok(conn) = db.lock() {
                 let _ = conn.execute(
-                    "UPDATE threads SET status = 'error' WHERE id = ?1",
-                    rusqlite::params![thread_id],
+                    "UPDATE threads SET status = ?1 WHERE id = ?2",
+                    rusqlite::params![final_status, thread_id],
                 );
             }
         }
 
-        // Finalize cost and persist to SQLite
         if let Some(cost) = cost_tracker.finalize(&thread_id) {
             info!(thread_id = %thread_id, cost = cost.total_usd, "thread completed — persisting cost");
             if let Ok(conn) = db.lock() {
@@ -392,8 +440,6 @@ impl SessionManager {
             }
         }
 
-        // Clean up — session is done, remove from active map
-        // Keep session_ids so the thread can be resumed later
         let mut active = active_threads.lock().await;
         active.remove(&thread_id);
     }
@@ -420,20 +466,28 @@ impl SessionManager {
         }
     }
 
-    pub async fn approve(&self, thread_id: &str, tool_use_id: &str) -> Result<()> {
+    pub async fn approve(&self, thread_id: &str, _tool_use_id: &str) -> Result<()> {
         let active = self.active_threads.lock().await;
         let thread = active
             .get(thread_id)
             .context("thread not found")?;
-        thread.session.approve(tool_use_id).await
+        let mut slot = thread.gate_tx.lock().await;
+        if let Some(tx) = slot.take() {
+            let _ = tx.send(GateDecision::Continue);
+        }
+        Ok(())
     }
 
-    pub async fn reject(&self, thread_id: &str, tool_use_id: &str, reason: &str) -> Result<()> {
+    pub async fn reject(&self, thread_id: &str, _tool_use_id: &str, _reason: &str) -> Result<()> {
         let active = self.active_threads.lock().await;
         let thread = active
             .get(thread_id)
             .context("thread not found")?;
-        thread.session.reject(tool_use_id, reason).await
+        let mut slot = thread.gate_tx.lock().await;
+        if let Some(tx) = slot.take() {
+            let _ = tx.send(GateDecision::Abort);
+        }
+        Ok(())
     }
 
     pub async fn cancel(&self, thread_id: &str) -> Result<()> {
@@ -449,10 +503,6 @@ impl SessionManager {
         active
             .get(thread_id)
             .and_then(|t| t.snapshot.clone())
-    }
-
-    pub async fn get_workspace_path(&self, _thread_id: &str) -> Option<PathBuf> {
-        None
     }
 
     pub async fn remove_thread(&self, thread_id: &str) {
