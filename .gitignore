@@ -4,3 +4,8 @@ dist/
 *.pyc
 __pycache__/
 .DS_Store
+test-results/
+crates/panes-app/icons/Square*.png
+crates/panes-app/icons/StoreLogo.png
+crates/panes-app/icons/android/
+crates/panes-app/icons/ios/
