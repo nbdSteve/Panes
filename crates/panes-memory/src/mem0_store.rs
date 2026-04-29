@@ -45,8 +45,13 @@ struct AddMetadata {
 #[derive(Serialize)]
 struct SearchRequest {
     query: String,
-    user_id: String,
+    filters: SearchFilters,
     limit: usize,
+}
+
+#[derive(Serialize)]
+struct SearchFilters {
+    user_id: String,
 }
 
 #[derive(Deserialize)]
@@ -170,7 +175,7 @@ impl MemoryStore for Mem0Store {
 
         let req = SearchRequest {
             query: query.to_string(),
-            user_id,
+            filters: SearchFilters { user_id },
             limit,
         };
 
@@ -209,7 +214,7 @@ impl MemoryStore for Mem0Store {
         let resp = self
             .client
             .get(format!("{}/v1/memories/", self.base_url))
-            .query(&[("user_id", &user_id)])
+            .query(&[("user_id", user_id.as_str())])
             .send()
             .await
             .context("failed to call Mem0 /memories")?;
