@@ -398,3 +398,96 @@ pub async fn delete_briefing(
         .await
         .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use panes_memory::types::{Memory, MemoryType};
+
+    #[test]
+    fn test_expand_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~/projects"), format!("{home}/projects"));
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+        assert_eq!(expand_tilde("~user/not-home"), "~user/not-home");
+    }
+
+    #[test]
+    fn test_memory_info_from_memory() {
+        let now = Utc::now();
+        let memory = Memory {
+            id: "mem-1".to_string(),
+            workspace_id: Some("ws-1".to_string()),
+            memory_type: MemoryType::Decision,
+            content: "Use pnpm".to_string(),
+            source_thread_id: "t-1".to_string(),
+            created_at: now,
+            edited_at: None,
+            pinned: true,
+        };
+
+        let info = MemoryInfo::from(memory);
+        assert_eq!(info.id, "mem-1");
+        assert_eq!(info.workspace_id, Some("ws-1".to_string()));
+        assert_eq!(info.memory_type, "decision");
+        assert_eq!(info.content, "Use pnpm");
+        assert_eq!(info.source_thread_id, "t-1");
+        assert!(info.pinned);
+    }
+
+    #[test]
+    fn test_memory_info_preserves_all_types() {
+        let make = |mt: MemoryType| {
+            Memory {
+                id: "x".to_string(),
+                workspace_id: None,
+                memory_type: mt,
+                content: "c".to_string(),
+                source_thread_id: "t".to_string(),
+                created_at: Utc::now(),
+                edited_at: None,
+                pinned: false,
+            }
+        };
+
+        assert_eq!(MemoryInfo::from(make(MemoryType::Decision)).memory_type, "decision");
+        assert_eq!(MemoryInfo::from(make(MemoryType::Preference)).memory_type, "preference");
+        assert_eq!(MemoryInfo::from(make(MemoryType::Constraint)).memory_type, "constraint");
+        assert_eq!(MemoryInfo::from(make(MemoryType::Pattern)).memory_type, "pattern");
+    }
+
+    #[test]
+    fn test_memory_info_camel_case_serialization() {
+        let info = MemoryInfo {
+            id: "1".to_string(),
+            workspace_id: Some("ws".to_string()),
+            memory_type: "pattern".to_string(),
+            content: "test".to_string(),
+            source_thread_id: "t1".to_string(),
+            pinned: false,
+            created_at: "2024-01-01T00:00:00+00:00".to_string(),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"workspaceId\""));
+        assert!(json.contains("\"memoryType\""));
+        assert!(json.contains("\"sourceThreadId\""));
+        assert!(json.contains("\"createdAt\""));
+        assert!(!json.contains("\"workspace_id\""));
+    }
+
+    #[test]
+    fn test_briefing_info_camel_case_serialization() {
+        let info = BriefingInfo {
+            workspace_id: "ws".to_string(),
+            content: "Always use TS".to_string(),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"workspaceId\""));
+        assert!(!json.contains("\"workspace_id\""));
+    }
+}
