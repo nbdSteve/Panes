@@ -1,0 +1,20 @@
+[package]
+name = "panes-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+panes-events = { workspace = true }
+panes-adapters = { workspace = true }
+panes-memory = { workspace = true }
+panes-cost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+rusqlite = { workspace = true }
+futures = { workspace = true }

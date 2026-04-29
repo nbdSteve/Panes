@@ -1,0 +1,27 @@
+[package]
+name = "panes-app"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+panes-events = { workspace = true }
+panes-adapters = { workspace = true }
+panes-memory = { workspace = true }
+panes-cost = { workspace = true }
+panes-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tauri = { version = "2", features = [] }
+
+[lib]
+name = "panes_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]

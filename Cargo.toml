@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/panes-events",
+    "crates/panes-adapters",
+    "crates/panes-memory",
+    "crates/panes-cost",
+    "crates/panes-core",
+    "crates/panes-app",
+]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+panes-events = { path = "crates/panes-events" }
+panes-adapters = { path = "crates/panes-adapters" }
+panes-memory = { path = "crates/panes-memory" }
+panes-cost = { path = "crates/panes-cost" }
+panes-core = { path = "crates/panes-core" }
