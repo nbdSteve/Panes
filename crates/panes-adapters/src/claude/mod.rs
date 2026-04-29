@@ -18,6 +18,7 @@ use crate::{AgentAdapter, AgentSession};
 pub struct ClaudeAdapter {
     cli_path: String,
     env_vars: Vec<(String, String)>,
+    permission_mode: String,
 }
 
 impl ClaudeAdapter {
@@ -25,6 +26,7 @@ impl ClaudeAdapter {
         Self {
             cli_path: "claude".to_string(),
             env_vars: Vec::new(),
+            permission_mode: "bypassPermissions".to_string(),
         }
     }
 
@@ -32,7 +34,13 @@ impl ClaudeAdapter {
         Self {
             cli_path: cli_path.into(),
             env_vars: Vec::new(),
+            permission_mode: "bypassPermissions".to_string(),
         }
+    }
+
+    pub fn permission_mode(mut self, mode: impl Into<String>) -> Self {
+        self.permission_mode = mode.into();
+        self
     }
 
     pub fn env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
@@ -84,11 +92,13 @@ impl AgentAdapter for ClaudeAdapter {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose")
-            .arg("--dangerously-skip-permissions")
+            .arg("--permission-mode")
+            .arg(&self.permission_mode)
             .arg(&full_prompt)
             .current_dir(workspace_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped());
 
         for (key, val) in &self.env_vars {
             cmd.env(key, val);
@@ -156,13 +166,15 @@ impl AgentAdapter for ClaudeAdapter {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose")
-            .arg("--dangerously-skip-permissions")
+            .arg("--permission-mode")
+            .arg(&self.permission_mode)
             .arg("--resume")
             .arg(session_id)
             .arg(prompt)
             .current_dir(workspace_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped());
 
         for (key, val) in &self.env_vars {
             cmd.env(key, val);
@@ -258,17 +270,18 @@ impl AgentSession for ClaudeSession {
             .expect("events() called more than once")
     }
 
-    async fn approve(&self, tool_use_id: &str) -> Result<()> {
-        // TODO: Implement stdin approval injection
-        // This requires empirical validation of the stream-json input format
-        warn!(tool_use_id, "approval injection not yet implemented — using acceptEdits mode");
+    async fn approve(&self, _tool_use_id: &str) -> Result<()> {
+        // No-op: bypassPermissions mode auto-approves everything.
+        // If we switch to acceptEdits, Bash gates are handled by --permission-prompt-tool
+        // or --allowedTools, not stdin injection (which Claude CLI doesn't support).
         Ok(())
     }
 
     async fn reject(&self, tool_use_id: &str, reason: &str) -> Result<()> {
-        // TODO: Implement stdin rejection injection
-        warn!(tool_use_id, reason, "rejection injection not yet implemented");
-        Ok(())
+        // Claude Code CLI doesn't support stdin-based rejection.
+        // Cancel the process — the caller emits a completion event.
+        warn!(tool_use_id, reason, "rejecting gate by cancelling process");
+        self.cancel().await
     }
 
     async fn cancel(&self) -> Result<()> {

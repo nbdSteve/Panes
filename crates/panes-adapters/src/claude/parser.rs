@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::Stream;
@@ -78,6 +80,8 @@ pub async fn parse_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 
     let stream = async_stream::stream! {
         let mut auth_rx = auth_error_rx;
+        let mut tool_timestamps: HashMap<String, Instant> = HashMap::new();
+        let mut tool_names: HashMap<String, String> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -86,10 +90,54 @@ pub async fn parse_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
                         Ok(Some(line)) => {
                             let events = parse_line(&line);
                             for event in events {
+                                match &event {
+                                    AgentEvent::ToolRequest { id, tool_name, .. } => {
+                                        tool_timestamps.insert(id.clone(), Instant::now());
+                                        tool_names.insert(id.clone(), tool_name.clone());
+                                    }
+                                    AgentEvent::ToolResult { id, .. } => {
+                                        let duration_ms = tool_timestamps
+                                            .remove(id)
+                                            .map(|t| t.elapsed().as_millis() as u64)
+                                            .unwrap_or(0);
+                                        let resolved_tool_name = tool_names.remove(id);
+
+                                        // Detect sub-agent completion
+                                        if let Some(name) = &resolved_tool_name {
+                                            if name == "Task" || name == "Agent" {
+                                                if let AgentEvent::ToolResult { output, .. } = &event {
+                                                    yield AgentEvent::SubAgentComplete {
+                                                        parent_tool_use_id: id.clone(),
+                                                        summary: output.clone(),
+                                                        cost_usd: 0.0,
+                                                    };
+                                                }
+                                            }
+                                        }
+
+                                        // Re-emit with computed duration and resolved tool name
+                                        if let AgentEvent::ToolResult { id, success, output, raw_output, tool_name, .. } = event {
+                                            yield AgentEvent::ToolResult {
+                                                id,
+                                                tool_name: if tool_name.is_empty() {
+                                                    resolved_tool_name.unwrap_or_default()
+                                                } else {
+                                                    tool_name
+                                                },
+                                                success,
+                                                output,
+                                                raw_output,
+                                                duration_ms,
+                                            };
+                                            continue;
+                                        }
+                                    }
+                                    _ => {}
+                                }
                                 yield event;
                             }
                         }
-                        Ok(None) => break, // stdout closed
+                        Ok(None) => break,
                         Err(e) => {
                             warn!(error = %e, "error reading claude stdout");
                             yield AgentEvent::Error {
@@ -554,5 +602,51 @@ mod tests {
 
         let cost = estimate_cost(0, 0, 0, 1_000_000);
         assert!((cost - 18.75).abs() < 0.001); // cache creation at $18.75/M
+    }
+
+    #[test]
+    fn test_forward_compat_unknown_event_type() {
+        let events = parse_line(r#"{"type":"brand_new_type","data":"future","extra":true}"#);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_forward_compat_unknown_content_type_in_assistant() {
+        let line = r#"{"type":"assistant","message":{"model":"claude-test","id":"msg_1","content":[{"type":"server_tool_use","id":"st_1","name":"NewTool"},{"type":"text","text":"hello"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let events = parse_line(line);
+        let text_events: Vec<_> = events.iter().filter(|e| matches!(e, AgentEvent::Text { .. })).collect();
+        assert_eq!(text_events.len(), 1, "known content types still parse alongside unknown ones");
+    }
+
+    #[test]
+    fn test_forward_compat_extra_fields_on_result() {
+        let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.042,"duration_ms":5000,"num_turns":3,"result":"done","new_future_field":"value","another":123}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::Complete { total_cost_usd, .. } if (*total_cost_usd - 0.042).abs() < 0.001));
+    }
+
+    #[test]
+    fn test_tool_result_resolves_tool_name() {
+        // tool_result events from Claude don't carry tool_name, but our stream
+        // enrichment in parse_stream resolves it from the prior tool_use.
+        // At the parse_line level, tool_name is empty.
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","content":"ok","is_error":false}]}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        if let AgentEvent::ToolResult { tool_name, .. } = &events[0] {
+            assert!(tool_name.is_empty(), "parse_line doesn't resolve tool_name — that happens in parse_stream");
+        }
+    }
+
+    #[test]
+    fn test_sub_agent_tool_use_detected() {
+        let line = r#"{"type":"assistant","message":{"model":"claude-test","id":"msg_1","content":[{"type":"tool_use","id":"task_1","name":"Task","input":{"description":"research something","prompt":"do research"}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"parent_tool_use_id":"parent_0","session_id":"sess_1"}"#;
+        let events = parse_line(line);
+        let spawned: Vec<_> = events.iter().filter(|e| matches!(e, AgentEvent::SubAgentSpawned { .. })).collect();
+        assert_eq!(spawned.len(), 1);
+        if let AgentEvent::SubAgentSpawned { parent_tool_use_id, .. } = &spawned[0] {
+            assert_eq!(parent_tool_use_id, "parent_0");
+        }
     }
 }
