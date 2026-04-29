@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use panes_core::git;
 use panes_core::session::{SessionManager, Workspace};
 use panes_events::SessionContext;
+use rusqlite::Connection;
 use serde::Serialize;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 type SessionState = Arc<Mutex<SessionManager>>;
+type DbState = Arc<std::sync::Mutex<Connection>>;
 
 fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") || path == "~" {
@@ -19,6 +22,7 @@ fn expand_tilde(path: &str) -> String {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceInfo {
     pub id: String,
     pub path: String,
@@ -28,6 +32,7 @@ pub struct WorkspaceInfo {
 
 #[tauri::command]
 pub async fn add_workspace(
+    db: tauri::State<'_, DbState>,
     path: String,
     name: String,
 ) -> Result<WorkspaceInfo, String> {
@@ -38,24 +43,67 @@ pub async fn add_workspace(
     }
 
     let id = Uuid::new_v4().to_string();
-    // TODO: persist to SQLite
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO workspaces (id, path, name, default_agent, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![id, expanded, name, "claude-code", now],
+    ).map_err(|e| e.to_string())?;
+
     Ok(WorkspaceInfo {
         id,
-        path,
+        path: expanded,
         name,
         default_agent: Some("claude-code".to_string()),
     })
 }
 
 #[tauri::command]
-pub async fn list_workspaces() -> Result<Vec<WorkspaceInfo>, String> {
-    // TODO: read from SQLite
-    Ok(vec![])
+pub async fn list_workspaces(
+    db: tauri::State<'_, DbState>,
+) -> Result<Vec<WorkspaceInfo>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT id, path, name, default_agent FROM workspaces ORDER BY created_at")
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(WorkspaceInfo {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                name: row.get(2)?,
+                default_agent: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut workspaces = vec![];
+    for row in rows {
+        workspaces.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(workspaces)
 }
 
 #[tauri::command]
-pub async fn get_workspaces() -> Result<Vec<WorkspaceInfo>, String> {
-    list_workspaces().await
+pub async fn get_workspaces(
+    db: tauri::State<'_, DbState>,
+) -> Result<Vec<WorkspaceInfo>, String> {
+    list_workspaces(db).await
+}
+
+#[tauri::command]
+pub async fn remove_workspace(
+    db: tauri::State<'_, DbState>,
+    workspace_id: String,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM workspaces WHERE id = ?1",
+        rusqlite::params![workspace_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -83,18 +131,10 @@ pub async fn start_thread(
         budget_cap: None,
     };
 
-    eprintln!("[panes] start_thread called: workspace={}, agent={}, prompt={}", workspace.name, agent_name, &prompt[..prompt.len().min(50)]);
-
     let mgr = session_manager.lock().await;
-    let result = mgr.start_thread(&workspace, &prompt, &agent_name, context)
+    mgr.start_thread(&workspace, &prompt, &agent_name, context)
         .await
-        .map_err(|e| {
-            eprintln!("[panes] start_thread error: {e:#}");
-            e.to_string()
-        });
-
-    eprintln!("[panes] start_thread result: {:?}", result);
-    result
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -118,15 +158,10 @@ pub async fn resume_thread(
 
     let agent_name = agent.unwrap_or_else(|| "claude-code".to_string());
 
-    eprintln!("[panes] resume_thread called: thread={}, workspace={}, prompt={}", thread_id, workspace.name, &prompt[..prompt.len().min(50)]);
-
     let mgr = session_manager.lock().await;
     mgr.resume_thread(&thread_id, &workspace, &prompt, &agent_name)
         .await
-        .map_err(|e| {
-            eprintln!("[panes] resume_thread error: {e:#}");
-            e.to_string()
-        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -161,6 +196,34 @@ pub async fn cancel_thread(
 ) -> Result<(), String> {
     let mgr = session_manager.lock().await;
     mgr.cancel(&thread_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn commit_changes(
+    workspace_path: String,
+    message: String,
+) -> Result<String, String> {
+    let expanded = expand_tilde(&workspace_path);
+    let path = PathBuf::from(&expanded);
+    git::commit(&path, &message)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn revert_changes(
+    workspace_path: String,
+) -> Result<(), String> {
+    let expanded = expand_tilde(&workspace_path);
+    let path = PathBuf::from(&expanded);
+    let dummy_snapshot = git::SnapshotRef {
+        commit_hash: String::new(),
+        had_dirty_changes: false,
+        stash_ref: None,
+    };
+    git::revert(&path, &dummy_snapshot)
         .await
         .map_err(|e| e.to_string())
 }

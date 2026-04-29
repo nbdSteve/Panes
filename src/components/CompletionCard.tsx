@@ -6,6 +6,7 @@ interface CompletionCardProps {
   durationMs: number;
   turns: number;
   hasFileChanges: boolean;
+  completionAction?: "committed" | "reverted" | "kept";
   onCommit: () => void;
   onRevert: () => void;
   onKeep: () => void;
@@ -17,6 +18,7 @@ export default function CompletionCard({
   durationMs,
   turns,
   hasFileChanges,
+  completionAction,
   onCommit,
   onRevert,
   onKeep,
@@ -56,7 +58,15 @@ export default function CompletionCard({
         </div>
       </div>
 
-      {hasFileChanges && (
+      {hasFileChanges && completionAction && (
+        <div className="completion-actions">
+          <span className={`completion-action-badge ${completionAction}`}>
+            {completionAction === "committed" ? "Committed" : completionAction === "reverted" ? "Reverted" : "Kept as-is"}
+          </span>
+        </div>
+      )}
+
+      {hasFileChanges && !completionAction && (
         <div className="completion-actions">
           <button className="btn btn-success btn-sm" onClick={onCommit}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

@@ -51,6 +51,8 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
       needs_approval: true,
       risk_level: "critical",
     });
+    // GATE_PAUSE — remaining events emitted after approve/reject
+    events.push({ event_type: "__gate_pause__", id: "gate_0" });
     events.push({
       event_type: "tool_result",
       id: "gate_0",
@@ -212,23 +214,59 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
   return events;
 }
 
-const threads = new Map<string, { events: Array<Record<string, unknown>> }>();
+interface MockWorkspace {
+  id: string;
+  path: string;
+  name: string;
+  defaultAgent: string | null;
+}
+
+const mockWorkspaces: MockWorkspace[] = [];
+
+interface PausedThread {
+  threadId: string;
+  remainingEvents: Array<Record<string, unknown>>;
+}
+
+const pausedThreads = new Map<string, PausedThread>();
+const activeIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
 function emitThreadEvents(threadId: string, events: Array<Record<string, unknown>>) {
   let i = 0;
   const interval = setInterval(() => {
     if (i >= events.length) {
       clearInterval(interval);
+      activeIntervals.delete(threadId);
       return;
     }
+    const event = events[i];
+
+    if (event.event_type === "__gate_pause__") {
+      clearInterval(interval);
+      activeIntervals.delete(threadId);
+      pausedThreads.set(threadId, {
+        threadId,
+        remainingEvents: events.slice(i + 1),
+      });
+      return;
+    }
+
     emitEvent("panes://thread-event", {
       thread_id: threadId,
       timestamp: new Date().toISOString(),
-      event: events[i],
+      event,
       parent_tool_use_id: null,
     });
     i++;
   }, 200);
+  activeIntervals.set(threadId, interval);
+}
+
+function resumeAfterGate(threadId: string) {
+  const paused = pausedThreads.get(threadId);
+  if (!paused) return;
+  pausedThreads.delete(threadId);
+  setTimeout(() => emitThreadEvents(threadId, paused.remainingEvents), 100);
 }
 
 async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -252,7 +290,6 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       const prompt = args?.prompt as string;
       const threadId = crypto.randomUUID();
       const events = buildEvents(prompt);
-      threads.set(threadId, { events });
       setTimeout(() => emitThreadEvents(threadId, events), 300);
       return threadId;
     }
@@ -265,15 +302,70 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return null;
     }
 
-    case "approve_gate":
-    case "reject_gate":
-    case "cancel_thread":
+    case "approve_gate": {
+      const threadId = args?.threadId as string;
+      resumeAfterGate(threadId);
+      return null;
+    }
+
+    case "reject_gate": {
+      const threadId = args?.threadId as string;
+      pausedThreads.delete(threadId);
+      setTimeout(() => {
+        emitEvent("panes://thread-event", {
+          thread_id: threadId,
+          timestamp: new Date().toISOString(),
+          event: {
+            event_type: "complete",
+            summary: "Action was rejected by the user.",
+            total_cost_usd: 0.005,
+            duration_ms: 3000,
+            turns: 1,
+          },
+          parent_tool_use_id: null,
+        });
+      }, 100);
+      return null;
+    }
+
+    case "cancel_thread": {
+      const cancelId = args?.threadId as string;
+      const activeInterval = activeIntervals.get(cancelId);
+      if (activeInterval) {
+        clearInterval(activeInterval);
+        activeIntervals.delete(cancelId);
+      }
+      pausedThreads.delete(cancelId);
+      return null;
+    }
+
+    case "commit_changes":
+      return "mock-commit-hash";
+
+    case "revert_changes":
       return null;
 
-    case "add_workspace":
+    case "add_workspace": {
+      const ws: MockWorkspace = {
+        id: crypto.randomUUID(),
+        path: args?.path as string,
+        name: args?.name as string || (args?.path as string).split("/").pop() || "workspace",
+        defaultAgent: "claude-code",
+      };
+      mockWorkspaces.push(ws);
+      return ws;
+    }
+
     case "list_workspaces":
     case "get_workspaces":
-      return [];
+      return [...mockWorkspaces];
+
+    case "remove_workspace": {
+      const wsId = args?.workspace_id as string;
+      const idx = mockWorkspaces.findIndex((w) => w.id === wsId);
+      if (idx >= 0) mockWorkspaces.splice(idx, 1);
+      return null;
+    }
 
     default:
       console.warn(`[tauriMock] unhandled invoke: ${cmd}`, args);

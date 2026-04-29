@@ -10,15 +10,21 @@ interface ThreadViewProps {
   workspace: WorkspaceInfo;
   thread: ThreadInfo | null;
   onStartThread: (prompt: string) => void;
+  onCompletionAction: (threadId: string, action: "committed" | "reverted" | "kept") => void;
+  onCancel: (threadId: string) => void;
+  onQueueFollowUp: (threadId: string, prompt: string) => void;
 }
 
-export default function ThreadView({ workspace, thread, onStartThread }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, onStartThread, onCompletionAction, onCancel, onQueueFollowUp }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
+  const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string } | null>(null);
+  const [commitMessage, setCommitMessage] = useState("");
+  const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const isRunning = thread?.status === "starting" || thread?.status === "running";
-  const canSend = !isRunning;
+  const isActive = isRunning || thread?.status === "gate";
   const events = thread?.events ?? [];
 
   useEffect(() => {
@@ -34,8 +40,12 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
   }, [thread]);
 
   const handleSend = () => {
-    if (!prompt.trim() || !canSend) return;
-    onStartThread(prompt.trim());
+    if (!prompt.trim()) return;
+    if (isActive && thread) {
+      onQueueFollowUp(thread.id, prompt.trim());
+    } else {
+      onStartThread(prompt.trim());
+    }
     setPrompt("");
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
@@ -47,6 +57,10 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
       e.preventDefault();
       handleSend();
     }
+    if (e.key === "Escape" && isActive && thread) {
+      e.preventDefault();
+      onCancel(thread.id);
+    }
   };
 
   const handleTextareaInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -56,9 +70,20 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
 
-  const runningCost = events
-    .filter((e) => e.event_type === "cost_update")
-    .reduce((_, e) => e.total_usd || 0, 0);
+  const runningCost = (() => {
+    let total = 0;
+    let latestCostInTurn = 0;
+    for (const e of events) {
+      if (e.event_type === "follow_up" || e.event_type === "complete") {
+        total += latestCostInTurn;
+        latestCostInTurn = 0;
+      }
+      if (e.event_type === "cost_update") {
+        latestCostInTurn = e.total_usd || 0;
+      }
+    }
+    return total + latestCostInTurn;
+  })();
 
   const visibleEvents = events.filter(
     (e) => e.event_type !== "cost_update"
@@ -108,7 +133,14 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
               </div>
             )}
 
-            {renderEvents(visibleEvents, runningCost, thread.id)}
+            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionAction, {
+              onCommit: (summary: string) => {
+                setCommitDialog({ threadId: thread.id, summary });
+                setCommitMessage(summary);
+              },
+              onRevert: () => setRevertConfirm(thread.id),
+              onKeep: () => onCompletionAction(thread.id, "kept"),
+            })}
 
             {isRunning && visibleEvents.length > 0 && (
               <div className="step-card">
@@ -118,31 +150,127 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
                 <span className="step-description thinking-text" />
               </div>
             )}
+
+            {thread.status === "interrupted" && (
+              <div className="step-card interrupted-card">
+                <span className="step-icon icon-interrupted">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                </span>
+                <span className="step-description">Cancelled</span>
+              </div>
+            )}
           </>
         )}
       </div>
 
+      {commitDialog && (
+        <div className="commit-dialog">
+          <div className="commit-dialog-title">Commit changes</div>
+          <textarea
+            value={commitMessage}
+            onChange={(e) => setCommitMessage(e.target.value)}
+            rows={3}
+          />
+          <div className="commit-dialog-actions">
+            <button
+              className="btn btn-success btn-sm"
+              onClick={async () => {
+                try {
+                  await invoke("commit_changes", {
+                    workspacePath: workspace.path,
+                    message: commitMessage,
+                  });
+                  onCompletionAction(commitDialog.threadId, "committed");
+                } catch (e) {
+                  console.error("Commit failed:", e);
+                }
+                setCommitDialog(null);
+              }}
+            >
+              Confirm
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={() => setCommitDialog(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {revertConfirm && (
+        <div className="revert-confirm">
+          <div className="revert-confirm-title">Undo all changes</div>
+          <p>This will revert all file changes made by the agent.</p>
+          <div className="revert-confirm-actions">
+            <button
+              className="btn btn-danger btn-sm"
+              onClick={async () => {
+                try {
+                  await invoke("revert_changes", { workspacePath: workspace.path });
+                  onCompletionAction(revertConfirm, "reverted");
+                } catch (e) {
+                  console.error("Revert failed:", e);
+                }
+                setRevertConfirm(null);
+              }}
+            >
+              Revert
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={() => setRevertConfirm(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="prompt-bar">
+        {thread?.queuedFollowUp && (
+          <div className="queued-follow-up">
+            <span className="queued-follow-up-label">Queued</span>
+            <span className="queued-follow-up-text">{thread.queuedFollowUp}</span>
+            <button
+              className="queued-follow-up-cancel"
+              onClick={() => onQueueFollowUp(thread.id, "")}
+              title="Cancel queued message"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        )}
         <div className="prompt-bar-inner">
           <textarea
             ref={textareaRef}
-            placeholder={thread ? `Follow up...` : `Send a task to ${workspace.name}...`}
+            placeholder={isActive ? "Queue a follow-up..." : thread ? "Follow up..." : `Send a task to ${workspace.name}...`}
             value={prompt}
             onChange={handleTextareaInput}
             onKeyDown={handleKeyDown}
             rows={1}
-            disabled={!canSend}
           />
-          <button
-            className="btn-send"
-            onClick={handleSend}
-            disabled={!canSend || !prompt.trim()}
-            title="Send (Enter)"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
-          </button>
+          {isActive && !prompt.trim() ? (
+            <button
+              className="btn-stop"
+              onClick={() => thread && onCancel(thread.id)}
+              title="Stop (Esc)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              className="btn-send"
+              onClick={handleSend}
+              disabled={!prompt.trim()}
+              title={isActive ? "Queue follow-up (Enter)" : "Send (Enter)"}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -151,7 +279,19 @@ export default function ThreadView({ workspace, thread, onStartThread }: ThreadV
 
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
 
-function renderEvents(events: AgentEvent[], runningCost: number, threadId: string) {
+interface CompletionCallbacks {
+  onCommit: (summary: string) => void;
+  onRevert: () => void;
+  onKeep: () => void;
+}
+
+function renderEvents(
+  events: AgentEvent[],
+  runningCost: number,
+  threadId: string,
+  completionAction: "committed" | "reverted" | "kept" | undefined,
+  callbacks: CompletionCallbacks,
+) {
   let segmentHasWrites = false;
 
   return events.map((event, i) => {
@@ -268,9 +408,10 @@ function renderEvents(events: AgentEvent[], runningCost: number, threadId: strin
             durationMs={event.duration_ms || 0}
             turns={event.turns || 0}
             hasFileChanges={hadWrites}
-            onCommit={() => {}}
-            onRevert={() => {}}
-            onKeep={() => {}}
+            completionAction={completionAction}
+            onCommit={() => callbacks.onCommit(event.summary || "")}
+            onRevert={callbacks.onRevert}
+            onKeep={callbacks.onKeep}
           />
         );
       }

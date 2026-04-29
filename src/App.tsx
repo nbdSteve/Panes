@@ -34,7 +34,9 @@ export interface ThreadInfo {
   id: string;
   workspaceId: string;
   prompt: string;
-  status: "starting" | "running" | "complete" | "error";
+  status: "starting" | "running" | "gate" | "complete" | "error" | "interrupted";
+  completionAction?: "committed" | "reverted" | "kept";
+  queuedFollowUp?: string;
   events: AgentEvent[];
   createdAt: number;
 }
@@ -97,6 +99,50 @@ function App() {
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
+    invoke<WorkspaceInfo[]>("list_workspaces").then(setWorkspaces).catch(() => {});
+  }, []);
+
+  const handleCompletionAction = useCallback(
+    (threadId: string, action: "committed" | "reverted" | "kept") => {
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === threadId ? { ...t, completionAction: action } : t
+        )
+      );
+    },
+    []
+  );
+
+  const handleCancelThread = useCallback(
+    async (threadId: string) => {
+      try {
+        await invoke("cancel_thread", { threadId });
+      } catch {}
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === threadId
+            ? { ...t, status: "interrupted" as const, queuedFollowUp: undefined }
+            : t
+        )
+      );
+    },
+    []
+  );
+
+  const handleQueueFollowUp = useCallback(
+    (threadId: string, prompt: string) => {
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === threadId ? { ...t, queuedFollowUp: prompt || undefined } : t
+        )
+      );
+    },
+    []
+  );
+
+  const pendingResumeRef = useRef<{ threadId: string; prompt: string } | null>(null);
+
+  useEffect(() => {
     let cancelled = false;
     listen<ThreadEvent>("panes://thread-event", (ev) => {
       if (cancelled) return;
@@ -104,22 +150,31 @@ function App() {
       const mapped = mapBackendEvent(event);
       if (!mapped) return;
 
-      setThreads((prev) =>
-        prev.map((t) => {
+      setThreads((prev) => {
+        const updated = prev.map((t) => {
           if (t.id !== thread_id) return t;
           const newStatus =
             mapped.event_type === "complete"
               ? "complete" as const
               : mapped.event_type === "error"
                 ? "error" as const
-                : "running" as const;
+                : mapped.event_type === "tool_request" && mapped.needs_approval
+                  ? "gate" as const
+                  : "running" as const;
+
+          if ((newStatus === "complete" || newStatus === "error") && t.queuedFollowUp) {
+            pendingResumeRef.current = { threadId: t.id, prompt: t.queuedFollowUp };
+          }
+
           return {
             ...t,
             status: newStatus,
             events: [...t.events, mapped],
+            queuedFollowUp: (newStatus === "complete" || newStatus === "error") ? undefined : t.queuedFollowUp,
           };
-        })
-      );
+        });
+        return updated;
+      });
     }).then((unlisten) => {
       if (cancelled) { unlisten(); return; }
       unlistenRef.current = unlisten;
@@ -218,10 +273,22 @@ function App() {
     []
   );
 
+  useEffect(() => {
+    if (!pendingResumeRef.current) return;
+    const { threadId, prompt } = pendingResumeRef.current;
+    pendingResumeRef.current = null;
+    const thread = threads.find((t) => t.id === threadId);
+    if (!thread) return;
+    const ws = workspaces.find((w) => w.id === thread.workspaceId);
+    if (ws) {
+      handleResumeThread(ws, threadId, prompt);
+    }
+  });
+
   const handleSendPrompt = useCallback(
     (workspace: WorkspaceInfo, prompt: string) => {
       const thread = threads.find((t) => t.id === activeThread);
-      if (thread && (thread.status === "complete" || thread.status === "error")) {
+      if (thread && (thread.status === "complete" || thread.status === "error" || thread.status === "interrupted")) {
         handleResumeThread(workspace, thread.id, prompt);
       } else if (!thread) {
         handleStartThread(workspace, prompt);
@@ -252,9 +319,18 @@ function App() {
           setActiveWorkspace(null);
           setActiveView("feed");
         }}
-        onAddWorkspace={(ws) => {
-          setWorkspaces((prev) => [...prev, ws]);
-          setActiveWorkspace(ws.id);
+        onAddWorkspace={async (ws) => {
+          try {
+            const saved = await invoke<WorkspaceInfo>("add_workspace", {
+              path: ws.path,
+              name: ws.name,
+            });
+            setWorkspaces((prev) => [...prev, saved]);
+            setActiveWorkspace(saved.id);
+          } catch {
+            setWorkspaces((prev) => [...prev, ws]);
+            setActiveWorkspace(ws.id);
+          }
           setActiveView("workspace");
           setActiveThread(null);
         }}
@@ -291,6 +367,9 @@ function App() {
             workspace={activeWs}
             thread={currentThread ?? null}
             onStartThread={(prompt) => handleSendPrompt(activeWs, prompt)}
+            onCompletionAction={handleCompletionAction}
+            onCancel={handleCancelThread}
+            onQueueFollowUp={handleQueueFollowUp}
           />
         )}
       </main>

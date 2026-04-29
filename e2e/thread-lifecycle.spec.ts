@@ -79,6 +79,82 @@ test.describe("Thread Lifecycle", () => {
     await expect(page.locator(".completion-card")).toBeInViewport();
   });
 
+  test("queued follow-up sends automatically after current turn completes", async ({ page }) => {
+    await page.goto("/");
+
+    await page.click("text=Add workspace");
+    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
+    await page.click("text=Add");
+
+    // Start a thread
+    await page.fill("textarea", "do something complex");
+    await page.press("textarea", "Enter");
+
+    // While running, type a follow-up and send
+    await expect(page.locator(".btn-stop")).toBeVisible({ timeout: 2000 });
+    await page.fill("textarea", "now do more");
+    await page.press("textarea", "Enter");
+
+    // Queued indicator should appear
+    await expect(page.locator(".queued-follow-up")).toBeVisible();
+    await expect(page.locator(".queued-follow-up-text")).toHaveText("now do more");
+
+    // Wait for first turn to complete and follow-up to auto-fire
+    await expect(page.locator(".follow-up .thread-prompt-text", { hasText: "now do more" })).toBeVisible({ timeout: 5000 });
+
+    // Should eventually get a second completion
+    await expect(page.locator(".completion-card")).toHaveCount(2, { timeout: 5000 });
+  });
+
+  test("queued follow-up can be cancelled", async ({ page }) => {
+    await page.goto("/");
+
+    await page.click("text=Add workspace");
+    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
+    await page.click("text=Add");
+
+    await page.fill("textarea", "do something complex");
+    await page.press("textarea", "Enter");
+
+    // Queue a follow-up
+    await expect(page.locator(".btn-stop")).toBeVisible({ timeout: 2000 });
+    await page.fill("textarea", "follow up");
+    await page.press("textarea", "Enter");
+    await expect(page.locator(".queued-follow-up")).toBeVisible();
+
+    // Cancel it
+    await page.click(".queued-follow-up-cancel");
+    await expect(page.locator(".queued-follow-up")).not.toBeVisible();
+
+    // Only one completion should appear
+    await expect(page.locator(".completion-card")).toHaveCount(1, { timeout: 5000 });
+  });
+
+  test("stop button interrupts running thread", async ({ page }) => {
+    await page.goto("/");
+
+    await page.click("text=Add workspace");
+    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
+    await page.click("text=Add");
+
+    await page.fill("textarea", "do something complex");
+    await page.press("textarea", "Enter");
+
+    await expect(page.locator(".btn-stop")).toBeVisible({ timeout: 2000 });
+    await page.click(".btn-stop");
+
+    // Should show interrupted indicator
+    await expect(page.locator(".interrupted-card")).toBeVisible({ timeout: 2000 });
+    await expect(page.locator("text=Cancelled")).toBeVisible();
+
+    // No completion card should appear
+    await expect(page.locator(".completion-card")).not.toBeVisible();
+
+    // Textarea should accept input for follow-up
+    await page.fill("textarea", "try again");
+    await expect(page.locator("textarea")).toHaveValue("try again");
+  });
+
   test("switching threads preserves scroll position and content", async ({ page }) => {
     await page.goto("/");
 

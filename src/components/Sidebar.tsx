@@ -67,9 +67,10 @@ export default function Sidebar({
           <div className="sidebar-section-label">Workspaces</div>
           {workspaces.map((ws) => {
             const wsThreads = threads.filter((t) => t.workspaceId === ws.id);
+            const hasGate = wsThreads.some((t) => t.status === "gate");
             const hasRunning = wsThreads.some((t) => t.status === "running" || t.status === "starting");
             const hasError = wsThreads.some((t) => t.status === "error");
-            const dotClass = hasRunning ? "working" : hasError ? "error" : wsThreads.length > 0 ? "complete" : "idle";
+            const dotClass = hasGate ? "gate" : hasRunning ? "working" : hasError ? "error" : wsThreads.length > 0 ? "complete" : "idle";
             return (
               <div
                 key={ws.id}

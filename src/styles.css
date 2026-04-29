@@ -711,6 +711,74 @@ body {
   height: 16px;
 }
 
+.prompt-bar .btn-stop {
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--error);
+  color: white;
+  border: none;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+  margin-bottom: 2px;
+}
+.prompt-bar .btn-stop:hover {
+  opacity: 0.85;
+}
+.prompt-bar .btn-stop:active {
+  transform: scale(0.96);
+}
+.prompt-bar .btn-stop svg {
+  width: 16px;
+  height: 16px;
+}
+
+.queued-follow-up {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: rgba(99, 102, 241, 0.06);
+  border-bottom: 1px solid var(--border);
+}
+.queued-follow-up-label {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.queued-follow-up-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queued-follow-up-cancel {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.queued-follow-up-cancel:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.interrupted-card .step-description {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.icon-interrupted svg {
+  color: var(--text-muted);
+}
+
 /* ─── Event cards ─── */
 
 .card {
@@ -1096,6 +1164,63 @@ body {
 .completion-card .completion-actions {
   display: flex;
   gap: 8px;
+}
+
+.completion-action-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.completion-action-badge.committed {
+  color: var(--success);
+  background: rgba(74, 222, 128, 0.1);
+}
+.completion-action-badge.reverted {
+  color: var(--error);
+  background: rgba(248, 113, 113, 0.1);
+}
+.completion-action-badge.kept {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+/* ─── Commit dialog ─── */
+
+.commit-dialog,
+.revert-confirm {
+  padding: 16px 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 0 20px 12px;
+}
+.commit-dialog-title,
+.revert-confirm-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.commit-dialog textarea {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px;
+  resize: vertical;
+  margin-bottom: 10px;
+}
+.commit-dialog-actions,
+.revert-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+.revert-confirm p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
 }
 
 /* ─── Error card ─── */

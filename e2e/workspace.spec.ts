@@ -51,15 +51,15 @@ test.describe("Workspace Management", () => {
     await page.fill("textarea", "do something complex");
     await page.press("textarea", "Enter");
 
-    // Should show cancel button while running
-    await expect(page.locator(".cancel-thread")).toBeVisible({ timeout: 2000 });
+    // Stop button should appear in prompt bar while running
+    await expect(page.locator(".btn-stop")).toBeVisible({ timeout: 2000 });
 
-    await page.click(".cancel-thread");
+    await page.click(".btn-stop");
 
     // Thread should be marked as interrupted
     await expect(page.locator("text=Cancelled")).toBeVisible({ timeout: 2000 });
 
-    // Prompt bar should be re-enabled
+    // Textarea should remain enabled for follow-up
     await expect(page.locator("textarea")).toBeEnabled();
   });
 

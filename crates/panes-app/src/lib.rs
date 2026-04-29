@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use panes_adapters::claude::ClaudeAdapter;
 use panes_adapters::fake::{FakeAdapter, FakeScenario, FakeStep};
+use panes_core::db;
 use panes_core::session::SessionManager;
 use panes_cost::CostTracker;
 use panes_events::{RiskLevel, ThreadEvent};
@@ -16,6 +17,14 @@ fn is_test_mode() -> bool {
     std::env::var("PANES_TEST_MODE").is_ok()
 }
 
+fn db_path() -> String {
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("dev.panes");
+    std::fs::create_dir_all(&data_dir).ok();
+    data_dir.join("panes.db").to_string_lossy().to_string()
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("panes=debug".parse().unwrap()))
@@ -24,6 +33,8 @@ pub fn run() {
 
     let test_mode = is_test_mode();
     eprintln!("[panes] app starting (test_mode={})", test_mode);
+
+    let conn = db::initialize(&db_path()).expect("failed to initialize database");
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ThreadEvent>();
     let cost_tracker = Arc::new(CostTracker::new());
@@ -44,6 +55,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Arc::new(tokio::sync::Mutex::new(session_manager)))
         .manage(cost_tracker)
+        .manage(Arc::new(std::sync::Mutex::new(conn)))
         .setup(|app| {
             let handle = app.handle().clone();
             let event_rx = Arc::new(tokio::sync::Mutex::new(event_rx));
@@ -53,11 +65,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::add_workspace,
             commands::list_workspaces,
+            commands::remove_workspace,
             commands::start_thread,
             commands::resume_thread,
             commands::approve_gate,
             commands::reject_gate,
             commands::cancel_thread,
+            commands::commit_changes,
+            commands::revert_changes,
             commands::get_workspaces,
         ])
         .run(tauri::generate_context!())

@@ -21,6 +21,8 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
+rusqlite = { workspace = true }
+dirs = "6"
 tauri = { version = "2", features = [] }
 
 [lib]
