@@ -32,7 +32,7 @@ pub trait AgentAdapter: Send + Sync {
 pub trait AgentSession: Send {
     fn init(&self) -> &SessionInit;
 
-    fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + '_>>;
+    fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
     async fn approve(&self, tool_use_id: &str) -> Result<()>;
 

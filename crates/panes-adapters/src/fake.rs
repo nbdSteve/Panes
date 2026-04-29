@@ -131,7 +131,7 @@ impl AgentSession for FakeSession {
         &self.init_data
     }
 
-    fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + '_>> {
+    fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>> {
         let events = self.events.get_mut().take().unwrap_or_default();
         let delay = self.delay_ms;
 

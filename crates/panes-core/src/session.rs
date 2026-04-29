@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::StreamExt;
 use panes_adapters::{AgentAdapter, AgentSession};
-use panes_cost::CostTracker;
+use panes_cost::{self, CostTracker};
 use panes_events::{AgentEvent, SessionContext, ThreadEvent};
+use rusqlite::Connection;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -59,12 +60,14 @@ pub struct SessionManager {
     adapters: HashMap<String, Arc<dyn AgentAdapter>>,
     cost_tracker: Arc<CostTracker>,
     event_tx: mpsc::UnboundedSender<ThreadEvent>,
+    db: Arc<std::sync::Mutex<Connection>>,
 }
 
 impl SessionManager {
     pub fn new(
         cost_tracker: Arc<CostTracker>,
         event_tx: mpsc::UnboundedSender<ThreadEvent>,
+        db: Arc<std::sync::Mutex<Connection>>,
     ) -> Self {
         Self {
             active_threads: Arc::new(Mutex::new(HashMap::new())),
@@ -72,6 +75,7 @@ impl SessionManager {
             adapters: HashMap::new(),
             cost_tracker,
             event_tx,
+            db,
         }
     }
 
@@ -135,12 +139,21 @@ impl SessionManager {
             active.insert(thread_id.clone(), active_thread);
         }
 
-        // Start consuming the event stream in a background task
+        // Take the event stream out of the session while it's in the map.
+        // This lets consume_events own the stream without removing the session,
+        // so approve/reject/cancel can still find it.
+        let event_stream = {
+            let mut active = self.active_threads.lock().await;
+            let thread = active.get_mut(&thread_id).expect("just inserted");
+            thread.session.events()
+        };
+
         let thread_id_clone = thread_id.clone();
         let event_tx = self.event_tx.clone();
         let cost_tracker = self.cost_tracker.clone();
         let active_threads = self.active_threads.clone();
         let budget_cap = workspace.budget_cap;
+        let db = self.db.clone();
 
         tokio::spawn(async move {
             Self::consume_events(
@@ -149,6 +162,8 @@ impl SessionManager {
                 cost_tracker,
                 active_threads,
                 budget_cap,
+                event_stream,
+                db,
             )
             .await;
         });
@@ -199,11 +214,18 @@ impl SessionManager {
             active.insert(thread_id.to_string(), active_thread);
         }
 
+        let event_stream = {
+            let mut active = self.active_threads.lock().await;
+            let thread = active.get_mut(thread_id).expect("just inserted");
+            thread.session.events()
+        };
+
         let thread_id_clone = thread_id.to_string();
         let event_tx = self.event_tx.clone();
         let cost_tracker = self.cost_tracker.clone();
         let active_threads = self.active_threads.clone();
         let budget_cap = workspace.budget_cap;
+        let db = self.db.clone();
 
         tokio::spawn(async move {
             Self::consume_events(
@@ -212,6 +234,8 @@ impl SessionManager {
                 cost_tracker,
                 active_threads,
                 budget_cap,
+                event_stream,
+                db,
             )
             .await;
         });
@@ -226,23 +250,12 @@ impl SessionManager {
         cost_tracker: Arc<CostTracker>,
         active_threads: Arc<Mutex<HashMap<String, ActiveThread>>>,
         budget_cap: Option<f64>,
+        mut events_stream: std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send>>,
+        db: Arc<std::sync::Mutex<Connection>>,
     ) {
-        // Take the session out of the map so we own it (and can call events())
-        let mut thread = {
-            let mut active = active_threads.lock().await;
-            match active.remove(&thread_id) {
-                Some(t) => t,
-                None => return,
-            }
-        };
-
-        let mut events_stream = thread.session.events();
-
         while let Some(event) = events_stream.next().await {
-            // Update cost tracker
             cost_tracker.process_event(&thread_id, &event);
 
-            // Check budget cap
             if let Some(cap) = budget_cap {
                 if cost_tracker.check_budget(&thread_id, cap) {
                     warn!(thread_id = %thread_id, cap, "budget cap exceeded — killing session");
@@ -259,7 +272,6 @@ impl SessionManager {
                 }
             }
 
-            // Forward to frontend
             let thread_event = ThreadEvent {
                 thread_id: thread_id.clone(),
                 timestamp: Utc::now(),
@@ -271,20 +283,24 @@ impl SessionManager {
                 break;
             }
 
-            // Check if session completed
             if matches!(event, AgentEvent::Complete { .. } | AgentEvent::Error { recoverable: false, .. }) {
                 break;
             }
         }
 
-        // Finalize cost
+        // Finalize cost and persist to SQLite
         if let Some(cost) = cost_tracker.finalize(&thread_id) {
-            info!(
-                thread_id = %thread_id,
-                cost = cost.total_usd,
-                "thread completed"
-            );
+            info!(thread_id = %thread_id, cost = cost.total_usd, "thread completed — persisting cost");
+            if let Ok(conn) = db.lock() {
+                if let Err(e) = panes_cost::save_cost(&conn, &cost) {
+                    warn!(error = %e, "failed to persist cost to SQLite");
+                }
+            }
         }
+
+        // Clean up — session is done, remove from active map
+        let mut active = active_threads.lock().await;
+        active.remove(&thread_id);
     }
 
     pub async fn approve(&self, thread_id: &str, tool_use_id: &str) -> Result<()> {

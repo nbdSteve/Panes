@@ -263,7 +263,7 @@ impl AgentSession for ClaudeSession {
         &self.init_data
     }
 
-    fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + '_>> {
+    fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>> {
         self.event_stream
             .get_mut()
             .take()

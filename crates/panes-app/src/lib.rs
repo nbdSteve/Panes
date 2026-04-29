@@ -35,11 +35,12 @@ pub fn run() {
     eprintln!("[panes] app starting (test_mode={})", test_mode);
 
     let conn = db::initialize(&db_path()).expect("failed to initialize database");
+    let db = Arc::new(std::sync::Mutex::new(conn));
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ThreadEvent>();
     let cost_tracker = Arc::new(CostTracker::new());
 
-    let mut session_manager = SessionManager::new(cost_tracker.clone(), event_tx);
+    let mut session_manager = SessionManager::new(cost_tracker.clone(), event_tx, db.clone());
 
     if test_mode {
         register_fake_adapters(&mut session_manager);
@@ -55,7 +56,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Arc::new(tokio::sync::Mutex::new(session_manager)))
         .manage(cost_tracker)
-        .manage(Arc::new(std::sync::Mutex::new(conn)))
+        .manage(db)
         .setup(|app| {
             let handle = app.handle().clone();
             let event_rx = Arc::new(tokio::sync::Mutex::new(event_rx));
