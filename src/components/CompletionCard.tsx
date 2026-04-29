@@ -1,4 +1,5 @@
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface CompletionCardProps {
   summary: string;
@@ -41,7 +42,18 @@ export default function CompletionCard({
         <span className="completion-label-text">Complete</span>
       </div>
 
-      {summary && <div className="completion-summary markdown-body"><Markdown>{summary}</Markdown></div>}
+      {summary && (
+        <div className="completion-summary markdown-body">
+          <Markdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              table: ({ children }) => (
+                <div className="table-wrap"><table>{children}</table></div>
+              ),
+            }}
+          >{summary}</Markdown>
+        </div>
+      )}
 
       <div className="completion-stats">
         <div className="completion-stat">
