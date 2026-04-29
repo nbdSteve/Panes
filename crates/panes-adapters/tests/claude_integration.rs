@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use futures::StreamExt;
 use panes_adapters::claude::ClaudeAdapter;
 use panes_adapters::AgentAdapter;
@@ -7,13 +5,15 @@ use panes_events::{AgentEvent, SessionContext};
 
 #[tokio::test]
 async fn test_claude_adapter_end_to_end() {
-    let adapter = ClaudeAdapter::with_cli_path("/Users/goodhill/.local/bin/claude")
-        .env("CLAUDE_CODE_USE_BEDROCK", "1")
-        .env("AWS_PROFILE", "bedrock-beta")
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default());
+    let cli_path = std::env::var("PANES_CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
+    let mut adapter = ClaudeAdapter::with_cli_path(cli_path);
+    for key in ["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE", "PATH", "HOME"] {
+        if let Ok(val) = std::env::var(key) {
+            adapter = adapter.env(key, val);
+        }
+    }
 
-    let workspace = Path::new("/Users/goodhill/workplace");
+    let workspace = &std::env::temp_dir();
     let context = SessionContext {
         briefing: None,
         memories: vec![],
@@ -63,13 +63,15 @@ async fn test_claude_adapter_end_to_end() {
 
 #[tokio::test]
 async fn test_claude_adapter_tool_use() {
-    let adapter = ClaudeAdapter::with_cli_path("/Users/goodhill/.local/bin/claude")
-        .env("CLAUDE_CODE_USE_BEDROCK", "1")
-        .env("AWS_PROFILE", "bedrock-beta")
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default());
+    let cli_path = std::env::var("PANES_CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
+    let mut adapter = ClaudeAdapter::with_cli_path(cli_path);
+    for key in ["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE", "PATH", "HOME"] {
+        if let Ok(val) = std::env::var(key) {
+            adapter = adapter.env(key, val);
+        }
+    }
 
-    let workspace = Path::new("/tmp");
+    let workspace = &std::env::temp_dir();
     let context = SessionContext {
         briefing: None,
         memories: vec![],

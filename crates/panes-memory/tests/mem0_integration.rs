@@ -1,7 +1,7 @@
 //! Integration / e2e tests for Mem0Store against a running sidecar.
 //!
 //! Requires the sidecar to be running on port 11435:
-//!   cd sidecar && source .venv/bin/activate && AWS_PROFILE=bedrock-beta python3 mem0_sidecar.py
+//!   cd sidecar && source .venv/bin/activate && python3 mem0_sidecar.py
 //!
 //! Run with: cargo test --test mem0_integration -p panes-memory -- --nocapture
 
