@@ -121,6 +121,7 @@ impl SessionManager {
         prompt: &str,
         agent_name: &str,
         context: SessionContext,
+        model: Option<&str>,
     ) -> Result<String> {
         let adapter = self
             .adapters
@@ -146,7 +147,7 @@ impl SessionManager {
 
         // Spawn agent session
         let session = adapter
-            .spawn(&workspace.path, prompt, &context)
+            .spawn(&workspace.path, prompt, &context, model)
             .await
             .context("failed to spawn agent session")?;
 
@@ -225,6 +226,7 @@ impl SessionManager {
         workspace: &Workspace,
         prompt: &str,
         agent_name: &str,
+        model: Option<&str>,
     ) -> Result<()> {
         let adapter = self
             .adapters
@@ -240,7 +242,7 @@ impl SessionManager {
         };
 
         let session = adapter
-            .resume(&workspace.path, &claude_session_id, prompt)
+            .resume(&workspace.path, &claude_session_id, prompt, model)
             .await
             .context("failed to resume agent session")?;
 
@@ -346,9 +348,12 @@ impl SessionManager {
 
             Self::persist_event(&db, &thread_id, &event);
 
-            let is_gate = matches!(&event, AgentEvent::ToolRequest { needs_approval: true, .. });
+            let gate_tool_id = match &event {
+                AgentEvent::ToolRequest { id, needs_approval: true, .. } => Some(id.clone()),
+                _ => None,
+            };
 
-            if is_gate {
+            if gate_tool_id.is_some() {
                 if let Ok(conn) = db.lock() {
                     let _ = conn.execute(
                         "UPDATE threads SET status = 'gate' WHERE id = ?1",
@@ -356,6 +361,19 @@ impl SessionManager {
                     );
                 }
             }
+
+            // Set up gate oneshot BEFORE sending the event so approve/reject
+            // can find it immediately after the frontend receives the event.
+            let gate_rx = if gate_tool_id.is_some() {
+                let (tx, rx) = oneshot::channel();
+                {
+                    let mut slot = gate_tx.lock().await;
+                    *slot = Some(tx);
+                }
+                Some(rx)
+            } else {
+                None
+            };
 
             let thread_event = ThreadEvent {
                 thread_id: thread_id.clone(),
@@ -369,18 +387,19 @@ impl SessionManager {
             }
 
             // Gate pausing: wait for user decision before consuming more events
-            if is_gate {
-                let (tx, rx) = oneshot::channel();
-                {
-                    let mut slot = gate_tx.lock().await;
-                    *slot = Some(tx);
-                }
-
+            if let Some(rx) = gate_rx {
+                let tool_id = gate_tool_id.unwrap();
                 info!(thread_id = %thread_id, "gate paused — waiting for user decision");
 
                 match rx.await {
                     Ok(GateDecision::Continue) => {
                         info!(thread_id = %thread_id, "gate continued — resuming event stream");
+                        {
+                            let active = active_threads.lock().await;
+                            if let Some(thread) = active.get(&thread_id) {
+                                thread.session.approve(&tool_id).await.ok();
+                            }
+                        }
                         if let Ok(conn) = db.lock() {
                             let _ = conn.execute(
                                 "UPDATE threads SET status = 'running' WHERE id = ?1",
@@ -393,9 +412,21 @@ impl SessionManager {
                         {
                             let active = active_threads.lock().await;
                             if let Some(thread) = active.get(&thread_id) {
+                                thread.session.reject(&tool_id, "rejected by user").await.ok();
                                 let _ = thread.session.cancel().await;
                             }
                         }
+                        let abort_event = AgentEvent::Error {
+                            message: "Gate rejected by user".to_string(),
+                            recoverable: false,
+                        };
+                        Self::persist_event(&db, &thread_id, &abort_event);
+                        let _ = event_tx.send(ThreadEvent {
+                            thread_id: thread_id.clone(),
+                            timestamp: Utc::now(),
+                            event: abort_event,
+                            parent_tool_use_id: None,
+                        });
                         final_status = "interrupted";
                         break;
                     }
@@ -545,7 +576,7 @@ mod tests {
         let (mgr, _rx) = setup_session_manager();
         let ws = make_workspace();
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let result = mgr.start_thread(&ws, "hello", "nonexistent-agent", ctx).await;
+        let result = mgr.start_thread(&ws, "hello", "nonexistent-agent", ctx, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown agent"));
     }
@@ -591,7 +622,7 @@ mod tests {
         }
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
         assert!(!thread_id.is_empty());
 
         let mut got_complete = false;
@@ -709,6 +740,7 @@ mod tests {
                 _workspace_path: &Path,
                 _prompt: &str,
                 _context: &SessionContext,
+                _model: Option<&str>,
             ) -> Result<Box<dyn AgentSession>> {
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let resume_notify = Arc::new(Notify::new());
@@ -775,11 +807,13 @@ mod tests {
                 workspace_path: &Path,
                 _session_id: &str,
                 prompt: &str,
+                model: Option<&str>,
             ) -> Result<Box<dyn AgentSession>> {
                 self.spawn(
                     workspace_path,
                     prompt,
                     &SessionContext { briefing: None, memories: vec![], budget_cap: None },
+                    model,
                 ).await
             }
         }
@@ -839,13 +873,13 @@ mod tests {
 
         // Start a thread first so we have a stored session_id
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         // Drain all events from the first run
         let _ = collect_events_until_done(&mut rx).await;
 
         // Now resume the same thread
-        mgr.resume_thread(&thread_id, &ws, "follow up", "fake")
+        mgr.resume_thread(&thread_id, &ws, "follow up", "fake", None)
             .await
             .unwrap();
 
@@ -866,7 +900,7 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        let result = mgr.resume_thread("no-such-thread", &ws, "prompt", "fake").await;
+        let result = mgr.resume_thread("no-such-thread", &ws, "prompt", "fake", None).await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("no session_id"),
@@ -878,7 +912,7 @@ mod tests {
     async fn test_resume_thread_unknown_agent() {
         let (mgr, _rx) = setup_session_manager();
         let ws = make_workspace();
-        let result = mgr.resume_thread("t1", &ws, "prompt", "nonexistent-agent").await;
+        let result = mgr.resume_thread("t1", &ws, "prompt", "nonexistent-agent", None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown agent"));
     }
@@ -902,7 +936,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let events = collect_events_until_done(&mut rx).await;
 
@@ -932,7 +966,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let events = collect_events_until_done(&mut rx).await;
 
@@ -961,23 +995,15 @@ mod tests {
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr
-            .start_thread(&ws, "do something risky", "gate-test", ctx)
+            .start_thread(&ws, "do something risky", "gate-test", ctx, None)
             .await
             .unwrap();
 
         // Receive events until we see the gated ToolRequest
         let tool_use_id = wait_for_gate_event(&mut rx).await;
 
-        // Approve the gate — this unblocks consume_events AND the GateTestSession
+        // Approve the gate — this unblocks both consume_events and the underlying session
         mgr.approve(&thread_id, &tool_use_id).await.unwrap();
-
-        // Also approve the underlying session so its stream continues
-        {
-            let active = mgr.active_threads.lock().await;
-            if let Some(thread) = active.get(&thread_id) {
-                thread.session.approve(&tool_use_id).await.unwrap();
-            }
-        }
 
         // Collect remaining events — should see ToolResult + Complete
         let events = collect_events_until_done(&mut rx).await;
@@ -1001,7 +1027,7 @@ mod tests {
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr
-            .start_thread(&ws, "do something risky", "gate-test", ctx)
+            .start_thread(&ws, "do something risky", "gate-test", ctx, None)
             .await
             .unwrap();
 
@@ -1070,7 +1096,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         // Wait for completion — consume_events removes thread from active map itself
         let _ = collect_events_until_done(&mut rx).await;
@@ -1149,7 +1175,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         // Wait for thread to complete
         let _ = collect_events_until_done(&mut rx).await;
@@ -1199,7 +1225,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let _ = collect_events_until_done(&mut rx).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1238,7 +1264,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let _ = collect_events_until_done(&mut rx).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1267,7 +1293,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let _ = collect_events_until_done(&mut rx).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1300,7 +1326,7 @@ mod tests {
         insert_workspace_row(&mgr, &ws);
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
         let _ = collect_events_until_done(&mut rx).await;
 
         // Verify session_id is in the in-memory map
@@ -1330,6 +1356,70 @@ mod tests {
     // Gate pausing sets gate status in DB
     // ---------------------------------------------------------------
 
+    // ---------------------------------------------------------------
+    // Model selection tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_start_thread_with_model() {
+        let (mut mgr, mut rx) = setup_session_manager();
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hi".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws);
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, Some("opus")).await.unwrap();
+        assert!(!thread_id.is_empty());
+
+        let events = collect_events_until_done(&mut rx).await;
+        assert!(events.iter().any(|te| matches!(&te.event, AgentEvent::Complete { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_start_thread_model_none_uses_default() {
+        let (mut mgr, mut rx) = setup_session_manager();
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hi".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws);
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
+
+        let events = collect_events_until_done(&mut rx).await;
+        assert!(events.iter().any(|te| matches!(&te.event, AgentEvent::Complete { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_resume_thread_with_model() {
+        let (mut mgr, mut rx) = setup_session_manager();
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "First".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws);
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
+        let _ = collect_events_until_done(&mut rx).await;
+
+        mgr.resume_thread(&thread_id, &ws, "follow up", "fake", Some("sonnet"))
+            .await
+            .unwrap();
+
+        let events = collect_events_until_done(&mut rx).await;
+        assert!(events.iter().any(|te| matches!(&te.event, AgentEvent::Complete { .. })));
+    }
+
     #[tokio::test]
     async fn test_gate_status_set_in_db() {
         let (mut mgr, mut rx) = setup_session_manager();
@@ -1340,7 +1430,7 @@ mod tests {
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr
-            .start_thread(&ws, "risky op", "gate-test", ctx)
+            .start_thread(&ws, "risky op", "gate-test", ctx, None)
             .await
             .unwrap();
 

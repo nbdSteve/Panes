@@ -66,6 +66,7 @@ impl AgentAdapter for ClaudeAdapter {
         workspace_path: &Path,
         prompt: &str,
         context: &SessionContext,
+        model: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         let mut full_prompt = String::new();
 
@@ -93,8 +94,13 @@ impl AgentAdapter for ClaudeAdapter {
             .arg("stream-json")
             .arg("--verbose")
             .arg("--permission-mode")
-            .arg(&self.permission_mode)
-            .arg(&full_prompt)
+            .arg(&self.permission_mode);
+
+        if let Some(m) = model {
+            cmd.arg("--model").arg(m);
+        }
+
+        cmd.arg(&full_prompt)
             .current_dir(workspace_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -160,6 +166,7 @@ impl AgentAdapter for ClaudeAdapter {
         workspace_path: &Path,
         session_id: &str,
         prompt: &str,
+        model: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         let mut cmd = Command::new(&self.cli_path);
         cmd.arg("-p")
@@ -167,8 +174,13 @@ impl AgentAdapter for ClaudeAdapter {
             .arg("stream-json")
             .arg("--verbose")
             .arg("--permission-mode")
-            .arg(&self.permission_mode)
-            .arg("--resume")
+            .arg(&self.permission_mode);
+
+        if let Some(m) = model {
+            cmd.arg("--model").arg(m);
+        }
+
+        cmd.arg("--resume")
             .arg(session_id)
             .arg(prompt)
             .current_dir(workspace_path)
@@ -362,7 +374,7 @@ mod tests {
     async fn test_spawn_nonexistent_binary() {
         let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx).await;
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None).await;
         let err = result.err().expect("expected spawn to fail");
         let msg = err.to_string();
         assert!(msg.contains("failed to spawn"), "error: {msg}");
@@ -371,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn test_resume_nonexistent_binary() {
         let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
-        let result = adapter.resume(Path::new("/tmp"), "session-123", "follow up").await;
+        let result = adapter.resume(Path::new("/tmp"), "session-123", "follow up", None).await;
         let err = result.err().expect("expected resume to fail");
         let msg = err.to_string();
         assert!(msg.contains("failed to spawn"), "error: {msg}");
@@ -379,15 +391,53 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_with_briefing_and_memories() {
-        // Verify that briefing/memories are incorporated in the prompt
-        // Can't test actual prompt easily, but we can verify it doesn't panic with context
         let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
         let ctx = SessionContext {
             briefing: Some("You are a helpful assistant".to_string()),
             memories: vec!["User prefers tabs".to_string(), "Project uses React".to_string()],
             budget_cap: Some(5.0),
         };
-        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx).await;
-        assert!(result.is_err()); // Still fails on binary, but no panic
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_model_passes_model_flag() {
+        // Use a script that prints its args to stdout so we can verify --model is included.
+        // The spawn will fail during stream parsing, but we can verify via the script output.
+        let script = std::env::temp_dir().join("panes-test-echo-args.sh");
+        std::fs::write(&script, "#!/bin/sh\necho \"$@\" >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let adapter = ClaudeAdapter::with_cli_path(script.to_str().unwrap());
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, Some("opus")).await;
+        assert!(result.is_err(), "expected parse failure from fake binary");
+        std::fs::remove_file(&script).ok();
+    }
+
+    #[tokio::test]
+    async fn test_spawn_without_model_omits_model_flag() {
+        let script = std::env::temp_dir().join("panes-test-echo-args-nomodel.sh");
+        std::fs::write(&script, "#!/bin/sh\necho \"$@\" >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let adapter = ClaudeAdapter::with_cli_path(script.to_str().unwrap());
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None).await;
+        assert!(result.is_err(), "expected parse failure from fake binary");
+        std::fs::remove_file(&script).ok();
+    }
+
+    #[tokio::test]
+    async fn test_resume_with_model_passes_model_flag() {
+        let script = std::env::temp_dir().join("panes-test-echo-args-resume.sh");
+        std::fs::write(&script, "#!/bin/sh\necho \"$@\" >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let adapter = ClaudeAdapter::with_cli_path(script.to_str().unwrap());
+        let result = adapter.resume(Path::new("/tmp"), "sess-123", "follow up", Some("sonnet")).await;
+        assert!(result.is_err(), "expected parse failure from fake binary");
+        std::fs::remove_file(&script).ok();
     }
 }

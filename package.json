@@ -11,6 +11,7 @@
     "test": "cargo test --workspace --exclude panes-app",
     "test:e2e": "npx playwright test",
     "test:e2e:headed": "npx playwright test --headed",
+    "test:e2e:fullstack": "npx playwright test --config playwright-fullstack.config.ts",
     "test:all": "npm run test && npm run test:e2e"
   },
   "dependencies": {
@@ -33,6 +34,8 @@
     "jsdom": "^29.1.0",
     "typescript": "^5.7",
     "vite": "^6",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.0"
   }
 }

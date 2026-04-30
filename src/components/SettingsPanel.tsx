@@ -1,0 +1,124 @@
+import { useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { WorkspaceInfo } from "../App";
+import { formatCost } from "../lib/utils";
+
+interface MemoryBackendStatus {
+  backend: string;
+  mem0Configured: boolean;
+}
+
+interface SettingsPanelProps {
+  workspaces: WorkspaceInfo[];
+}
+
+export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
+  const [backendStatus, setBackendStatus] = useState<MemoryBackendStatus | null>(null);
+  const [totalCost, setTotalCost] = useState(0);
+  const [switching, setSwitching] = useState(false);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const status = await invoke<MemoryBackendStatus>("get_memory_backend_status");
+      setBackendStatus(status);
+    } catch {
+      setBackendStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStatus();
+    invoke<number>("get_aggregate_cost").then(setTotalCost).catch(() => {});
+  }, [loadStatus]);
+
+  const handleToggleBackend = async (backend: string) => {
+    setSwitching(true);
+    try {
+      await invoke("set_memory_backend", { backend });
+      await loadStatus();
+    } catch {}
+    setSwitching(false);
+  };
+
+  return (
+    <div className="settings-panel">
+      <h2 style={{ fontSize: "18px", fontWeight: 600, margin: "0 0 24px", color: "var(--text-primary)" }}>
+        Settings
+      </h2>
+
+      <div className="settings-section">
+        <h3>Memory Backend</h3>
+        {backendStatus ? (
+          <>
+            <div className="settings-row">
+              <span className="settings-label">Active backend</span>
+              <span className="settings-value">{backendStatus.backend === "mem0" ? "Mem0" : "SQLite"}</span>
+            </div>
+            {backendStatus.mem0Configured ? (
+              <div className="settings-row">
+                <span className="settings-label">Switch backend</span>
+                <div className="backend-toggle">
+                  <button
+                    className={`btn btn-sm ${backendStatus.backend === "sqlite" ? "btn-primary" : "btn-secondary"}`}
+                    onClick={() => handleToggleBackend("sqlite")}
+                    disabled={switching || backendStatus.backend === "sqlite"}
+                  >
+                    SQLite
+                  </button>
+                  <button
+                    className={`btn btn-sm ${backendStatus.backend === "mem0" ? "btn-primary" : "btn-secondary"}`}
+                    onClick={() => handleToggleBackend("mem0")}
+                    disabled={switching || backendStatus.backend === "mem0"}
+                  >
+                    Mem0
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="settings-row">
+                <span className="settings-label settings-value muted">
+                  Mem0 not configured. Set PANES_MEM0_BINARY to enable.
+                </span>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="settings-row">
+            <span className="settings-label settings-value muted">Unable to load backend status</span>
+          </div>
+        )}
+      </div>
+
+      {workspaces.length > 0 && (
+        <div className="settings-section">
+          <h3>Workspace Defaults</h3>
+          {workspaces.map((ws) => (
+            <div key={ws.id} className="settings-row">
+              <span className="settings-label">{ws.name}</span>
+              <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+                <span className="settings-value" style={{ fontSize: "12px" }}>
+                  {ws.defaultAgent ?? "claude-code"}
+                </span>
+                <span className={`settings-value ${ws.budgetCap ? "" : "muted"}`} style={{ fontSize: "12px" }}>
+                  {ws.budgetCap ? `Cap: ${formatCost(ws.budgetCap)}` : "No cap"}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="settings-section">
+        <h3>About</h3>
+        <div className="settings-row">
+          <span className="settings-label">Total spend</span>
+          <span className="settings-value">{formatCost(totalCost)}</span>
+        </div>
+        <div className="settings-row">
+          <span className="settings-label">Workspaces</span>
+          <span className="settings-value">{workspaces.length}</span>
+        </div>
+      </div>
+    </div>
+  );
+}

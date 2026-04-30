@@ -1,4 +1,5 @@
 mod commands;
+mod test_bridge;
 
 use std::sync::Arc;
 
@@ -8,9 +9,9 @@ use panes_core::db;
 use panes_core::session::SessionManager;
 use panes_cost::CostTracker;
 use panes_events::{RiskLevel, ThreadEvent};
-use panes_memory::sqlite_store::SqliteMemoryStore;
+use panes_memory::manager::{MemoryConfig, MemoryManager};
 use tauri::Emitter;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -18,21 +19,21 @@ fn is_test_mode() -> bool {
     std::env::var("PANES_TEST_MODE").is_ok()
 }
 
-fn db_path() -> String {
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("dev.panes");
-    std::fs::create_dir_all(&data_dir).ok();
-    data_dir.join("panes.db").to_string_lossy().to_string()
+fn data_dir() -> std::path::PathBuf {
+    match std::env::var("PANES_DATA_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("dev.panes"),
+    }
 }
 
-fn memory_db_path() -> String {
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("dev.panes");
-    std::fs::create_dir_all(&data_dir).ok();
-    data_dir.join("memory.db").to_string_lossy().to_string()
+fn db_path() -> String {
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("panes.db").to_string_lossy().to_string()
 }
+
 
 pub fn run() {
     tracing_subscriber::fmt()
@@ -46,13 +47,26 @@ pub fn run() {
     let conn = db::initialize(&db_path()).expect("failed to initialize database");
     let db = Arc::new(std::sync::Mutex::new(conn));
 
-    let memory_db_path = memory_db_path();
-    let memory_store = Arc::new(SqliteMemoryStore::new(&memory_db_path).expect("failed to initialize memory store"));
+    let memory_config = if test_mode {
+        MemoryConfig::for_test()
+    } else {
+        MemoryConfig::from_env(&data_dir())
+    };
+    let memory_manager = Arc::new(
+        MemoryManager::new(&memory_config).expect("failed to initialize memory manager"),
+    );
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ThreadEvent>();
     let cost_tracker = Arc::new(CostTracker::new());
 
     let mut session_manager = SessionManager::new(cost_tracker.clone(), event_tx, db.clone());
+
+    let bridge_tx: Option<broadcast::Sender<ThreadEvent>> = if test_mode {
+        let (tx, _) = broadcast::channel(256);
+        Some(tx)
+    } else {
+        None
+    };
 
     if test_mode {
         register_fake_adapters(&mut session_manager);
@@ -68,15 +82,39 @@ pub fn run() {
         session_manager.register_adapter(Arc::new(adapter));
     }
 
+    let session_arc = Arc::new(tokio::sync::Mutex::new(session_manager));
+
+    let bridge_session = session_arc.clone();
+    let bridge_cost = cost_tracker.clone();
+    let bridge_db = db.clone();
+    let bridge_memory = memory_manager.clone();
+
     tauri::Builder::default()
-        .manage(Arc::new(tokio::sync::Mutex::new(session_manager)))
+        .manage(session_arc)
         .manage(cost_tracker)
         .manage(db)
-        .manage(memory_store)
-        .setup(|app| {
+        .manage(memory_manager.clone())
+        .setup(move |app| {
             let handle = app.handle().clone();
             let event_rx = Arc::new(tokio::sync::Mutex::new(event_rx));
-            tauri::async_runtime::spawn(forward_events(handle, event_rx));
+
+            if let Some(ref tx) = bridge_tx {
+                test_bridge::start_test_bridge(
+                    bridge_session,
+                    bridge_cost,
+                    bridge_db,
+                    bridge_memory,
+                    tx.clone(),
+                );
+            }
+
+            let init_mgr = memory_manager;
+            tauri::async_runtime::spawn(async move {
+                init_mgr.init().await;
+                init_mgr.spawn_health_monitor();
+            });
+
+            tauri::async_runtime::spawn(forward_events(handle, event_rx, bridge_tx));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -105,7 +143,11 @@ pub fn run() {
             commands::list_adapters,
             commands::list_agents,
             commands::set_workspace_default_agent,
+            commands::set_workspace_budget_cap,
             commands::get_aggregate_cost,
+            commands::get_workspace_cost,
+            commands::get_memory_backend_status,
+            commands::set_memory_backend,
         ])
         .run(tauri::generate_context!())
         .expect("error running panes");
@@ -130,10 +172,27 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
         workspace_path: &std::path::Path,
         prompt: &str,
         context: &panes_events::SessionContext,
+        model: Option<&str>,
     ) -> anyhow::Result<Box<dyn panes_adapters::AgentSession>> {
-        let scenario = route_prompt(prompt);
-        let adapter = FakeAdapter::new(scenario).with_delay(80);
-        adapter.spawn(workspace_path, prompt, context).await
+        let lower = prompt.to_lowercase();
+        let (scenario, delay) = if lower.contains("slow") {
+            (route_prompt(prompt), 500)
+        } else {
+            (route_prompt(prompt), 80)
+        };
+
+        if let FakeScenario::FileEdit { ref files, .. } = scenario {
+            for file in files {
+                let path = workspace_path.join(file);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                std::fs::write(&path, format!("// modified by panes test\n// file: {file}\n")).ok();
+            }
+        }
+
+        let adapter = FakeAdapter::new(scenario).with_delay(delay);
+        adapter.spawn(workspace_path, prompt, context, model).await
     }
 
     async fn resume(
@@ -141,10 +200,11 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
         workspace_path: &std::path::Path,
         session_id: &str,
         prompt: &str,
+        model: Option<&str>,
     ) -> anyhow::Result<Box<dyn panes_adapters::AgentSession>> {
         let scenario = route_prompt(prompt);
         let adapter = FakeAdapter::new(scenario).with_delay(80);
-        adapter.resume(workspace_path, session_id, prompt).await
+        adapter.resume(workspace_path, session_id, prompt, model).await
     }
 }
 
@@ -202,9 +262,55 @@ fn route_prompt(prompt: &str) -> FakeScenario {
             ],
             response: "I've read the file, made edits, and verified the tests pass.".to_string(),
         }
+    } else if lower.contains("slow") {
+        FakeScenario::MultiStep {
+            steps: vec![
+                FakeStep {
+                    tool_name: "Read".to_string(),
+                    description: "Read file: src/main.rs".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "(file contents)".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Edit".to_string(),
+                    description: "Edit file: src/main.rs".to_string(),
+                    risk_level: RiskLevel::Medium,
+                    needs_approval: false,
+                    success: true,
+                    output: "File edited".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Bash".to_string(),
+                    description: "Run command: cargo build".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "Build succeeded".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Bash".to_string(),
+                    description: "Run command: cargo test".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "All tests passed".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Read".to_string(),
+                    description: "Read file: Cargo.toml".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "(cargo config)".to_string(),
+                },
+            ],
+            response: "Completed the slow multi-step task.".to_string(),
+        }
     } else {
         FakeScenario::TextOnly {
-            response: format!("I received your message: \"{}\"\n\nThis is a **fake response** from the test adapter. It supports:\n- `error` / `fail` → error scenario\n- `gate` / `dangerous` → gated action\n- `edit` / `write` → file edit with commit buttons\n- `read` / `explain` → read files then respond\n- `multi` / `complex` → multi-step tool use\n- anything else → this text response", prompt),
+            response: format!("I received your message: \"{}\"\n\nThis is a **fake response** from the test adapter. It supports:\n- `error` / `fail` → error scenario\n- `gate` / `dangerous` → gated action\n- `edit` / `write` → file edit with commit buttons\n- `read` / `explain` → read files then respond\n- `multi` / `complex` → multi-step tool use\n- `slow` → slow multi-step (for cancel testing)\n- anything else → this text response", prompt),
         }
     }
 }
@@ -212,10 +318,14 @@ fn route_prompt(prompt: &str) -> FakeScenario {
 async fn forward_events(
     handle: tauri::AppHandle,
     event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ThreadEvent>>>,
+    bridge_tx: Option<broadcast::Sender<ThreadEvent>>,
 ) {
     let mut rx = event_rx.lock().await;
     while let Some(event) = rx.recv().await {
         info!(thread_id = %event.thread_id, event = ?event.event, "forwarding event to frontend");
         let _ = handle.emit("panes://thread-event", &event);
+        if let Some(ref tx) = bridge_tx {
+            let _ = tx.send(event);
+        }
     }
 }

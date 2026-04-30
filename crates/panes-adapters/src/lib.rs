@@ -18,6 +18,7 @@ pub trait AgentAdapter: Send + Sync {
         workspace_path: &Path,
         prompt: &str,
         context: &SessionContext,
+        model: Option<&str>,
     ) -> Result<Box<dyn AgentSession>>;
 
     async fn resume(
@@ -25,11 +26,12 @@ pub trait AgentAdapter: Send + Sync {
         workspace_path: &Path,
         session_id: &str,
         prompt: &str,
+        model: Option<&str>,
     ) -> Result<Box<dyn AgentSession>>;
 }
 
 #[async_trait]
-pub trait AgentSession: Send {
+pub trait AgentSession: Send + Sync {
     fn init(&self) -> &SessionInit;
 
     /// Must only be called once. Behavior on second call is adapter-dependent.

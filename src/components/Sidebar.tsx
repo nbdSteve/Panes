@@ -1,15 +1,18 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceInfo, ThreadInfo } from "../App";
+import { formatCost } from "../lib/utils";
 import appIcon from "../assets/icon.png";
 
 interface SidebarProps {
   workspaces: WorkspaceInfo[];
   threads: ThreadInfo[];
   activeWorkspace: string | null;
-  activeView: "workspace" | "feed" | "memory";
+  activeView: "workspace" | "feed" | "memory" | "settings";
   onSelectWorkspace: (id: string) => void;
   onSelectFeed: () => void;
   onSelectMemory: (workspaceId: string) => void;
+  onSelectSettings: () => void;
   onAddWorkspace: (ws: WorkspaceInfo) => void;
   onRemoveWorkspace: (id: string) => void;
 }
@@ -22,12 +25,30 @@ export default function Sidebar({
   onSelectWorkspace,
   onSelectFeed,
   onSelectMemory,
+  onSelectSettings,
   onAddWorkspace,
   onRemoveWorkspace,
 }: SidebarProps) {
   const [showAdd, setShowAdd] = useState(false);
   const [addPath, setAddPath] = useState("");
   const [addName, setAddName] = useState("");
+  const [workspaceCosts, setWorkspaceCosts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    const fetchCosts = async () => {
+      const costs: Record<string, number> = {};
+      for (const ws of workspaces) {
+        try {
+          const cost = await invoke<number>("get_workspace_cost", { workspaceId: ws.id });
+          costs[ws.id] = cost;
+        } catch {
+          costs[ws.id] = 0;
+        }
+      }
+      setWorkspaceCosts(costs);
+    };
+    fetchCosts();
+  }, [workspaces, threads]);
 
   const handleAdd = () => {
     if (!addPath.trim()) return;
@@ -62,7 +83,7 @@ export default function Sidebar({
 
       <div className="sidebar-section">
         <div
-          className={`sidebar-item ${activeWorkspace === null ? "active" : ""}`}
+          className={`sidebar-item ${activeView === "feed" ? "active" : ""}`}
           onClick={onSelectFeed}
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -81,6 +102,7 @@ export default function Sidebar({
             const hasRunning = wsThreads.some((t) => t.status === "running" || t.status === "starting");
             const hasError = wsThreads.some((t) => t.status === "error");
             const dotClass = hasGate ? "gate" : hasRunning ? "working" : hasError ? "error" : wsThreads.length > 0 ? "complete" : "idle";
+            const cost = workspaceCosts[ws.id] ?? 0;
             return (
               <div
                 key={ws.id}
@@ -89,6 +111,9 @@ export default function Sidebar({
               >
                 <span className={`status-dot ${dotClass}`} />
                 <span>{ws.name}</span>
+                {cost > 0 && (
+                  <span className="workspace-cost">{formatCost(cost)}</span>
+                )}
                 {wsThreads.length > 0 && (
                   <span className="thread-count">{wsThreads.length}</span>
                 )}
@@ -121,6 +146,19 @@ export default function Sidebar({
           </div>
         </div>
       )}
+
+      <div className="sidebar-section sidebar-section-bottom">
+        <div
+          className={`sidebar-item ${activeView === "settings" ? "active" : ""}`}
+          onClick={onSelectSettings}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+          Settings
+        </div>
+      </div>
 
       <div className="sidebar-footer">
         {showAdd ? (

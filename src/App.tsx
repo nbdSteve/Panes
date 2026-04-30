@@ -6,6 +6,7 @@ import ThreadList from "./components/ThreadList";
 import ThreadView from "./components/ThreadView";
 import MemoryPanel from "./components/MemoryPanel";
 import FeedView from "./components/FeedView";
+import SettingsPanel from "./components/SettingsPanel";
 import { mapBackendEvent } from "./lib/eventMapper";
 
 export interface WorkspaceInfo {
@@ -13,6 +14,7 @@ export interface WorkspaceInfo {
   path: string;
   name: string;
   defaultAgent?: string;
+  budgetCap?: number | null;
 }
 
 export interface AgentInfo {
@@ -62,7 +64,7 @@ function App() {
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory">("feed");
+  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings">("feed");
   const [adapters, setAdapters] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -313,6 +315,15 @@ function App() {
     [activeThread, threads, handleStartThread, handleResumeThread]
   );
 
+  const handleSetBudgetCap = useCallback(async (workspaceId: string, budgetCap: number | null) => {
+    try {
+      await invoke("set_workspace_budget_cap", { workspaceId, budgetCap });
+      setWorkspaces((prev) =>
+        prev.map((w) => (w.id === workspaceId ? { ...w, budgetCap } : w))
+      );
+    } catch {}
+  }, []);
+
   const handleRemoveWorkspace = useCallback(async (id: string) => {
     try { await invoke("remove_workspace", { workspaceId: id }); } catch {}
     setWorkspaces((prev) => prev.filter((w) => w.id !== id));
@@ -373,6 +384,10 @@ function App() {
           setActiveWorkspace(wsId);
           setActiveView("memory");
         }}
+        onSelectSettings={() => {
+          setActiveWorkspace(null);
+          setActiveView("settings");
+        }}
         onRemoveWorkspace={handleRemoveWorkspace}
         onAddWorkspace={async (ws) => {
           try {
@@ -425,11 +440,16 @@ function App() {
             onCompletionAction={handleCompletionAction}
             onCancel={handleCancelThread}
             onQueueFollowUp={handleQueueFollowUp}
+            onSetBudgetCap={handleSetBudgetCap}
           />
         )}
 
         {activeView === "memory" && activeWs && (
           <MemoryPanel workspaceId={activeWs.id} />
+        )}
+
+        {activeView === "settings" && (
+          <SettingsPanel workspaces={workspaces} />
         )}
       </main>
     </div>

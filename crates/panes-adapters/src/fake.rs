@@ -87,11 +87,13 @@ impl AgentAdapter for FakeAdapter {
         _workspace_path: &Path,
         _prompt: &str,
         _context: &SessionContext,
+        model: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         let session_id = Uuid::new_v4().to_string();
+        let model_name = model.unwrap_or("fake-model").to_string();
         let init = SessionInit {
             session_id,
-            model: "fake-model".to_string(),
+            model: model_name,
             cwd: "/fake".to_string(),
             tools: vec![
                 "Read".into(), "Write".into(), "Edit".into(),
@@ -121,11 +123,13 @@ impl AgentAdapter for FakeAdapter {
         workspace_path: &Path,
         _session_id: &str,
         prompt: &str,
+        model: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         self.spawn(
             workspace_path,
             prompt,
             &SessionContext { briefing: None, memories: vec![], budget_cap: None },
+            model,
         ).await
     }
 }
@@ -414,7 +418,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
 
         assert_eq!(session.init().model, "fake-model");
 
@@ -441,7 +445,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
 
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
@@ -475,7 +479,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
 
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
@@ -502,7 +506,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
 
         let mut events: Vec<AgentEvent> = vec![];
         let mut stream = session.events();
@@ -547,7 +551,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
 
@@ -591,7 +595,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
 
@@ -615,7 +619,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
 
         let mut stream1 = session.events();
         let mut count1 = 0;
@@ -629,13 +633,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_spawn_with_model_uses_provided_model() {
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hi".to_string(),
+        }).with_delay(0);
+
+        let workspace = Path::new("/tmp");
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let session = adapter.spawn(workspace, "test", &ctx, Some("opus")).await.unwrap();
+        assert_eq!(session.init().model, "opus");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_without_model_uses_default() {
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hi".to_string(),
+        }).with_delay(0);
+
+        let workspace = Path::new("/tmp");
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        assert_eq!(session.init().model, "fake-model");
+    }
+
+    #[tokio::test]
+    async fn test_resume_with_model() {
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hi".to_string(),
+        }).with_delay(0);
+
+        let workspace = Path::new("/tmp");
+        let session = adapter.resume(workspace, "sid", "follow up", Some("sonnet")).await.unwrap();
+        assert_eq!(session.init().model, "sonnet");
+    }
+
+    #[tokio::test]
     async fn test_fake_resume() {
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Resumed!".to_string(),
         }).with_delay(0);
 
         let workspace = Path::new("/tmp");
-        let mut session = adapter.resume(workspace, "some-session-id", "follow up").await.unwrap();
+        let mut session = adapter.resume(workspace, "some-session-id", "follow up", None).await.unwrap();
         assert!(!session.init().session_id.is_empty());
 
         let mut stream = session.events();

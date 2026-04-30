@@ -1,3 +1,4 @@
+pub mod manager;
 pub mod mem0_store;
 pub mod sidecar;
 pub mod sqlite_store;

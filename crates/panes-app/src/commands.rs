@@ -4,7 +4,7 @@ use std::sync::Arc;
 use panes_core::git;
 use panes_core::session::{SessionManager, Workspace};
 use panes_events::SessionContext;
-use panes_memory::sqlite_store::SqliteMemoryStore;
+use panes_memory::manager::MemoryManager;
 use panes_memory::{BriefingStore, MemoryStore};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 type SessionState = Arc<Mutex<SessionManager>>;
 type DbState = Arc<std::sync::Mutex<Connection>>;
-type MemoryState = Arc<SqliteMemoryStore>;
+pub(crate) type MemoryManagerState = Arc<MemoryManager>;
 
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") || path == "~" {
         if let Ok(home) = std::env::var("HOME") {
             return path.replacen('~', &home, 1);
@@ -31,6 +31,7 @@ pub struct WorkspaceInfo {
     pub path: String,
     pub name: String,
     pub default_agent: Option<String>,
+    pub budget_cap: Option<f64>,
 }
 
 #[tauri::command]
@@ -59,6 +60,7 @@ pub async fn add_workspace(
         path: expanded,
         name,
         default_agent: Some("claude-code".to_string()),
+        budget_cap: None,
     })
 }
 
@@ -68,7 +70,7 @@ pub async fn list_workspaces(
 ) -> Result<Vec<WorkspaceInfo>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, path, name, default_agent FROM workspaces ORDER BY created_at")
+        .prepare("SELECT id, path, name, default_agent, budget_cap FROM workspaces ORDER BY created_at")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
@@ -78,6 +80,7 @@ pub async fn list_workspaces(
                 path: row.get(1)?,
                 name: row.get(2)?,
                 default_agent: row.get(3)?,
+                budget_cap: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -259,25 +262,35 @@ pub async fn delete_thread(
 #[tauri::command]
 pub async fn start_thread(
     session_manager: tauri::State<'_, SessionState>,
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
+    db: tauri::State<'_, DbState>,
     workspace_id: String,
     workspace_path: String,
     workspace_name: String,
     prompt: String,
     agent: Option<String>,
+    model: Option<String>,
 ) -> Result<String, String> {
     let expanded_path = expand_tilde(&workspace_path);
+    let budget_cap: Option<f64> = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        ).unwrap_or(None)
+    };
     let workspace = Workspace {
         id: workspace_id.clone(),
         path: PathBuf::from(&expanded_path),
         name: workspace_name,
         default_agent: agent.clone(),
-        budget_cap: None,
+        budget_cap,
     };
 
     let injected = panes_memory::build_context(
-        memory_store.as_ref(),
-        memory_store.as_ref(),
+        memory_manager.as_memory_store(),
+        memory_manager.as_briefing_store(),
         &prompt,
         &workspace_id,
         2000,
@@ -294,7 +307,7 @@ pub async fn start_thread(
     let agent_name = agent.unwrap_or_else(|| "claude-code".to_string());
 
     let mgr = session_manager.lock().await;
-    mgr.start_thread(&workspace, &prompt, &agent_name, context)
+    mgr.start_thread(&workspace, &prompt, &agent_name, context, model.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -302,26 +315,36 @@ pub async fn start_thread(
 #[tauri::command]
 pub async fn resume_thread(
     session_manager: tauri::State<'_, SessionState>,
+    db: tauri::State<'_, DbState>,
     thread_id: String,
     workspace_id: String,
     workspace_path: String,
     workspace_name: String,
     prompt: String,
     agent: Option<String>,
+    model: Option<String>,
 ) -> Result<(), String> {
     let expanded_path = expand_tilde(&workspace_path);
+    let budget_cap: Option<f64> = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        ).unwrap_or(None)
+    };
     let workspace = Workspace {
         id: workspace_id,
         path: PathBuf::from(&expanded_path),
         name: workspace_name,
         default_agent: agent.clone(),
-        budget_cap: None,
+        budget_cap,
     };
 
     let agent_name = agent.unwrap_or_else(|| "claude-code".to_string());
 
     let mgr = session_manager.lock().await;
-    mgr.resume_thread(&thread_id, &workspace, &prompt, &agent_name)
+    mgr.resume_thread(&thread_id, &workspace, &prompt, &agent_name, model.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -400,12 +423,12 @@ pub async fn revert_changes(
 
 #[tauri::command]
 pub async fn extract_memories(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
     thread_id: String,
     transcript: String,
 ) -> Result<Vec<MemoryInfo>, String> {
-    let memories = memory_store
+    let memories = memory_manager
         .add(&transcript, Some(&workspace_id), &thread_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -443,10 +466,10 @@ impl From<panes_memory::types::Memory> for MemoryInfo {
 
 #[tauri::command]
 pub async fn get_memories(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
 ) -> Result<Vec<MemoryInfo>, String> {
-    let memories = memory_store
+    let memories = memory_manager
         .get_all(Some(&workspace_id))
         .await
         .map_err(|e| e.to_string())?;
@@ -456,12 +479,12 @@ pub async fn get_memories(
 
 #[tauri::command]
 pub async fn search_memories(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<MemoryInfo>, String> {
-    let memories = memory_store
+    let memories = memory_manager
         .search(&query, Some(&workspace_id), limit.unwrap_or(10))
         .await
         .map_err(|e| e.to_string())?;
@@ -471,11 +494,11 @@ pub async fn search_memories(
 
 #[tauri::command]
 pub async fn update_memory(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     memory_id: String,
     content: String,
 ) -> Result<(), String> {
-    memory_store
+    memory_manager
         .update(&memory_id, &content)
         .await
         .map_err(|e| e.to_string())
@@ -483,10 +506,10 @@ pub async fn update_memory(
 
 #[tauri::command]
 pub async fn delete_memory(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     memory_id: String,
 ) -> Result<(), String> {
-    memory_store
+    memory_manager
         .delete(&memory_id)
         .await
         .map_err(|e| e.to_string())
@@ -494,11 +517,11 @@ pub async fn delete_memory(
 
 #[tauri::command]
 pub async fn pin_memory(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     memory_id: String,
     pinned: bool,
 ) -> Result<(), String> {
-    memory_store
+    memory_manager
         .pin(&memory_id, pinned)
         .await
         .map_err(|e| e.to_string())
@@ -515,10 +538,10 @@ pub struct BriefingInfo {
 
 #[tauri::command]
 pub async fn get_briefing(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
 ) -> Result<Option<BriefingInfo>, String> {
-    let briefing = memory_store
+    let briefing = memory_manager
         .get_briefing(&workspace_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -531,11 +554,11 @@ pub async fn get_briefing(
 
 #[tauri::command]
 pub async fn set_briefing(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
     content: String,
 ) -> Result<(), String> {
-    memory_store
+    memory_manager
         .set_briefing(&workspace_id, &content)
         .await
         .map_err(|e| e.to_string())
@@ -543,10 +566,10 @@ pub async fn set_briefing(
 
 #[tauri::command]
 pub async fn delete_briefing(
-    memory_store: tauri::State<'_, MemoryState>,
+    memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
 ) -> Result<(), String> {
-    memory_store
+    memory_manager
         .delete_briefing(&workspace_id)
         .await
         .map_err(|e| e.to_string())
@@ -563,6 +586,40 @@ pub async fn get_aggregate_cost(
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     Ok(total)
+}
+
+#[tauri::command]
+pub async fn get_workspace_cost(
+    db: tauri::State<'_, DbState>,
+    workspace_id: String,
+) -> Result<f64, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    panes_cost::get_workspace_cost(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryBackendStatus {
+    pub backend: String,
+    pub mem0_configured: bool,
+}
+
+#[tauri::command]
+pub async fn get_memory_backend_status(
+    memory: tauri::State<'_, MemoryManagerState>,
+) -> Result<MemoryBackendStatus, String> {
+    Ok(MemoryBackendStatus {
+        backend: memory.get_active_backend().to_string(),
+        mem0_configured: memory.is_mem0_configured(),
+    })
+}
+
+#[tauri::command]
+pub async fn set_memory_backend(
+    memory: tauri::State<'_, MemoryManagerState>,
+    backend: String,
+) -> Result<(), String> {
+    memory.set_active_backend(&backend)
 }
 
 #[tauri::command]
@@ -664,6 +721,20 @@ pub async fn set_workspace_default_agent(
     conn.execute(
         "UPDATE workspaces SET default_agent = ?1 WHERE id = ?2",
         rusqlite::params![agent, workspace_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_workspace_budget_cap(
+    db: tauri::State<'_, DbState>,
+    workspace_id: String,
+    budget_cap: Option<f64>,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+        rusqlite::params![budget_cap, workspace_id],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1098,10 +1169,13 @@ Body text here
             path: "/tmp".to_string(),
             name: "test".to_string(),
             default_agent: Some("claude-code".to_string()),
+            budget_cap: Some(5.0),
         };
         let json = serde_json::to_string(&ws).unwrap();
         assert!(json.contains("\"defaultAgent\""));
         assert!(!json.contains("\"default_agent\""));
+        assert!(json.contains("\"budgetCap\""));
+        assert!(!json.contains("\"budget_cap\""));
     }
 
     #[test]
@@ -1284,6 +1358,108 @@ Body text here
             |row| row.get(0),
         ).unwrap();
         assert!(cap.is_none());
+    }
+
+    #[test]
+    fn test_set_budget_cap_round_trip() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+
+        // Set a cap
+        conn.execute(
+            "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+            rusqlite::params![Some(2.50), "ws1"],
+        ).unwrap();
+
+        let cap: Option<f64> = conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap();
+        assert!((cap.unwrap() - 2.50).abs() < f64::EPSILON);
+
+        // Clear the cap
+        conn.execute(
+            "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+            rusqlite::params![None::<f64>, "ws1"],
+        ).unwrap();
+
+        let cap: Option<f64> = conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(cap.is_none());
+    }
+
+    #[test]
+    fn test_list_workspaces_includes_budget_cap() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        conn.execute(
+            "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+            rusqlite::params![10.0, "ws1"],
+        ).unwrap();
+        insert_test_workspace(&conn, "ws2", "/tmp/b");
+
+        let mut stmt = conn.prepare(
+            "SELECT id, path, name, default_agent, budget_cap FROM workspaces ORDER BY created_at"
+        ).unwrap();
+        let rows: Vec<(String, Option<f64>)> = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<f64>>(4)?))
+        }).unwrap().filter_map(|r| r.ok()).collect();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "ws1");
+        assert!((rows[0].1.unwrap() - 10.0).abs() < f64::EPSILON);
+        assert_eq!(rows[1].0, "ws2");
+        assert!(rows[1].1.is_none());
+    }
+
+    #[test]
+    fn test_budget_cap_read_for_thread_start() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        conn.execute(
+            "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+            rusqlite::params![3.50, "ws1"],
+        ).unwrap();
+
+        // Simulate what start_thread/resume_thread do: read budget_cap from DB
+        let budget_cap: Option<f64> = conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        assert!((budget_cap.unwrap() - 3.50).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_budget_cap_read_returns_none_when_unset() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+
+        let budget_cap: Option<f64> = conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        assert!(budget_cap.is_none());
+    }
+
+    #[test]
+    fn test_budget_cap_read_returns_none_for_missing_workspace() {
+        let conn = setup_test_db();
+
+        let budget_cap: Option<f64> = conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params!["nonexistent"],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        assert!(budget_cap.is_none());
     }
 
     #[test]

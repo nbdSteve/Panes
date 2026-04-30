@@ -1670,6 +1670,39 @@ body {
   font-weight: 500;
 }
 
+.cost-badge .cost-cap {
+  color: var(--text-muted);
+}
+
+.cost-badge.cost-warning {
+  color: var(--warning);
+}
+
+.cost-badge.cost-danger {
+  color: var(--error);
+}
+
+.config-budget {
+  display: flex;
+  align-items: center;
+}
+
+.config-budget-input {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 80px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  outline: none;
+}
+
+.config-budget-input:focus {
+  border-color: var(--accent);
+}
+
 /* ─── Memory panel ─── */
 
 .memory-panel {
@@ -2079,4 +2112,69 @@ body {
 .memory-edit-actions {
   display: flex;
   gap: 6px;
+}
+
+/* ─── Workspace cost in sidebar ─── */
+
+.workspace-cost {
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--cost);
+  margin-left: auto;
+}
+
+/* ─── Settings panel ─── */
+
+.settings-panel {
+  padding: 24px;
+  overflow-y: auto;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.settings-section {
+  margin-bottom: 28px;
+}
+
+.settings-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+}
+
+.settings-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.settings-value {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.settings-value.muted {
+  color: var(--text-muted);
+}
+
+.backend-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.sidebar-section-bottom {
+  margin-top: auto;
+  padding-bottom: 0;
 }

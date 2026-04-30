@@ -24,9 +24,10 @@ interface ThreadViewProps {
   onCompletionAction: (threadId: string, action: "committed" | "reverted" | "kept") => void;
   onCancel: (threadId: string) => void;
   onQueueFollowUp: (threadId: string, prompt: string) => void;
+  onSetBudgetCap: (workspaceId: string, budgetCap: number | null) => void;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, onStartThread, onCompletionAction, onCancel, onQueueFollowUp }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(adapters[0] ?? "");
   const [selectedAgent, setSelectedAgent] = useState("");
@@ -37,6 +38,8 @@ export default function ThreadView({ workspace, thread, adapters, agents, onStar
   const adapterRef = useRef<HTMLDivElement>(null);
   const agentRef = useRef<HTMLDivElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [budgetValue, setBudgetValue] = useState("");
   const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string } | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
@@ -118,7 +121,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, onStar
             </span>
           )}
         </div>
-        {runningCost > 0 && <CostBadge cost={runningCost} label="Cost" />}
+        {runningCost > 0 && <CostBadge cost={runningCost} label="Cost" budgetCap={workspace.budgetCap ?? undefined} />}
       </div>
 
       <div className="thread-content" ref={contentRef}>
@@ -368,6 +371,52 @@ export default function ThreadView({ workspace, thread, adapters, agents, onStar
                   </div>
                 )}
               </div>
+            </div>
+
+            <div className="config-budget">
+              {editingBudget ? (
+                <input
+                  className="config-budget-input"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="No limit"
+                  value={budgetValue}
+                  onChange={(e) => setBudgetValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const val = budgetValue.trim() ? parseFloat(budgetValue) : null;
+                      onSetBudgetCap(workspace.id, val && val > 0 ? val : null);
+                      setEditingBudget(false);
+                    }
+                    if (e.key === "Escape") {
+                      setEditingBudget(false);
+                    }
+                  }}
+                  onBlur={() => {
+                    const val = budgetValue.trim() ? parseFloat(budgetValue) : null;
+                    onSetBudgetCap(workspace.id, val && val > 0 ? val : null);
+                    setEditingBudget(false);
+                  }}
+                  autoFocus
+                />
+              ) : (
+                <button
+                  className="config-dropdown-trigger"
+                  onClick={() => {
+                    setBudgetValue(workspace.budgetCap ? String(workspace.budgetCap) : "");
+                    setEditingBudget(true);
+                  }}
+                  disabled={isRunning}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="1" x2="12" y2="23" /><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                  </svg>
+                  <span className="config-dropdown-value">
+                    {workspace.budgetCap ? `$${workspace.budgetCap.toFixed(2)}` : "No limit"}
+                  </span>
+                </button>
+              )}
             </div>
           </div>
         );
