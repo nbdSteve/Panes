@@ -47,3 +47,57 @@ pub struct InjectedContext {
     pub memories: Vec<Memory>,
     pub token_estimate: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- MemoryType Display tests ---
+
+    #[test]
+    fn test_memory_type_display_decision() {
+        assert_eq!(format!("{}", MemoryType::Decision), "decision");
+    }
+
+    #[test]
+    fn test_memory_type_display_preference() {
+        assert_eq!(format!("{}", MemoryType::Preference), "preference");
+    }
+
+    #[test]
+    fn test_memory_type_display_constraint() {
+        assert_eq!(format!("{}", MemoryType::Constraint), "constraint");
+    }
+
+    #[test]
+    fn test_memory_type_display_pattern() {
+        assert_eq!(format!("{}", MemoryType::Pattern), "pattern");
+    }
+
+    // --- MemoryType serde roundtrip ---
+
+    #[test]
+    fn test_memory_type_serde_roundtrip() {
+        let variants = [
+            MemoryType::Decision,
+            MemoryType::Preference,
+            MemoryType::Constraint,
+            MemoryType::Pattern,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let deserialized: MemoryType = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, deserialized);
+        }
+    }
+
+    // --- InjectedContext default ---
+
+    #[test]
+    fn test_injected_context_default() {
+        let ctx = InjectedContext::default();
+        assert_eq!(ctx.briefing, None);
+        assert!(ctx.memories.is_empty());
+        assert_eq!(ctx.token_estimate, 0);
+    }
+}

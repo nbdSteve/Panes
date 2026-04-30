@@ -1083,4 +1083,273 @@ Body text here
         assert!(json.contains("\"model\""));
         assert!(json.contains("\"description\""));
     }
+
+    #[test]
+    fn test_list_agents_unknown_adapter_returns_empty() {
+        let result = list_agents("unknown-adapter".to_string());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_workspace_info_camel_case_serialization() {
+        let ws = WorkspaceInfo {
+            id: "ws1".to_string(),
+            path: "/tmp".to_string(),
+            name: "test".to_string(),
+            default_agent: Some("claude-code".to_string()),
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(json.contains("\"defaultAgent\""));
+        assert!(!json.contains("\"default_agent\""));
+    }
+
+    #[test]
+    fn test_thread_info_camel_case_serialization() {
+        let ti = ThreadInfo {
+            id: "t1".to_string(),
+            workspace_id: "ws1".to_string(),
+            prompt: "hello".to_string(),
+            status: "running".to_string(),
+            summary: None,
+            cost_usd: 0.05,
+            duration_ms: Some(1000),
+            created_at: "2024-01-01".to_string(),
+            events: vec![],
+        };
+        let json = serde_json::to_string(&ti).unwrap();
+        assert!(json.contains("\"workspaceId\""));
+        assert!(json.contains("\"costUsd\""));
+        assert!(json.contains("\"durationMs\""));
+        assert!(json.contains("\"createdAt\""));
+    }
+
+    #[test]
+    fn test_add_and_list_workspaces() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        insert_test_workspace(&conn, "ws2", "/tmp/b");
+
+        let mut stmt = conn.prepare(
+            "SELECT id, path, name, default_agent FROM workspaces ORDER BY created_at"
+        ).unwrap();
+        let rows: Vec<(String, String, String)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }).unwrap().filter_map(|r| r.ok()).collect();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "ws1");
+        assert_eq!(rows[1].0, "ws2");
+    }
+
+    #[test]
+    fn test_remove_workspace_cascades() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        conn.execute(
+            "INSERT INTO events (thread_id, event_type, timestamp, data) VALUES ('t1', 'text', '2024-01-01', '{}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.01, '2024-01-01')",
+            [],
+        ).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute("DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)", rusqlite::params!["ws1"]).unwrap();
+        tx.execute("DELETE FROM costs WHERE workspace_id = ?1", rusqlite::params!["ws1"]).unwrap();
+        tx.execute("DELETE FROM threads WHERE workspace_id = ?1", rusqlite::params!["ws1"]).unwrap();
+        tx.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params!["ws1"]).unwrap();
+        tx.commit().unwrap();
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM costs", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_list_threads_for_workspace() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        insert_test_workspace(&conn, "ws2", "/tmp/b");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        insert_test_thread(&conn, "t2", "ws1", None);
+        insert_test_thread(&conn, "t3", "ws2", None);
+
+        let mut stmt = conn.prepare(
+            "SELECT id FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
+        ).unwrap();
+        let ids: Vec<String> = stmt.query_map(rusqlite::params!["ws1"], |row| row.get(0))
+            .unwrap().filter_map(|r| r.ok()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(!ids.contains(&"t3".to_string()));
+    }
+
+    #[test]
+    fn test_list_threads_empty_workspace() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+
+        let mut stmt = conn.prepare(
+            "SELECT id FROM threads WHERE workspace_id = ?1"
+        ).unwrap();
+        let ids: Vec<String> = stmt.query_map(rusqlite::params!["ws1"], |row| row.get(0))
+            .unwrap().filter_map(|r| r.ok()).collect();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_list_threads_includes_events() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        conn.execute(
+            "INSERT INTO events (thread_id, event_type, timestamp, data) VALUES ('t1', 'text', '2024-01-01', '{\"event_type\":\"text\",\"text\":\"hello\"}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO events (thread_id, event_type, timestamp, data) VALUES ('t1', 'complete', '2024-01-01', '{\"event_type\":\"complete\",\"summary\":\"done\"}')",
+            [],
+        ).unwrap();
+
+        let mut evt_stmt = conn.prepare("SELECT data FROM events WHERE thread_id = ?1 ORDER BY id ASC").unwrap();
+        let events: Vec<serde_json::Value> = evt_stmt.query_map(rusqlite::params!["t1"], |row| {
+            let data: String = row.get(0)?;
+            Ok(serde_json::from_str(&data).unwrap_or(serde_json::Value::Null))
+        }).unwrap().filter_map(|r| r.ok()).collect();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event_type"], "text");
+        assert_eq!(events[1]["event_type"], "complete");
+    }
+
+    #[test]
+    fn test_delete_thread_removes_all_related() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        conn.execute(
+            "INSERT INTO events (thread_id, event_type, timestamp, data) VALUES ('t1', 'text', '2024-01-01', '{}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.01, '2024-01-01')",
+            [],
+        ).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute("DELETE FROM events WHERE thread_id = ?1", rusqlite::params!["t1"]).unwrap();
+        tx.execute("DELETE FROM costs WHERE thread_id = ?1", rusqlite::params!["t1"]).unwrap();
+        tx.execute("DELETE FROM threads WHERE id = ?1", rusqlite::params!["t1"]).unwrap();
+        tx.commit().unwrap();
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_set_and_read_budget_cap() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+
+        conn.execute(
+            "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+            rusqlite::params![5.0, "ws1"],
+        ).unwrap();
+
+        let cap: Option<f64> = conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap();
+        assert!((cap.unwrap() - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_budget_cap_null_by_default() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+
+        let cap: Option<f64> = conn.query_row(
+            "SELECT budget_cap FROM workspaces WHERE id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(cap.is_none());
+    }
+
+    #[test]
+    fn test_workspace_cost_with_multiple_threads() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        insert_test_thread(&conn, "t2", "ws1", None);
+
+        conn.execute(
+            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.10, '2024-01-01')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t2', 'ws1', 0.25, '2024-01-01')",
+            [],
+        ).unwrap();
+
+        let total: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(total_usd), 0) FROM costs WHERE workspace_id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap();
+        assert!((total - 0.35).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_expand_tilde_empty_string() {
+        assert_eq!(expand_tilde(""), "");
+    }
+
+    #[test]
+    fn test_list_all_threads_respects_limit() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at) VALUES (?1, 'ws1', 'claude', 'completed', 'test', ?2)",
+                rusqlite::params![format!("t{i}"), format!("2024-0{}-01", i + 1)],
+            ).unwrap();
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id FROM threads ORDER BY created_at DESC LIMIT ?1"
+        ).unwrap();
+        let ids: Vec<String> = stmt.query_map(rusqlite::params![3], |row| row.get(0))
+            .unwrap().filter_map(|r| r.ok()).collect();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn test_thread_with_cost_and_duration() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, cost_usd, duration_ms, created_at)
+             VALUES ('t1', 'ws1', 'claude', 'completed', 'test', 0.05, 5000, '2024-01-01')",
+            [],
+        ).unwrap();
+
+        let (cost, duration): (f64, Option<i64>) = conn.query_row(
+            "SELECT cost_usd, duration_ms FROM threads WHERE id = 't1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert!((cost - 0.05).abs() < f64::EPSILON);
+        assert_eq!(duration, Some(5000));
+    }
 }

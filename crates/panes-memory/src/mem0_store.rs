@@ -475,4 +475,222 @@ mod tests {
         }
         assert!(store.pinned_ids().is_empty());
     }
+
+    // --- HTTP-level tests using mockito ---
+
+    const SINGLE_MEMORY_RESPONSE: &str = r#"{"results": [{"id": "m1", "memory": "User prefers tabs", "metadata": {"thread_id": "t1"}, "created_at": "2026-01-01T00:00:00Z", "updated_at": null}]}"#;
+
+    #[tokio::test]
+    async fn test_add_memory_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/memories/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(SINGLE_MEMORY_RESPONSE)
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let memories = store.add("transcript", Some("ws1"), "t1").await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, "m1");
+        assert_eq!(memories[0].content, "User prefers tabs");
+        assert_eq!(memories[0].workspace_id.as_deref(), Some("ws1"));
+        assert_eq!(memories[0].source_thread_id, "t1");
+        assert_eq!(memories[0].memory_type, MemoryType::Preference);
+        assert!(!memories[0].pinned);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_add_memory_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/memories/")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let result = store.add("transcript", Some("ws1"), "t1").await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("500"), "error should mention status code: {err_msg}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_search_returns_results() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/memories/search/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(SINGLE_MEMORY_RESPONSE)
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let memories = store.search("tabs", Some("ws1"), 10).await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, "m1");
+        assert_eq!(memories[0].content, "User prefers tabs");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_search_empty_results() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/memories/search/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"results": []}"#)
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let memories = store.search("nothing", None, 10).await.unwrap();
+        assert!(memories.is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_all_memories() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/memories/")
+            .match_query(mockito::Matcher::UrlEncoded("user_id".into(), "ws:ws1".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(SINGLE_MEMORY_RESPONSE)
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let memories = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, "m1");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_update_memory_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("PUT", "/v1/memories/m1/")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let result = store.update("m1", "updated content").await;
+        assert!(result.is_ok());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_update_memory_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("PUT", "/v1/memories/m1/")
+            .with_status(404)
+            .with_body("not found")
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let result = store.update("m1", "updated content").await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("404"), "error should mention status code: {err_msg}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_memory_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("DELETE", "/v1/memories/m1/")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        // Pin the memory first, then delete -- verify pin is cleaned up
+        store.pin("m1", true).await.unwrap();
+        assert!(store.pinned_ids().contains("m1"));
+
+        let result = store.delete("m1").await;
+        assert!(result.is_ok());
+        assert!(!store.pinned_ids().contains("m1"), "pin should be cleaned up after delete");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_memory_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("DELETE", "/v1/memories/m1/")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let result = store.delete("m1").await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("500"), "error should mention status code: {err_msg}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_all_applies_pin_state() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/memories/")
+            .match_query(mockito::Matcher::UrlEncoded("user_id".into(), "ws:ws1".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"results": [
+                {"id": "m1", "memory": "User prefers tabs", "metadata": {}, "created_at": "2026-01-01T00:00:00Z", "updated_at": null},
+                {"id": "m2", "memory": "Uses React hooks", "metadata": {}, "created_at": "2026-01-01T00:00:00Z", "updated_at": null}
+            ]}"#)
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        // Pin only m1
+        store.pin("m1", true).await.unwrap();
+
+        let memories = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(memories.len(), 2);
+
+        let m1 = memories.iter().find(|m| m.id == "m1").unwrap();
+        let m2 = memories.iter().find(|m| m.id == "m2").unwrap();
+        assert!(m1.pinned, "m1 should be pinned");
+        assert!(!m2.pinned, "m2 should not be pinned");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_health_check_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/health")
+            .with_status(200)
+            .with_body("ok")
+            .create_async()
+            .await;
+
+        let store = Mem0Store::new(&server.url());
+        let healthy = store.health_check().await.unwrap();
+        assert!(healthy);
+        mock.assert_async().await;
+    }
 }

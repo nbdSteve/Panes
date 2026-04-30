@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceInfo } from "../App";
+import { timeAgo, formatCost, truncatePrompt } from "../lib/utils";
 
 interface BackendThread {
   id: string;
@@ -39,22 +40,6 @@ export default function FeedView({
       })
       .catch(() => setLoaded(true));
   }, []);
-
-  const timeAgo = (iso: string) => {
-    const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-    if (seconds < 60) return "just now";
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    return `${Math.floor(hours / 24)}d ago`;
-  };
-
-  const formatCost = (cost: number) =>
-    cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
-
-  const truncatePrompt = (text: string, max = 80) =>
-    text.length > max ? text.substring(0, max) + "..." : text;
 
   const outcomeClass = (status: string) => {
     if (status === "completed" || status === "complete") return "success";

@@ -309,3 +309,85 @@ impl Drop for ClaudeSession {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use panes_events::SessionContext;
+    use std::path::Path;
+
+    #[test]
+    fn test_new_defaults() {
+        let adapter = ClaudeAdapter::new();
+        assert_eq!(adapter.cli_path, "claude");
+        assert_eq!(adapter.permission_mode, "bypassPermissions");
+        assert!(adapter.env_vars.is_empty());
+    }
+
+    #[test]
+    fn test_with_cli_path() {
+        let adapter = ClaudeAdapter::with_cli_path("/usr/local/bin/claude");
+        assert_eq!(adapter.cli_path, "/usr/local/bin/claude");
+    }
+
+    #[test]
+    fn test_permission_mode_builder() {
+        let adapter = ClaudeAdapter::new().permission_mode("acceptEdits");
+        assert_eq!(adapter.permission_mode, "acceptEdits");
+    }
+
+    #[test]
+    fn test_env_builder() {
+        let adapter = ClaudeAdapter::new()
+            .env("API_KEY", "secret")
+            .env("DEBUG", "1");
+        assert_eq!(adapter.env_vars.len(), 2);
+        assert_eq!(adapter.env_vars[0], ("API_KEY".to_string(), "secret".to_string()));
+    }
+
+    #[test]
+    fn test_default_trait() {
+        let adapter = ClaudeAdapter::default();
+        assert_eq!(adapter.cli_path, "claude");
+        assert_eq!(adapter.permission_mode, "bypassPermissions");
+    }
+
+    #[test]
+    fn test_name() {
+        let adapter = ClaudeAdapter::new();
+        assert_eq!(adapter.name(), "claude-code");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_nonexistent_binary() {
+        let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx).await;
+        let err = result.err().expect("expected spawn to fail");
+        let msg = err.to_string();
+        assert!(msg.contains("failed to spawn"), "error: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_resume_nonexistent_binary() {
+        let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
+        let result = adapter.resume(Path::new("/tmp"), "session-123", "follow up").await;
+        let err = result.err().expect("expected resume to fail");
+        let msg = err.to_string();
+        assert!(msg.contains("failed to spawn"), "error: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_briefing_and_memories() {
+        // Verify that briefing/memories are incorporated in the prompt
+        // Can't test actual prompt easily, but we can verify it doesn't panic with context
+        let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
+        let ctx = SessionContext {
+            briefing: Some("You are a helpful assistant".to_string()),
+            memories: vec!["User prefers tabs".to_string(), "Project uses React".to_string()],
+            budget_cap: Some(5.0),
+        };
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx).await;
+        assert!(result.is_err()); // Still fails on binary, but no panic
+    }
+}

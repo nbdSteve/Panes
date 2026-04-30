@@ -175,3 +175,90 @@ impl Drop for SidecarManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_creates_manager() {
+        let mgr = SidecarManager::new("/usr/bin/fake", "/tmp/data", 9999);
+        assert_eq!(mgr.port, 9999);
+        assert_eq!(mgr.binary_path, PathBuf::from("/usr/bin/fake"));
+        assert_eq!(mgr.data_dir, PathBuf::from("/tmp/data"));
+        assert!(mgr.child.is_none());
+        assert_eq!(mgr.restart_count, 0);
+    }
+
+    #[test]
+    fn test_base_url() {
+        let mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        assert_eq!(mgr.base_url(), "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_base_url_different_port() {
+        let mgr = SidecarManager::new("/bin/x", "/tmp", 3000);
+        assert_eq!(mgr.base_url(), "http://127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_is_running_false_initially() {
+        let mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        assert!(!mgr.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_stop_when_not_running() {
+        let mut mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        mgr.stop().await;
+        assert!(!mgr.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_start_nonexistent_binary() {
+        let mut mgr = SidecarManager::new(
+            "/nonexistent/binary/that/does/not/exist",
+            "/tmp/panes-test-sidecar",
+            19876,
+        );
+        let result = mgr.start().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to spawn"));
+    }
+
+    #[tokio::test]
+    async fn test_restart_exceeds_max_attempts() {
+        let mut mgr = SidecarManager::new("/nonexistent", "/tmp", 19877);
+        mgr.restart_count = MAX_RESTART_ATTEMPTS;
+        let result = mgr.restart().await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_restart_increments_count() {
+        let mut mgr = SidecarManager::new("/nonexistent", "/tmp/panes-test-sc2", 19878);
+        assert_eq!(mgr.restart_count, 0);
+        let _ = mgr.restart().await;
+        assert_eq!(mgr.restart_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_restart_with_failed_start_returns_false() {
+        let mut mgr = SidecarManager::new("/nonexistent", "/tmp/panes-test-sc3", 19879);
+        let result = mgr.restart().await.unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_drop_no_panic_when_no_child() {
+        let mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        drop(mgr);
+    }
+
+    #[tokio::test]
+    async fn test_health_monitor_returns_receiver() {
+        let rx = SidecarManager::spawn_health_monitor("http://127.0.0.1:19999".to_string());
+        assert!(*rx.borrow());
+    }
+}

@@ -7,20 +7,13 @@ import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
 import CostBadge from "./CostBadge";
 import { calculateRunningCost } from "../lib/cost";
+import { normalizeModelId } from "../lib/utils";
 
 const MODELS = [
   { id: "sonnet", label: "Sonnet", desc: "Fast & capable" },
   { id: "opus", label: "Opus", desc: "Most capable" },
   { id: "haiku", label: "Haiku", desc: "Fastest" },
 ];
-
-function normalizeModelId(raw: string): string {
-  const lower = raw.toLowerCase();
-  if (lower.includes("opus")) return "opus";
-  if (lower.includes("sonnet")) return "sonnet";
-  if (lower.includes("haiku")) return "haiku";
-  return raw;
-}
 
 interface ThreadViewProps {
   workspace: WorkspaceInfo;
