@@ -99,7 +99,11 @@ impl AgentAdapter for FakeAdapter {
             ],
         };
 
-        let has_gate = matches!(&self.scenario, FakeScenario::GatedAction { .. });
+        let has_gate = match &self.scenario {
+            FakeScenario::GatedAction { .. } => true,
+            FakeScenario::MultiStep { steps, .. } => steps.iter().any(|s| s.needs_approval),
+            _ => false,
+        };
         let events = build_events(&self.scenario);
 
         Ok(Box::new(FakeSession {
@@ -507,6 +511,121 @@ mod tests {
         }
 
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message == "Auth failed")));
+    }
+
+    #[tokio::test]
+    async fn test_multistep_gated_step_pauses() {
+        let adapter = FakeAdapter::new(FakeScenario::MultiStep {
+            steps: vec![
+                FakeStep {
+                    tool_name: "Read".to_string(),
+                    description: "Read a file".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "file contents".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Bash".to_string(),
+                    description: "rm -rf /tmp/test".to_string(),
+                    risk_level: RiskLevel::Critical,
+                    needs_approval: true,
+                    success: true,
+                    output: "done".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Read".to_string(),
+                    description: "Read another file".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "more contents".to_string(),
+                },
+            ],
+            response: "All done.".to_string(),
+        }).with_delay(0);
+
+        let workspace = Path::new("/tmp");
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut stream = session.events();
+        let mut events: Vec<AgentEvent> = vec![];
+
+        while let Some(ev) = stream.next().await {
+            let is_gate = matches!(&ev, AgentEvent::ToolRequest { needs_approval: true, .. });
+            events.push(ev);
+            if is_gate {
+                session.approve("tool_1").await.unwrap();
+            }
+        }
+
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolRequest { needs_approval: true, .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Complete { .. })));
+        let tool_results: Vec<_> = events.iter().filter(|e| matches!(e, AgentEvent::ToolResult { .. })).collect();
+        assert_eq!(tool_results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_multistep_gated_step_reject() {
+        let adapter = FakeAdapter::new(FakeScenario::MultiStep {
+            steps: vec![
+                FakeStep {
+                    tool_name: "Read".to_string(),
+                    description: "Read a file".to_string(),
+                    risk_level: RiskLevel::Low,
+                    needs_approval: false,
+                    success: true,
+                    output: "file contents".to_string(),
+                },
+                FakeStep {
+                    tool_name: "Bash".to_string(),
+                    description: "rm -rf /tmp/test".to_string(),
+                    risk_level: RiskLevel::Critical,
+                    needs_approval: true,
+                    success: true,
+                    output: "done".to_string(),
+                },
+            ],
+            response: "Done.".to_string(),
+        }).with_delay(0);
+
+        let workspace = Path::new("/tmp");
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+        let mut stream = session.events();
+        let mut events: Vec<AgentEvent> = vec![];
+
+        while let Some(ev) = stream.next().await {
+            let is_gate = matches!(&ev, AgentEvent::ToolRequest { needs_approval: true, .. });
+            events.push(ev);
+            if is_gate {
+                session.reject("tool_1", "too dangerous").await.unwrap();
+            }
+        }
+
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolRequest { needs_approval: true, .. })));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Complete { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_events_called_twice_returns_empty() {
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hello".to_string(),
+        }).with_delay(0);
+
+        let workspace = Path::new("/tmp");
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let mut session = adapter.spawn(workspace, "test", &ctx).await.unwrap();
+
+        let mut stream1 = session.events();
+        let mut count1 = 0;
+        while let Some(_) = stream1.next().await { count1 += 1; }
+        assert!(count1 > 0);
+
+        let mut stream2 = session.events();
+        let mut count2 = 0;
+        while let Some(_) = stream2.next().await { count2 += 1; }
+        assert_eq!(count2, 0);
     }
 
     #[tokio::test]

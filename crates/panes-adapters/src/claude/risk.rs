@@ -49,7 +49,10 @@ fn classify_bash_risk(input: &Value) -> RiskLevel {
         return RiskLevel::Critical;
     }
 
-    if READONLY_PATTERNS.is_match(command) {
+    let has_chaining = command.contains("&&") || command.contains('|')
+        || command.contains(';') || command.contains('>');
+
+    if !has_chaining && READONLY_PATTERNS.is_match(command) {
         return RiskLevel::Low;
     }
 
@@ -131,5 +134,48 @@ mod tests {
     #[test]
     fn test_unknown_tool_is_medium() {
         assert_eq!(classify_risk("SomeNewTool", &json!({})), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_piped_readonly_to_destructive() {
+        let input = json!({"command": "ls | xargs rm -rf /"});
+        assert_eq!(classify_risk("Bash", &input), RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_echo_redirect_not_low() {
+        let input = json!({"command": "echo data > /etc/passwd"});
+        assert_ne!(classify_risk("Bash", &input), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_cat_pipe_rm() {
+        let input = json!({"command": "cat file | rm important.txt"});
+        assert_eq!(classify_risk("Bash", &input), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_semicolon_chain_destructive() {
+        let input = json!({"command": "git status; git reset --hard"});
+        assert_eq!(classify_risk("Bash", &input), RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_simple_readonly_still_low() {
+        let input = json!({"command": "ls -la"});
+        assert_eq!(classify_risk("Bash", &input), RiskLevel::Low);
+
+        let input = json!({"command": "git log --oneline"});
+        assert_eq!(classify_risk("Bash", &input), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_bash_no_command_field() {
+        assert_eq!(classify_risk("Bash", &json!({})), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_bash_null_command() {
+        assert_eq!(classify_risk("Bash", &json!({"command": null})), RiskLevel::Medium);
     }
 }

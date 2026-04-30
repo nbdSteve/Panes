@@ -481,4 +481,51 @@ mod tests {
         assert!(!all[1].pinned);
         let _ = m1;
     }
+
+    #[tokio::test]
+    async fn test_unicode_emoji_store_and_search() {
+        let store = make_store();
+        store.add("Use dark mode \u{1F30D}\u{2728} for all themes", Some("ws1"), "t1").await.unwrap();
+        let results = store.search("\u{1F30D}", Some("ws1"), 5).await.unwrap();
+        // Main assertion: no crash, no error
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert!(!all.is_empty());
+        let _ = results;
+    }
+
+    #[tokio::test]
+    async fn test_cjk_text_store_and_retrieve() {
+        let store = make_store();
+        store.add("\u{4F7F}\u{7528} TypeScript \u{4E25}\u{683C}\u{6A21}\u{5F0F}", Some("ws1"), "t1").await.unwrap();
+        store.add("\u{30D1}\u{30C3}\u{30B1}\u{30FC}\u{30B8}\u{7BA1}\u{7406}\u{306B} pnpm \u{3092}\u{4F7F}\u{7528}", Some("ws1"), "t2").await.unwrap();
+
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let search = store.search("TypeScript", Some("ws1"), 5).await.unwrap();
+        let _ = search; // no crash
+    }
+
+    #[tokio::test]
+    async fn test_very_long_content() {
+        let store = make_store();
+        let long_content = "a".repeat(10_000);
+        store.add(&long_content, Some("ws1"), "t1").await.unwrap();
+
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(all.len(), 1);
+
+        let results = store.search("aaaa", Some("ws1"), 5).await.unwrap();
+        let _ = results; // no crash
+    }
+
+    #[tokio::test]
+    async fn test_empty_content_store() {
+        let store = make_store();
+        let mems = store.add("", Some("ws1"), "t1").await.unwrap();
+        assert_eq!(mems.len(), 1);
+
+        let all = store.get_all(Some("ws1")).await.unwrap();
+        assert_eq!(all.len(), 1);
+    }
 }

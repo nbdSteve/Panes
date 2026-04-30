@@ -329,4 +329,51 @@ mod tests {
         assert!((get_workspace_cost(&conn, "nonexistent").unwrap()).abs() < f64::EPSILON);
         assert!((get_total_cost(&conn).unwrap()).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn test_negative_cost_reduces_total() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.05));
+        tracker.process_event("t1", &make_cost_event(0, 0, -0.03));
+        assert!((tracker.get_running_cost("t1").unwrap() - 0.02).abs() < f64::EPSILON);
+        assert!(!tracker.check_budget("t1", 0.05));
+    }
+
+    #[test]
+    fn test_nan_cost_poisons_total() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+
+        tracker.process_event("t1", &make_cost_event(100, 50, f64::NAN));
+        assert!(tracker.get_running_cost("t1").unwrap().is_nan());
+        // IEEE 754: NaN >= budget_cap is always false — budget never triggers
+        assert!(!tracker.check_budget("t1", 0.01));
+    }
+
+    #[test]
+    fn test_nan_then_normal_stays_nan() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+
+        tracker.process_event("t1", &make_cost_event(0, 0, f64::NAN));
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.05));
+        // NaN + anything = NaN — tracker is permanently poisoned
+        assert!(tracker.get_running_cost("t1").unwrap().is_nan());
+    }
+
+    #[test]
+    fn test_start_tracking_overwrites() {
+        let tracker = CostTracker::new();
+        tracker.start_tracking("t1", "ws1");
+        tracker.process_event("t1", &make_cost_event(100, 50, 0.05));
+
+        tracker.start_tracking("t1", "ws2");
+        assert!((tracker.get_running_cost("t1").unwrap()).abs() < f64::EPSILON);
+
+        let finalized = tracker.finalize("t1").unwrap();
+        assert_eq!(finalized.workspace_id, "ws2");
+        assert_eq!(finalized.input_tokens, 0);
+    }
 }

@@ -510,3 +510,93 @@ impl SessionManager {
         active.remove(thread_id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use panes_adapters::fake::{FakeAdapter, FakeScenario};
+
+    fn setup_session_manager() -> (SessionManager, mpsc::UnboundedReceiver<ThreadEvent>) {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let cost_tracker = Arc::new(CostTracker::new());
+        let (tx, rx) = mpsc::unbounded_channel();
+        (SessionManager::new(cost_tracker, tx, db), rx)
+    }
+
+    fn make_workspace() -> Workspace {
+        Workspace {
+            id: "ws-test".to_string(),
+            path: std::env::temp_dir(),
+            name: "test-workspace".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_thread_unknown_agent() {
+        let (mgr, _rx) = setup_session_manager();
+        let ws = make_workspace();
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = mgr.start_thread(&ws, "hello", "nonexistent-agent", ctx).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown agent"));
+    }
+
+    #[tokio::test]
+    async fn test_approve_nonexistent_thread() {
+        let (mgr, _rx) = setup_session_manager();
+        let result = mgr.approve("no-such-thread", "tool1").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("thread not found"));
+    }
+
+    #[tokio::test]
+    async fn test_reject_nonexistent_thread() {
+        let (mgr, _rx) = setup_session_manager();
+        let result = mgr.reject("no-such-thread", "tool1", "reason").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("thread not found"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_nonexistent_thread_is_ok() {
+        let (mgr, _rx) = setup_session_manager();
+        let result = mgr.cancel("no-such-thread").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_start_and_complete_with_fake() {
+        let (mut mgr, mut rx) = setup_session_manager();
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hello!".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = make_workspace();
+        {
+            let conn = mgr.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![ws.id, ws.path.to_string_lossy(), ws.name, "2024-01-01"],
+            ).unwrap();
+        }
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx).await.unwrap();
+        assert!(!thread_id.is_empty());
+
+        let mut got_complete = false;
+        while let Some(te) = rx.recv().await {
+            if matches!(te.event, AgentEvent::Complete { .. }) {
+                got_complete = true;
+                break;
+            }
+        }
+        assert!(got_complete);
+    }
+}

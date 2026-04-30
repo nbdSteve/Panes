@@ -591,4 +591,131 @@ mod tests {
         assert!(json.contains("\"workspaceId\""));
         assert!(!json.contains("\"workspace_id\""));
     }
+
+    fn setup_test_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("
+            PRAGMA foreign_keys=ON;
+            CREATE TABLE workspaces (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                default_agent TEXT,
+                budget_cap REAL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                agent_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                prompt TEXT NOT NULL,
+                summary TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                cost_usd REAL DEFAULT 0,
+                duration_ms INTEGER,
+                snapshot_ref TEXT,
+                is_routine INTEGER DEFAULT 0,
+                flow_id TEXT,
+                flow_step INTEGER,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL REFERENCES threads(id),
+                event_type TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL REFERENCES threads(id),
+                workspace_id TEXT NOT NULL,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                total_usd REAL DEFAULT 0,
+                model TEXT,
+                timestamp TEXT NOT NULL
+            );
+        ").unwrap();
+        conn
+    }
+
+    fn insert_test_workspace(conn: &rusqlite::Connection, id: &str, path: &str) {
+        conn.execute(
+            "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, '2024-01-01')",
+            rusqlite::params![id, path, format!("ws-{id}")],
+        ).unwrap();
+    }
+
+    fn insert_test_thread(conn: &rusqlite::Connection, id: &str, ws_id: &str, snapshot: Option<&str>) {
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at, snapshot_ref)
+             VALUES (?1, ?2, 'claude', 'completed', 'test', '2024-01-01', ?3)",
+            rusqlite::params![id, ws_id, snapshot],
+        ).unwrap();
+    }
+
+    #[test]
+    fn test_revert_query_nonexistent_thread() {
+        let conn = setup_test_db();
+        let result: Result<String, _> = conn.query_row(
+            "SELECT snapshot_ref FROM threads WHERE id = ?1",
+            rusqlite::params!["nonexistent"],
+            |row| row.get(0),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_revert_query_null_snapshot() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/test");
+        insert_test_thread(&conn, "t1", "ws1", None);
+
+        let result: Result<String, _> = conn.query_row(
+            "SELECT snapshot_ref FROM threads WHERE id = ?1",
+            rusqlite::params!["t1"],
+            |row| row.get(0),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_revert_query_valid_snapshot() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/test");
+        insert_test_thread(&conn, "t1", "ws1", Some("abc123"));
+
+        let hash: String = conn.query_row(
+            "SELECT snapshot_ref FROM threads WHERE id = ?1",
+            rusqlite::params!["t1"],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(hash, "abc123");
+    }
+
+    #[test]
+    fn test_delete_nonexistent_ids_succeeds() {
+        let conn = setup_test_db();
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute("DELETE FROM events WHERE thread_id = ?1", rusqlite::params!["nope"]).unwrap();
+        tx.execute("DELETE FROM costs WHERE thread_id = ?1", rusqlite::params!["nope"]).unwrap();
+        tx.execute("DELETE FROM threads WHERE id = ?1", rusqlite::params!["nope"]).unwrap();
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn test_add_workspace_duplicate_path() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/project");
+        let result = conn.execute(
+            "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, '2024-01-01')",
+            rusqlite::params!["ws2", "/tmp/project", "duplicate"],
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("UNIQUE"), "should be UNIQUE constraint error: {err}");
+    }
 }

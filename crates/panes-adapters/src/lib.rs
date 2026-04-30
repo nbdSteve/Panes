@@ -32,6 +32,7 @@ pub trait AgentAdapter: Send + Sync {
 pub trait AgentSession: Send {
     fn init(&self) -> &SessionInit;
 
+    /// Must only be called once. Behavior on second call is adapter-dependent.
     fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
     async fn approve(&self, tool_use_id: &str) -> Result<()>;

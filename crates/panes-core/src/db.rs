@@ -27,7 +27,7 @@ fn recover_stale_threads(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn run_migrations(conn: &Connection) -> Result<()> {
+pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS workspaces (

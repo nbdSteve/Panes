@@ -175,4 +175,35 @@ mod tests {
         let changed_after = get_changed_files(dir.path()).await.unwrap();
         assert!(changed_after.is_empty());
     }
+
+    async fn make_empty_git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init"]).await.unwrap();
+        run_git(dir.path(), &["config", "user.email", "test@test.com"]).await.unwrap();
+        run_git(dir.path(), &["config", "user.name", "Test"]).await.unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_fails_on_empty_repo() {
+        let dir = make_empty_git_repo().await;
+        let result = snapshot(dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_is_git_repo_on_empty_repo() {
+        let dir = make_empty_git_repo().await;
+        assert!(is_git_repo(dir.path()).await);
+    }
+
+    #[tokio::test]
+    async fn test_revert_with_invalid_hash() {
+        let dir = make_git_repo().await;
+        let bad_snapshot = SnapshotRef {
+            commit_hash: "0000000000000000000000000000000000000000".to_string(),
+        };
+        let result = revert(dir.path(), &bad_snapshot).await;
+        assert!(result.is_err());
+    }
 }

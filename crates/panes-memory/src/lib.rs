@@ -199,4 +199,34 @@ mod tests {
             super::MAX_PINNED_MEMORIES,
         );
     }
+
+    #[tokio::test]
+    async fn test_build_context_zero_budget_includes_pinned() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+        let pinned = store.add("pinned important fact", Some("ws1"), "t1").await.unwrap();
+        store.pin(&pinned[0].id, true).await.unwrap();
+        store.add("unpinned regular memory", Some("ws1"), "t2").await.unwrap();
+
+        let ctx = build_context(&store, &store, "important fact", "ws1", 0)
+            .await
+            .unwrap();
+
+        let has_pinned = ctx.memories.iter().any(|m| m.pinned);
+        let has_unpinned = ctx.memories.iter().any(|m| !m.pinned);
+        assert!(has_pinned, "pinned memory should be included with zero budget");
+        assert!(!has_unpinned, "unpinned memory should be excluded with zero budget");
+    }
+
+    #[tokio::test]
+    async fn test_build_context_empty_store() {
+        let store = SqliteMemoryStore::new(":memory:").unwrap();
+
+        let ctx = build_context(&store, &store, "anything", "ws1", 2000)
+            .await
+            .unwrap();
+
+        assert!(ctx.briefing.is_none());
+        assert!(ctx.memories.is_empty());
+        assert_eq!(ctx.token_estimate, 0);
+    }
 }
