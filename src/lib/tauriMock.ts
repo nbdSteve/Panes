@@ -530,8 +530,23 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       mockBriefings.delete(args?.workspaceId as string);
       return null;
 
-    case "list_agents":
+    case "list_adapters":
       return ["claude-code"];
+
+    case "list_agents":
+      if ((args?.adapter as string) === "claude-code") {
+        return [
+          { name: "codebase-analyzer", model: "sonnet", description: "Analyze code implementation details with precise file:line references..." },
+          { name: "codebase-locator", model: "sonnet", description: "Locate files and components relevant to a task..." },
+          { name: "codebase-pattern-finder", model: "opus", description: "Find similar implementations and usage patterns..." },
+          { name: "context-doc-generator", model: "opus", description: "Create CONTEXT.md files for AI-friendly codebase documentation..." },
+          { name: "karen", model: null, description: "Assess project completion state and create realistic plans..." },
+          { name: "load-test-planner", model: "opus", description: "Plan load tests before implementation begins..." },
+          { name: "thoughts-analyzer", model: "opus", description: "Deep dive on research topics by analyzing thought documents..." },
+          { name: "thoughts-locator", model: "sonnet", description: "Discover relevant documents in the thoughts/ directory..." },
+        ];
+      }
+      return [];
 
     case "set_workspace_default_agent": {
       const wsId = args?.workspaceId as string ?? args?.workspace_id as string;

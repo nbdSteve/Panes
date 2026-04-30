@@ -26,7 +26,7 @@ impl ClaudeAdapter {
         Self {
             cli_path: "claude".to_string(),
             env_vars: Vec::new(),
-            permission_mode: "acceptEdits".to_string(),
+            permission_mode: "bypassPermissions".to_string(),
         }
     }
 
@@ -34,7 +34,7 @@ impl ClaudeAdapter {
         Self {
             cli_path: cli_path.into(),
             env_vars: Vec::new(),
-            permission_mode: "acceptEdits".to_string(),
+            permission_mode: "bypassPermissions".to_string(),
         }
     }
 

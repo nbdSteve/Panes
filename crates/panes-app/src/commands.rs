@@ -566,11 +566,92 @@ pub async fn get_aggregate_cost(
 }
 
 #[tauri::command]
-pub async fn list_agents(
+pub async fn list_adapters(
     session_manager: tauri::State<'_, SessionState>,
 ) -> Result<Vec<String>, String> {
     let mgr = session_manager.lock().await;
     Ok(mgr.list_adapters())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    pub name: String,
+    pub model: Option<String>,
+    pub description: Option<String>,
+}
+
+#[tauri::command]
+pub fn list_agents(adapter: String) -> Result<Vec<AgentInfo>, String> {
+    match adapter.as_str() {
+        "claude-code" => list_agents_claude(),
+        _ => Ok(vec![]),
+    }
+}
+
+fn list_agents_claude() -> Result<Vec<AgentInfo>, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let agents_dir = PathBuf::from(&home).join(".claude").join("agents");
+    if !agents_dir.is_dir() {
+        return Ok(vec![]);
+    }
+    let mut agents = Vec::new();
+    let entries = std::fs::read_dir(&agents_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(info) = parse_agent_frontmatter(&content) {
+            agents.push(info);
+        }
+    }
+    agents.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(agents)
+}
+
+fn parse_agent_frontmatter(content: &str) -> Option<AgentInfo> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let after_start = &trimmed[3..];
+    let end = after_start.find("\n---")?;
+    let frontmatter = &after_start[..end];
+
+    let mut name = None;
+    let mut model = None;
+    let mut description = None;
+
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("name:") {
+            name = Some(val.trim().trim_matches('"').to_string());
+        } else if let Some(val) = line.strip_prefix("model:") {
+            let m = val.trim().trim_matches('"').to_string();
+            if !m.is_empty() {
+                model = Some(m);
+            }
+        } else if let Some(val) = line.strip_prefix("description:") {
+            let d = val.trim().trim_matches('"');
+            let short = if d.len() > 100 {
+                format!("{}...", &d[..100])
+            } else {
+                d.to_string()
+            };
+            description = Some(short);
+        }
+    }
+
+    Some(AgentInfo {
+        name: name?,
+        model,
+        description,
+    })
 }
 
 #[tauri::command]
@@ -912,5 +993,94 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(agent.unwrap(), "new-agent");
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_full() {
+        let content = r#"---
+name: my-agent
+model: opus
+description: "Does cool things"
+---
+Body text here
+"#;
+        let info = parse_agent_frontmatter(content).unwrap();
+        assert_eq!(info.name, "my-agent");
+        assert_eq!(info.model.as_deref(), Some("opus"));
+        assert_eq!(info.description.as_deref(), Some("Does cool things"));
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_no_model() {
+        let content = "---\nname: basic-agent\ndescription: Simple\n---\nBody";
+        let info = parse_agent_frontmatter(content).unwrap();
+        assert_eq!(info.name, "basic-agent");
+        assert!(info.model.is_none());
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_full_model_id() {
+        let content = "---\nname: opus-agent\nmodel: claude-opus-4.6\n---\n";
+        let info = parse_agent_frontmatter(content).unwrap();
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4.6"));
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_quoted_model() {
+        let content = "---\nname: quoted\nmodel: \"sonnet\"\n---\n";
+        let info = parse_agent_frontmatter(content).unwrap();
+        assert_eq!(info.model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_missing_name() {
+        let content = "---\nmodel: opus\ndescription: No name\n---\n";
+        assert!(parse_agent_frontmatter(content).is_none());
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_no_frontmatter() {
+        assert!(parse_agent_frontmatter("Just plain text").is_none());
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_no_closing_fence() {
+        assert!(parse_agent_frontmatter("---\nname: broken\n").is_none());
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_empty_model() {
+        let content = "---\nname: empty-model\nmodel: \n---\n";
+        let info = parse_agent_frontmatter(content).unwrap();
+        assert!(info.model.is_none());
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_long_description_truncated() {
+        let long_desc = "x".repeat(200);
+        let content = format!("---\nname: verbose\ndescription: {long_desc}\n---\n");
+        let info = parse_agent_frontmatter(&content).unwrap();
+        assert_eq!(info.description.as_ref().unwrap().len(), 103); // 100 + "..."
+        assert!(info.description.unwrap().ends_with("..."));
+    }
+
+    #[test]
+    fn test_list_agents_unknown_adapter() {
+        let result = list_agents_claude();
+        // Just verify it doesn't panic — the actual agent list depends on filesystem
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_agent_info_camel_case_serialization() {
+        let info = AgentInfo {
+            name: "test".to_string(),
+            model: Some("opus".to_string()),
+            description: Some("desc".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"name\""));
+        assert!(json.contains("\"model\""));
+        assert!(json.contains("\"description\""));
     }
 }

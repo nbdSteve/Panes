@@ -2,25 +2,48 @@ import { useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
-import type { WorkspaceInfo, ThreadInfo, AgentEvent } from "../App";
+import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo } from "../App";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
 import CostBadge from "./CostBadge";
 import { calculateRunningCost } from "../lib/cost";
 
+const MODELS = [
+  { id: "sonnet", label: "Sonnet", desc: "Fast & capable" },
+  { id: "opus", label: "Opus", desc: "Most capable" },
+  { id: "haiku", label: "Haiku", desc: "Fastest" },
+];
+
+function normalizeModelId(raw: string): string {
+  const lower = raw.toLowerCase();
+  if (lower.includes("opus")) return "opus";
+  if (lower.includes("sonnet")) return "sonnet";
+  if (lower.includes("haiku")) return "haiku";
+  return raw;
+}
+
 interface ThreadViewProps {
   workspace: WorkspaceInfo;
   thread: ThreadInfo | null;
-  agents: string[];
-  onStartThread: (prompt: string, agent?: string) => void;
+  adapters: string[];
+  agents: AgentInfo[];
+  onStartThread: (prompt: string, agent?: string, model?: string) => void;
   onCompletionAction: (threadId: string, action: "committed" | "reverted" | "kept") => void;
   onCancel: (threadId: string) => void;
   onQueueFollowUp: (threadId: string, prompt: string) => void;
 }
 
-export default function ThreadView({ workspace, thread, agents, onStartThread, onCompletionAction, onCancel, onQueueFollowUp }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, onStartThread, onCompletionAction, onCancel, onQueueFollowUp }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
-  const [selectedAgent, setSelectedAgent] = useState(workspace.defaultAgent ?? agents[0] ?? "");
+  const [selectedAdapter, setSelectedAdapter] = useState(adapters[0] ?? "");
+  const [selectedAgent, setSelectedAgent] = useState("");
+  const [selectedModel, setSelectedModel] = useState("sonnet");
+  const [adapterOpen, setAdapterOpen] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const adapterRef = useRef<HTMLDivElement>(null);
+  const agentRef = useRef<HTMLDivElement>(null);
+  const modelRef = useRef<HTMLDivElement>(null);
   const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string } | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
@@ -43,12 +66,22 @@ export default function ThreadView({ workspace, thread, agents, onStartThread, o
     }
   }, [thread]);
 
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (adapterRef.current && !adapterRef.current.contains(e.target as Node)) setAdapterOpen(false);
+      if (agentRef.current && !agentRef.current.contains(e.target as Node)) setAgentOpen(false);
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) setModelOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const handleSend = () => {
     if (!prompt.trim()) return;
     if (isActive && thread) {
       onQueueFollowUp(thread.id, prompt.trim());
     } else {
-      onStartThread(prompt.trim(), selectedAgent);
+      onStartThread(prompt.trim(), selectedAgent, selectedModel);
     }
     setPrompt("");
     if (textareaRef.current) {
@@ -215,6 +248,138 @@ export default function ThreadView({ workspace, thread, agents, onStartThread, o
         </div>
       )}
 
+      {(() => {
+        const agentModel = agents.find(a => a.name === selectedAgent)?.model;
+        const modelLocked = !!agentModel;
+        const effectiveModel = agentModel ? normalizeModelId(agentModel) : selectedModel;
+        return (
+          <div className="config-bar">
+            <div className="config-dropdowns">
+              {adapters.length > 0 && (
+                <div className="config-dropdown" ref={adapterRef}>
+                  <button
+                    className="config-dropdown-trigger"
+                    onClick={() => { setAdapterOpen(!adapterOpen); setAgentOpen(false); setModelOpen(false); }}
+                    disabled={isRunning}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
+                    </svg>
+                    <span className="config-dropdown-value">{selectedAdapter || "Adapter"}</span>
+                    <svg className="config-dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="6 9 12 15 18 9" /></svg>
+                  </button>
+                  {adapterOpen && (
+                    <div className="config-dropdown-menu">
+                      {adapters.map(a => (
+                        <button
+                          key={a}
+                          className={`config-dropdown-item ${a === selectedAdapter ? "active" : ""}`}
+                          onClick={() => { setSelectedAdapter(a); setAdapterOpen(false); }}
+                        >
+                          <span className="config-dropdown-item-label">{a}</span>
+                          {a === selectedAdapter && (
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="config-dropdown" ref={agentRef}>
+                <button
+                  className="config-dropdown-trigger"
+                  onClick={() => { setAgentOpen(!agentOpen); setAdapterOpen(false); setModelOpen(false); }}
+                  disabled={isRunning}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z" />
+                    <path d="M16 14H8a4 4 0 0 0-4 4v2h16v-2a4 4 0 0 0-4-4z" />
+                  </svg>
+                  <span className="config-dropdown-value">{selectedAgent || "Default"}</span>
+                  <svg className="config-dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="6 9 12 15 18 9" /></svg>
+                </button>
+                {agentOpen && (
+                  <div className="config-dropdown-menu">
+                    <button
+                      className={`config-dropdown-item ${selectedAgent === "" ? "active" : ""}`}
+                      onClick={() => { setSelectedAgent(""); setAgentOpen(false); }}
+                    >
+                      <span className="config-dropdown-item-content">
+                        <span className="config-dropdown-item-label">Default</span>
+                        <span className="config-dropdown-item-desc">No agent override</span>
+                      </span>
+                      {selectedAgent === "" && (
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                      )}
+                    </button>
+                    {agents.map(a => (
+                      <button
+                        key={a.name}
+                        className={`config-dropdown-item ${a.name === selectedAgent ? "active" : ""}`}
+                        onClick={() => {
+                          setSelectedAgent(a.name);
+                          if (a.model) setSelectedModel(normalizeModelId(a.model));
+                          setAgentOpen(false);
+                        }}
+                      >
+                        <span className="config-dropdown-item-content">
+                          <span className="config-dropdown-item-label">{a.name}</span>
+                          {a.description && <span className="config-dropdown-item-desc">{a.description}</span>}
+                        </span>
+                        {a.model && <span className="config-dropdown-item-badge">{normalizeModelId(a.model)}</span>}
+                        {a.name === selectedAgent && (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="config-dropdown" ref={modelRef}>
+                <button
+                  className={`config-dropdown-trigger ${modelLocked ? "locked" : ""}`}
+                  onClick={() => { if (!modelLocked) { setModelOpen(!modelOpen); setAdapterOpen(false); setAgentOpen(false); } }}
+                  disabled={isRunning || modelLocked}
+                  title={modelLocked ? `Set by ${selectedAgent} agent` : undefined}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
+                  </svg>
+                  <span className="config-dropdown-value">{MODELS.find(m => m.id === effectiveModel)?.label ?? effectiveModel}</span>
+                  {modelLocked ? (
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                  ) : (
+                    <svg className="config-dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="6 9 12 15 18 9" /></svg>
+                  )}
+                </button>
+                {modelOpen && !modelLocked && (
+                  <div className="config-dropdown-menu">
+                    {MODELS.map(m => (
+                      <button
+                        key={m.id}
+                        className={`config-dropdown-item ${m.id === selectedModel ? "active" : ""}`}
+                        onClick={() => { setSelectedModel(m.id); setModelOpen(false); }}
+                      >
+                        <span className="config-dropdown-item-content">
+                          <span className="config-dropdown-item-label">{m.label}</span>
+                          <span className="config-dropdown-item-desc">{m.desc}</span>
+                        </span>
+                        {m.id === selectedModel && (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="prompt-bar">
         {thread?.queuedFollowUp && (
           <div className="queued-follow-up">
@@ -232,18 +397,6 @@ export default function ThreadView({ workspace, thread, agents, onStartThread, o
           </div>
         )}
         <div className="prompt-bar-inner">
-          {agents.length > 0 && (
-            <select
-              className="agent-selector"
-              value={selectedAgent}
-              onChange={(e) => setSelectedAgent(e.target.value)}
-              disabled={isRunning}
-            >
-              {agents.map(a => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-          )}
           <textarea
             ref={textareaRef}
             placeholder={isActive ? "Queue a follow-up..." : thread ? "Follow up..." : `Send a task to ${workspace.name}...`}

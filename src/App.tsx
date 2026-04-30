@@ -14,6 +14,12 @@ export interface WorkspaceInfo {
   defaultAgent?: string;
 }
 
+export interface AgentInfo {
+  name: string;
+  model: string | null;
+  description: string | null;
+}
+
 export interface AgentEvent {
   event_type: string;
   text?: string;
@@ -99,7 +105,8 @@ function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory">("feed");
-  const [agents, setAgents] = useState<string[]>([]);
+  const [adapters, setAdapters] = useState<string[]>([]);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   const loadThreadsForWorkspace = useCallback(async (workspaceId: string) => {
@@ -140,7 +147,12 @@ function App() {
         loadThreadsForWorkspace(w.id);
       }
     }).catch(() => {});
-    invoke<string[]>("list_agents").then(setAgents).catch(() => {});
+    invoke<string[]>("list_adapters").then((a) => {
+      setAdapters(a);
+      if (a.length > 0) {
+        invoke<AgentInfo[]>("list_agents", { adapter: a[0] }).then(setAgents).catch(() => {});
+      }
+    }).catch(() => {});
   }, [loadThreadsForWorkspace]);
 
   const handleCompletionAction = useCallback(
@@ -231,7 +243,7 @@ function App() {
   }, []);
 
   const handleStartThread = useCallback(
-    async (workspace: WorkspaceInfo, prompt: string, agent?: string) => {
+    async (workspace: WorkspaceInfo, prompt: string, agent?: string, model?: string) => {
       const tempId = crypto.randomUUID();
 
       setThreads((prev) => [
@@ -254,6 +266,7 @@ function App() {
           workspaceName: workspace.name,
           prompt,
           agent: agent ?? workspace.defaultAgent ?? null,
+          model: model ?? null,
         });
 
         setThreads((prev) =>
@@ -331,12 +344,12 @@ function App() {
   });
 
   const handleSendPrompt = useCallback(
-    (workspace: WorkspaceInfo, prompt: string, agent?: string) => {
+    (workspace: WorkspaceInfo, prompt: string, agent?: string, model?: string) => {
       const thread = threads.find((t) => t.id === activeThread);
       if (thread && (thread.status === "complete" || thread.status === "error" || thread.status === "interrupted")) {
         handleResumeThread(workspace, thread.id, prompt);
       } else if (!thread) {
-        handleStartThread(workspace, prompt, agent);
+        handleStartThread(workspace, prompt, agent, model);
       }
     },
     [activeThread, threads, handleStartThread, handleResumeThread]
@@ -427,8 +440,9 @@ function App() {
             key={activeThread ?? "new"}
             workspace={activeWs}
             thread={currentThread ?? null}
+            adapters={adapters}
             agents={agents}
-            onStartThread={(prompt, agent) => handleSendPrompt(activeWs, prompt, agent)}
+            onStartThread={(prompt, agent, model) => handleSendPrompt(activeWs, prompt, agent, model)}
             onCompletionAction={handleCompletionAction}
             onCancel={handleCancelThread}
             onQueueFollowUp={handleQueueFollowUp}
