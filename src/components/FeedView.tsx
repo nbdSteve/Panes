@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { WorkspaceInfo } from "../App";
 import { timeAgo, formatCost, truncatePrompt } from "../lib/utils";
+import FluidBackground from "./FluidBackground";
 
 interface BackendThread {
   id: string;
@@ -57,11 +58,14 @@ export default function FeedView({
   if (threads.length === 0) {
     return (
       <div className="feed-empty">
-        <h2>No activity yet</h2>
-        <p>
-          Add a workspace and send a task to your AI agent. Completed threads
-          from all workspaces will appear here.
-        </p>
+        <FluidBackground />
+        <div className="feed-empty-content">
+          <h2>No activity yet</h2>
+          <p>
+            Add a workspace and send a task to your AI agent. Completed threads
+            from all workspaces will appear here.
+          </p>
+        </div>
       </div>
     );
   }

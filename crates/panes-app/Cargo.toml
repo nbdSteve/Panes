@@ -25,6 +25,10 @@ rusqlite = { workspace = true }
 dirs = "6"
 tauri = { version = "2", features = [] }
 
+[[bin]]
+name = "Panes"
+path = "src/main.rs"
+
 [lib]
 name = "panes_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

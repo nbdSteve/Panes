@@ -5,6 +5,7 @@ interface ThreadListProps {
   activeThread: string | null;
   onSelectThread: (id: string) => void;
   onNewThread: () => void;
+  onDeleteThread: (id: string) => void;
 }
 
 export default function ThreadList({
@@ -12,6 +13,7 @@ export default function ThreadList({
   activeThread,
   onSelectThread,
   onNewThread,
+  onDeleteThread,
 }: ThreadListProps) {
   const sorted = [...threads].sort((a, b) => b.createdAt - a.createdAt);
 
@@ -73,6 +75,15 @@ export default function ThreadList({
                 {timeAgo(thread.createdAt)}
               </span>
             </div>
+            <button
+              className="btn-icon btn-delete-inline"
+              onClick={(e) => { e.stopPropagation(); onDeleteThread(thread.id); }}
+              title="Delete thread"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              </svg>
+            </button>
           </div>
         ))}
       </div>

@@ -313,6 +313,25 @@ function App() {
     [activeThread, threads, handleStartThread, handleResumeThread]
   );
 
+  const handleRemoveWorkspace = useCallback(async (id: string) => {
+    try { await invoke("remove_workspace", { workspaceId: id }); } catch {}
+    setWorkspaces((prev) => prev.filter((w) => w.id !== id));
+    setThreads((prev) => prev.filter((t) => t.workspaceId !== id));
+    if (activeWorkspace === id) {
+      setActiveWorkspace(null);
+      setActiveThread(null);
+      setActiveView("feed");
+    }
+  }, [activeWorkspace]);
+
+  const handleDeleteThread = useCallback(async (id: string) => {
+    try { await invoke("delete_thread", { threadId: id }); } catch {}
+    setThreads((prev) => prev.filter((t) => t.id !== id));
+    if (activeThread === id) {
+      setActiveThread(null);
+    }
+  }, [activeThread]);
+
   const extractMemoriesFromThread = useCallback((thread: ThreadInfo) => {
     const textEvents = thread.events
       .filter((e) => e.event_type === "text" && e.text)
@@ -354,6 +373,7 @@ function App() {
           setActiveWorkspace(wsId);
           setActiveView("memory");
         }}
+        onRemoveWorkspace={handleRemoveWorkspace}
         onAddWorkspace={async (ws) => {
           try {
             const saved = await invoke<WorkspaceInfo>("add_workspace", {
@@ -377,6 +397,7 @@ function App() {
           activeThread={activeThread}
           onSelectThread={setActiveThread}
           onNewThread={() => setActiveThread(null)}
+          onDeleteThread={handleDeleteThread}
         />
       )}
 
