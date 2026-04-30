@@ -45,8 +45,8 @@ test.describe("Panes App — Core Flows", () => {
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
     await expect(page.locator(".completion-label-text", { hasText: "Complete" })).toBeVisible();
 
-    // Cost should be shown
-    await expect(page.locator(".completion-stat-value").first()).toBeVisible();
+    // Cost should be shown in completion stats
+    await expect(page.locator(".completion-stat").first()).toBeVisible();
 
     // No commit/revert buttons for text-only response
     await expect(page.locator("text=Commit")).not.toBeVisible();
@@ -86,11 +86,11 @@ test.describe("Panes App — Core Flows", () => {
     await expect(page.locator("text=Approval needed")).toBeVisible();
     await expect(page.locator(".risk-badge")).toBeVisible();
 
-    // Click approve
-    await page.click("button:has-text('Approve')");
+    // Click continue
+    await page.click("button:has-text('Continue')");
 
-    // Should show approved state
-    await expect(page.locator("text=Approved")).toBeVisible({ timeout: 2000 });
+    // Should show continued state
+    await expect(page.locator("text=Continued")).toBeVisible({ timeout: 2000 });
 
     // Should eventually complete
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });

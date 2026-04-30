@@ -323,6 +323,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
     case "reject_gate": {
       const threadId = args?.threadId as string;
+      if (!pausedThreads.has(threadId)) return null;
       pausedThreads.delete(threadId);
       setTimeout(() => {
         emitEvent("panes://thread-event", {

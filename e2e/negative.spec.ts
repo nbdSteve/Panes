@@ -17,10 +17,10 @@ test.describe("Gate Rejection", () => {
 
     await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
 
-    await page.click("button:has-text('Reject')");
+    await page.click("button:has-text('Abort')");
 
     // Gate should show rejected state
-    await expect(page.locator("text=Rejected")).toBeVisible({ timeout: 2000 });
+    await expect(page.locator("text=Aborted")).toBeVisible({ timeout: 2000 });
 
     // Thread should complete (rejected action ends the turn)
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
@@ -35,8 +35,8 @@ test.describe("Gate Rejection", () => {
 
     await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
 
-    await page.click("button:has-text('Reject')");
-    await expect(page.locator("text=Rejected")).toBeVisible({ timeout: 2000 });
+    await page.click("button:has-text('Abort')");
+    await expect(page.locator("text=Aborted")).toBeVisible({ timeout: 2000 });
 
     // Wait for the turn to complete after rejection
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
@@ -129,13 +129,13 @@ test.describe("Double-Click Safety", () => {
 
     await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
 
-    const approveBtn = page.locator("button:has-text('Approve')");
+    const approveBtn = page.locator("button:has-text('Continue')");
 
     // Rapid double-click
     await approveBtn.dblclick();
 
     // Should resolve to approved (not error)
-    await expect(page.locator("text=Approved")).toBeVisible({ timeout: 2000 });
+    await expect(page.locator("text=Continued")).toBeVisible({ timeout: 2000 });
 
     // Thread should complete normally — only one completion card
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
@@ -147,17 +147,16 @@ test.describe("Double-Click Safety", () => {
 
     await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
 
-    const rejectBtn = page.locator("button:has-text('Reject')");
+    const rejectBtn = page.locator("button:has-text('Abort')");
 
     // Rapid double-click
     await rejectBtn.dblclick();
 
-    // Should resolve to rejected
-    await expect(page.locator("text=Rejected")).toBeVisible({ timeout: 2000 });
+    // Should resolve to aborted
+    await expect(page.locator("text=Aborted").first()).toBeVisible({ timeout: 2000 });
 
-    // Should complete — only one completion card
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
-    await expect(page.locator(".completion-card")).toHaveCount(1);
+    // Should have exactly one completion card (double-click shouldn't double-fire)
+    await expect(page.locator(".completion-card")).toHaveCount(1, { timeout: 5000 });
   });
 });
 

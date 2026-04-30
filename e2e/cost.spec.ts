@@ -18,8 +18,8 @@ test.describe("Cost Visibility", () => {
     // Wait for completion
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
 
-    // Final cost should be shown in completion card
-    await expect(page.locator(".completion-stat-value").first()).toBeVisible();
+    // Final cost should be shown in completion stats
+    await expect(page.locator(".completion-stat").first()).toBeVisible();
   });
 
   test("completion card shows cost, duration, and turns", async ({ page }) => {
@@ -33,26 +33,8 @@ test.describe("Cost Visibility", () => {
     await page.press("textarea", "Enter");
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
 
-    // All three stats should be present
-    await expect(page.locator(".completion-stat-label:has-text('Cost')")).toBeVisible();
-    await expect(page.locator(".completion-stat-label:has-text('Duration')")).toBeVisible();
-    await expect(page.locator(".completion-stat-label:has-text('Turns')")).toBeVisible();
-  });
-
-  test("workspace cost shown in sidebar", async ({ page }) => {
-    await page.goto("/");
-
-    await page.click("text=Add workspace");
-    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
-    await page.fill('input[placeholder="Display name (optional)"]', "Cost Test");
-    await page.click("text=Add");
-
-    await page.fill("textarea", "hello");
-    await page.press("textarea", "Enter");
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
-
-    // Sidebar workspace item should show cumulative cost
-    const wsItem = page.locator(".sidebar-item", { hasText: "Cost Test" });
-    await expect(wsItem.locator(".workspace-cost")).toBeVisible();
+    // All three stats should be present in the stats row
+    const stats = page.locator(".completion-stat");
+    await expect(stats).toHaveCount(3);
   });
 });

@@ -6,6 +6,7 @@ import type { WorkspaceInfo, ThreadInfo, AgentEvent } from "../App";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
 import CostBadge from "./CostBadge";
+import { calculateRunningCost } from "../lib/cost";
 
 interface ThreadViewProps {
   workspace: WorkspaceInfo;
@@ -71,20 +72,7 @@ export default function ThreadView({ workspace, thread, onStartThread, onComplet
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
 
-  const runningCost = (() => {
-    let total = 0;
-    let latestCostInTurn = 0;
-    for (const e of events) {
-      if (e.event_type === "follow_up" || e.event_type === "complete") {
-        total += latestCostInTurn;
-        latestCostInTurn = 0;
-      }
-      if (e.event_type === "cost_update") {
-        latestCostInTurn = e.total_usd || 0;
-      }
-    }
-    return total + latestCostInTurn;
-  })();
+  const runningCost = calculateRunningCost(events);
 
   const visibleEvents = events.filter(
     (e) => e.event_type !== "cost_update"
