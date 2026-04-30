@@ -375,16 +375,32 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       if (!pausedThreads.has(threadId)) return null;
       pausedThreads.delete(threadId);
       setTimeout(() => {
+        const completeEvent = {
+          event_type: "complete",
+          summary: "Action was rejected by the user.",
+          total_cost_usd: 0.005,
+          duration_ms: 3000,
+          turns: 1,
+        };
+        const meta = activeThreadMeta.get(threadId);
+        if (meta) {
+          meta.events.push(completeEvent);
+          mockThreads.push({
+            id: threadId,
+            workspaceId: meta.workspaceId,
+            prompt: meta.prompt,
+            status: "completed",
+            summary: completeEvent.summary,
+            costUsd: completeEvent.total_cost_usd,
+            durationMs: completeEvent.duration_ms,
+            createdAt: new Date().toISOString(),
+            events: [...meta.events],
+          });
+        }
         emitEvent("panes://thread-event", {
           thread_id: threadId,
           timestamp: new Date().toISOString(),
-          event: {
-            event_type: "complete",
-            summary: "Action was rejected by the user.",
-            total_cost_usd: 0.005,
-            duration_ms: 3000,
-            turns: 1,
-          },
+          event: completeEvent,
           parent_tool_use_id: null,
         });
       }, 100);
@@ -399,6 +415,20 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         activeIntervals.delete(cancelId);
       }
       pausedThreads.delete(cancelId);
+      const meta = activeThreadMeta.get(cancelId);
+      if (meta) {
+        mockThreads.push({
+          id: cancelId,
+          workspaceId: meta.workspaceId,
+          prompt: meta.prompt,
+          status: "interrupted",
+          summary: "Cancelled by user",
+          costUsd: 0,
+          durationMs: 0,
+          createdAt: new Date().toISOString(),
+          events: [...meta.events],
+        });
+      }
       return null;
     }
 
@@ -441,6 +471,9 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
     case "delete_thread":
       return null;
+
+    case "get_aggregate_cost":
+      return mockThreads.reduce((sum, t) => sum + (t.costUsd || 0), 0);
 
     case "get_memories":
       return [...mockMemories.filter((m) => m.workspaceId === args?.workspaceId)];
@@ -496,6 +529,17 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     case "delete_briefing":
       mockBriefings.delete(args?.workspaceId as string);
       return null;
+
+    case "list_agents":
+      return ["claude-code"];
+
+    case "set_workspace_default_agent": {
+      const wsId = args?.workspaceId as string ?? args?.workspace_id as string;
+      const agent = args?.agent as string;
+      const ws = mockWorkspaces.find(w => w.id === wsId);
+      if (ws) ws.defaultAgent = agent;
+      return null;
+    }
 
     default:
       console.warn(`[tauriMock] unhandled invoke: ${cmd}`, args);

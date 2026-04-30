@@ -532,6 +532,122 @@ body {
   line-height: 1.6;
 }
 
+/* ─── Feed view ─── */
+
+.feed-view {
+  padding: 24px;
+  max-width: 640px;
+  margin: 0 auto;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.feed-aggregate {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.feed-aggregate-cost {
+  font-family: var(--font-mono, monospace);
+  color: var(--cost);
+  font-weight: 500;
+}
+
+.feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.feed-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.feed-item:hover {
+  background: var(--bg-secondary);
+}
+
+.feed-item-outcome {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.feed-item-outcome.success { background: var(--success); }
+.feed-item-outcome.error { background: var(--error); }
+.feed-item-outcome.gate { background: var(--warning); }
+.feed-item-outcome.interrupted { background: var(--text-muted); }
+
+.feed-item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.feed-item-workspace {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.feed-item-prompt {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feed-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.feed-item-cost {
+  font-family: var(--font-mono, monospace);
+  color: var(--cost);
+}
+
+.feed-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  color: var(--text-muted);
+  gap: 12px;
+}
+
+.feed-empty h2 {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.feed-empty p {
+  font-size: 13px;
+  max-width: 320px;
+  line-height: 1.5;
+}
+
 /* ─── Thread view ─── */
 
 .thread-view {
@@ -640,6 +756,34 @@ body {
   font-size: 12px;
   color: var(--text-muted);
   opacity: 0.6;
+}
+
+/* ─── Agent selector ─── */
+
+.agent-selector {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 0;
+  max-width: 140px;
+}
+
+.agent-selector:hover {
+  border-color: var(--text-muted);
+}
+
+.agent-selector:focus {
+  border-color: var(--accent);
+}
+
+.agent-selector:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ─── Prompt bar ─── */

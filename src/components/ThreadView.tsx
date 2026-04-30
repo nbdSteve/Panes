@@ -11,14 +11,16 @@ import { calculateRunningCost } from "../lib/cost";
 interface ThreadViewProps {
   workspace: WorkspaceInfo;
   thread: ThreadInfo | null;
-  onStartThread: (prompt: string) => void;
+  agents: string[];
+  onStartThread: (prompt: string, agent?: string) => void;
   onCompletionAction: (threadId: string, action: "committed" | "reverted" | "kept") => void;
   onCancel: (threadId: string) => void;
   onQueueFollowUp: (threadId: string, prompt: string) => void;
 }
 
-export default function ThreadView({ workspace, thread, onStartThread, onCompletionAction, onCancel, onQueueFollowUp }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, agents, onStartThread, onCompletionAction, onCancel, onQueueFollowUp }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
+  const [selectedAgent, setSelectedAgent] = useState(workspace.defaultAgent ?? agents[0] ?? "");
   const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string } | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
@@ -46,7 +48,7 @@ export default function ThreadView({ workspace, thread, onStartThread, onComplet
     if (isActive && thread) {
       onQueueFollowUp(thread.id, prompt.trim());
     } else {
-      onStartThread(prompt.trim());
+      onStartThread(prompt.trim(), selectedAgent);
     }
     setPrompt("");
     if (textareaRef.current) {
@@ -230,6 +232,18 @@ export default function ThreadView({ workspace, thread, onStartThread, onComplet
           </div>
         )}
         <div className="prompt-bar-inner">
+          {agents.length > 0 && (
+            <select
+              className="agent-selector"
+              value={selectedAgent}
+              onChange={(e) => setSelectedAgent(e.target.value)}
+              disabled={isRunning}
+            >
+              {agents.map(a => (
+                <option key={a} value={a}>{a}</option>
+              ))}
+            </select>
+          )}
           <textarea
             ref={textareaRef}
             placeholder={isActive ? "Queue a follow-up..." : thread ? "Follow up..." : `Send a task to ${workspace.name}...`}

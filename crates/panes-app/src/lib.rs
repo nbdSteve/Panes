@@ -102,6 +102,9 @@ pub fn run() {
             commands::get_briefing,
             commands::set_briefing,
             commands::delete_briefing,
+            commands::list_agents,
+            commands::set_workspace_default_agent,
+            commands::get_aggregate_cost,
         ])
         .run(tauri::generate_context!())
         .expect("error running panes");

@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 test.describe("Panes App — Core Flows", () => {
   test("shows welcome screen on launch", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator("text=Welcome to Panes")).toBeVisible();
+    await expect(page.locator("text=No activity yet")).toBeVisible();
     await expect(page.locator("text=Add a workspace")).toBeVisible();
   });
 
@@ -186,8 +186,8 @@ test.describe("Panes App — Core Flows", () => {
   test("feed view and workspace switching", async ({ page }) => {
     await page.goto("/");
 
-    // Feed should be visible initially
-    await expect(page.locator("text=Welcome to Panes")).toBeVisible();
+    // Feed should be visible initially (empty state)
+    await expect(page.locator("text=No activity yet")).toBeVisible();
 
     // Add workspace
     await page.click("text=Add workspace");
@@ -200,7 +200,7 @@ test.describe("Panes App — Core Flows", () => {
 
     // Click Feed
     await page.click(".sidebar-item:has-text('Feed')");
-    await expect(page.locator("text=Welcome to Panes")).toBeVisible();
+    await expect(page.locator("text=No activity yet")).toBeVisible();
     await expect(page.locator(".thread-list")).not.toBeVisible();
 
     // Click workspace again

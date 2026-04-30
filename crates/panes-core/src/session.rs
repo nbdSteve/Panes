@@ -509,6 +509,10 @@ impl SessionManager {
         let mut active = self.active_threads.lock().await;
         active.remove(thread_id);
     }
+
+    pub fn list_adapters(&self) -> Vec<String> {
+        self.adapters.keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]

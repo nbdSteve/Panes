@@ -552,6 +552,41 @@ pub async fn delete_briefing(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn get_aggregate_cost(
+    db: tauri::State<'_, DbState>,
+) -> Result<f64, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let total: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    Ok(total)
+}
+
+#[tauri::command]
+pub async fn list_agents(
+    session_manager: tauri::State<'_, SessionState>,
+) -> Result<Vec<String>, String> {
+    let mgr = session_manager.lock().await;
+    Ok(mgr.list_adapters())
+}
+
+#[tauri::command]
+pub async fn set_workspace_default_agent(
+    db: tauri::State<'_, DbState>,
+    workspace_id: String,
+    agent: String,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE workspaces SET default_agent = ?1 WHERE id = ?2",
+        rusqlite::params![agent, workspace_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,5 +864,53 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("UNIQUE"), "should be UNIQUE constraint error: {err}");
+    }
+
+    #[test]
+    fn test_get_aggregate_cost_empty() {
+        let conn = setup_test_db();
+        let total: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(total, 0.0);
+    }
+
+    #[test]
+    fn test_get_aggregate_cost_sums() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/ws1");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        conn.execute(
+            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.05, '2024-01-01')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.03, '2024-01-02')",
+            [],
+        ).unwrap();
+        let total: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!((total - 0.08).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_set_workspace_default_agent() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/ws1");
+        conn.execute(
+            "UPDATE workspaces SET default_agent = ?1 WHERE id = ?2",
+            rusqlite::params!["new-agent", "ws1"],
+        ).unwrap();
+        let agent: Option<String> = conn.query_row(
+            "SELECT default_agent FROM workspaces WHERE id = ?1",
+            rusqlite::params!["ws1"],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(agent.unwrap(), "new-agent");
     }
 }

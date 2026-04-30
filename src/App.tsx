@@ -5,6 +5,7 @@ import Sidebar from "./components/Sidebar";
 import ThreadList from "./components/ThreadList";
 import ThreadView from "./components/ThreadView";
 import MemoryPanel from "./components/MemoryPanel";
+import FeedView from "./components/FeedView";
 
 export interface WorkspaceInfo {
   id: string;
@@ -98,6 +99,7 @@ function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory">("feed");
+  const [agents, setAgents] = useState<string[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   const loadThreadsForWorkspace = useCallback(async (workspaceId: string) => {
@@ -138,6 +140,7 @@ function App() {
         loadThreadsForWorkspace(w.id);
       }
     }).catch(() => {});
+    invoke<string[]>("list_agents").then(setAgents).catch(() => {});
   }, [loadThreadsForWorkspace]);
 
   const handleCompletionAction = useCallback(
@@ -228,7 +231,7 @@ function App() {
   }, []);
 
   const handleStartThread = useCallback(
-    async (workspace: WorkspaceInfo, prompt: string) => {
+    async (workspace: WorkspaceInfo, prompt: string, agent?: string) => {
       const tempId = crypto.randomUUID();
 
       setThreads((prev) => [
@@ -250,7 +253,7 @@ function App() {
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          agent: workspace.defaultAgent ?? null,
+          agent: agent ?? workspace.defaultAgent ?? null,
         });
 
         setThreads((prev) =>
@@ -328,12 +331,12 @@ function App() {
   });
 
   const handleSendPrompt = useCallback(
-    (workspace: WorkspaceInfo, prompt: string) => {
+    (workspace: WorkspaceInfo, prompt: string, agent?: string) => {
       const thread = threads.find((t) => t.id === activeThread);
       if (thread && (thread.status === "complete" || thread.status === "error" || thread.status === "interrupted")) {
         handleResumeThread(workspace, thread.id, prompt);
       } else if (!thread) {
-        handleStartThread(workspace, prompt);
+        handleStartThread(workspace, prompt, agent);
       }
     },
     [activeThread, threads, handleStartThread, handleResumeThread]
@@ -408,18 +411,15 @@ function App() {
 
       <main className="main-panel">
         {activeView === "feed" && (
-          <div className="feed-placeholder">
-            <div className="feed-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 3v18" /><path d="M8 7l4-4 4 4" />
-              </svg>
-            </div>
-            <h2>Welcome to Panes</h2>
-            <p>
-              Add a workspace to start sending tasks to your AI agent. Activity
-              from all workspaces will appear here.
-            </p>
-          </div>
+          <FeedView
+            workspaces={workspaces}
+            onNavigateToThread={(threadId, workspaceId) => {
+              setActiveWorkspace(workspaceId);
+              setActiveView("workspace");
+              loadThreadsForWorkspace(workspaceId);
+              setActiveThread(threadId);
+            }}
+          />
         )}
 
         {activeView === "workspace" && activeWs && (
@@ -427,7 +427,8 @@ function App() {
             key={activeThread ?? "new"}
             workspace={activeWs}
             thread={currentThread ?? null}
-            onStartThread={(prompt) => handleSendPrompt(activeWs, prompt)}
+            agents={agents}
+            onStartThread={(prompt, agent) => handleSendPrompt(activeWs, prompt, agent)}
             onCompletionAction={handleCompletionAction}
             onCancel={handleCancelThread}
             onQueueFollowUp={handleQueueFollowUp}
