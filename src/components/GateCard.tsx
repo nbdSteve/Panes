@@ -9,7 +9,6 @@ interface GateCardProps {
   resolved?: "approved" | "rejected";
   onApprove: () => void;
   onReject: () => void;
-  onSteer: (feedback: string) => void;
 }
 
 export default function GateCard({

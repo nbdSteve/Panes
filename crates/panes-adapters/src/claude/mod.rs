@@ -271,9 +271,8 @@ impl AgentSession for ClaudeSession {
     }
 
     async fn approve(&self, _tool_use_id: &str) -> Result<()> {
-        // No-op: bypassPermissions mode auto-approves everything.
-        // If we switch to acceptEdits, Bash gates are handled by --permission-prompt-tool
-        // or --allowedTools, not stdin injection (which Claude CLI doesn't support).
+        // No-op: acceptEdits mode handles tool approval internally.
+        // Gate pausing/resuming is managed by SessionManager, not the adapter.
         Ok(())
     }
 

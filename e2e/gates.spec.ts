@@ -11,57 +11,52 @@ function addWorkspaceAndSend(page: any, prompt: string) {
   })();
 }
 
-test.describe("Gates — Steer & Advanced Approval", () => {
-  test("steer button opens text input for feedback", async ({ page }) => {
+test.describe("Gates — Continue & Abort", () => {
+  test("gate card appears for dangerous prompt", async ({ page }) => {
     await addWorkspaceAndSend(page, "do something dangerous");
 
-    await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
+    const gateCard = page.locator(".gate-card");
+    await expect(gateCard).toBeVisible({ timeout: 3000 });
 
-    await page.click("button:has-text('Steer')");
-
-    // Should open a text input for steering feedback
-    await expect(page.locator(".gate-steer-input textarea")).toBeVisible();
-    await expect(page.locator(".gate-steer-input textarea")).toBeFocused();
+    // Should show approval-needed state with Continue and Abort buttons
+    await expect(page.locator("text=Approval needed")).toBeVisible();
+    await expect(page.locator("button:has-text('Continue')")).toBeVisible();
+    await expect(page.locator("button:has-text('Abort')")).toBeVisible();
   });
 
-  test("steer sends feedback and agent continues", async ({ page }) => {
+  test("gate card shows risk badge and tool name", async ({ page }) => {
     await addWorkspaceAndSend(page, "do something dangerous");
 
-    await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
+    const gateCard = page.locator(".gate-card");
+    await expect(gateCard).toBeVisible({ timeout: 3000 });
 
-    await page.click("button:has-text('Steer')");
-    await page.fill(".gate-steer-input textarea", "Use a safer approach instead");
-    await page.click(".gate-steer-input button:has-text('Send')");
+    // Should display risk level and tool name
+    await expect(gateCard.locator(".risk-badge")).toBeVisible();
+    await expect(gateCard.locator("text=Bash")).toBeVisible();
+  });
 
-    // Gate should resolve with steered state
-    await expect(page.locator("text=Steered")).toBeVisible({ timeout: 2000 });
+  test("continue resolves gate and thread completes", async ({ page }) => {
+    await addWorkspaceAndSend(page, "do something dangerous");
+
+    await expect(page.locator(".gate-card")).toBeVisible({ timeout: 3000 });
+
+    await page.click("button:has-text('Continue')");
+
+    // Gate should resolve to "Continued" state
+    await expect(page.locator("text=Continued")).toBeVisible({ timeout: 3000 });
 
     // Thread should eventually complete
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
   });
 
-  test("reject shows reason and stops the thread", async ({ page }) => {
+  test("abort resolves gate and stops thread", async ({ page }) => {
     await addWorkspaceAndSend(page, "do something dangerous");
 
-    await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
+    await expect(page.locator(".gate-card")).toBeVisible({ timeout: 3000 });
 
-    await page.click("button:has-text('Reject')");
+    await page.click("button:has-text('Abort')");
 
-    // Should show rejected state with reason
-    await expect(page.locator("text=Rejected")).toBeVisible({ timeout: 2000 });
-  });
-
-  test("approve-for-thread auto-approves subsequent similar gates", async ({ page }) => {
-    await addWorkspaceAndSend(page, "do something dangerous");
-
-    await expect(page.locator(".gate-card")).toBeVisible({ timeout: 2000 });
-
-    // Should have an "Approve for this thread" option
-    await expect(page.locator("text=Approve for this thread")).toBeVisible();
-
-    await page.click("text=Approve for this thread");
-
-    // Gate should resolve
-    await expect(page.locator("text=Approved")).toBeVisible({ timeout: 2000 });
+    // Gate should resolve to "Aborted" state
+    await expect(page.locator("text=Aborted")).toBeVisible({ timeout: 3000 });
   });
 });

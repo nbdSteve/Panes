@@ -379,7 +379,6 @@ function renderEvents(
               onReject={() => {
                 invoke("reject_gate", { threadId, toolUseId: gateId, reason: "User rejected" }).catch(console.error);
               }}
-              onSteer={() => {}}
             />
           );
         }
