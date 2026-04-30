@@ -59,6 +59,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
       tool_name: "Bash",
       success: true,
       output: "Command executed successfully",
+      duration_ms: 250,
     });
     events.push({ event_type: "cost_update", total_usd: 0.018 });
     events.push({
@@ -96,6 +97,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
         tool_name: "Edit",
         success: true,
         output: "File edited successfully",
+        duration_ms: 80,
       });
     }
     events.push({ event_type: "cost_update", total_usd: 0.025 });
@@ -134,6 +136,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
         tool_name: "Read",
         success: true,
         output: `(contents of ${file})`,
+        duration_ms: 150,
       });
     }
     events.push({ event_type: "cost_update", total_usd: 0.012 });
@@ -155,9 +158,9 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
       text: "I'll work through this step by step.",
     });
     const steps = [
-      { tool: "Read", desc: "Read file: src/App.tsx", risk: "low" },
-      { tool: "Edit", desc: "Edit file: src/App.tsx", risk: "medium" },
-      { tool: "Bash", desc: "Run command: npm test", risk: "low" },
+      { tool: "Read", desc: "Read file: src/App.tsx", risk: "low", duration: 120 },
+      { tool: "Edit", desc: "Edit file: src/App.tsx", risk: "medium", duration: 95 },
+      { tool: "Bash", desc: "Run command: npm test", risk: "low", duration: 3200 },
     ];
     for (const [i, step] of steps.entries()) {
       events.push({
@@ -175,6 +178,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
         success: true,
         output:
           i === 2 ? "All 42 tests passed" : i === 1 ? "File edited" : "(file contents)",
+        duration_ms: step.duration,
       });
       events.push({
         event_type: "cost_update",
@@ -236,6 +240,21 @@ interface MockMemory {
 const mockMemories: MockMemory[] = [];
 const mockBriefings = new Map<string, { workspaceId: string; content: string }>();
 
+interface MockThread {
+  id: string;
+  workspaceId: string;
+  prompt: string;
+  status: string;
+  summary: string;
+  costUsd: number;
+  durationMs: number;
+  createdAt: string;
+  events: Array<Record<string, unknown>>;
+}
+
+const mockThreads: MockThread[] = [];
+const activeThreadMeta = new Map<string, { workspaceId: string; prompt: string; events: Array<Record<string, unknown>> }>();
+
 interface PausedThread {
   threadId: string;
   remainingEvents: Array<Record<string, unknown>>;
@@ -264,12 +283,32 @@ function emitThreadEvents(threadId: string, events: Array<Record<string, unknown
       return;
     }
 
+    const meta = activeThreadMeta.get(threadId);
+    if (meta) {
+      meta.events.push(event);
+    }
+
     emitEvent("panes://thread-event", {
       thread_id: threadId,
       timestamp: new Date().toISOString(),
       event,
       parent_tool_use_id: null,
     });
+
+    if (meta && event.event_type === "complete") {
+      mockThreads.push({
+        id: threadId,
+        workspaceId: meta.workspaceId,
+        prompt: meta.prompt,
+        status: "completed",
+        summary: (event.summary as string) || "",
+        costUsd: (event.total_cost_usd as number) || 0,
+        durationMs: (event.duration_ms as number) || 0,
+        createdAt: new Date().toISOString(),
+        events: [...meta.events],
+      });
+    }
+
     i++;
   }, 200);
   activeIntervals.set(threadId, interval);
@@ -303,6 +342,11 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       const prompt = args?.prompt as string;
       const threadId = crypto.randomUUID();
       const events = buildEvents(prompt);
+      activeThreadMeta.set(threadId, {
+        workspaceId: args?.workspaceId as string,
+        prompt,
+        events: [],
+      });
       setTimeout(() => emitThreadEvents(threadId, events), 300);
       return threadId;
     }
@@ -311,6 +355,11 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       const threadId = args?.threadId as string;
       const prompt = args?.prompt as string;
       const events = buildEvents(prompt);
+      activeThreadMeta.set(threadId, {
+        workspaceId: args?.workspaceId as string,
+        prompt,
+        events: [],
+      });
       setTimeout(() => emitThreadEvents(threadId, events), 300);
       return null;
     }
@@ -380,8 +429,15 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return null;
     }
 
-    case "list_threads":
-      return [];
+    case "list_threads": {
+      const wsId = args?.workspaceId as string;
+      return mockThreads.filter(t => t.workspaceId === wsId);
+    }
+
+    case "list_all_threads": {
+      const limit = (args?.limit as number) || 100;
+      return mockThreads.slice(0, limit);
+    }
 
     case "delete_thread":
       return null;

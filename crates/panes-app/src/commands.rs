@@ -182,6 +182,58 @@ pub async fn list_threads(
 }
 
 #[tauri::command]
+pub async fn list_all_threads(
+    db: tauri::State<'_, DbState>,
+    limit: Option<u32>,
+) -> Result<Vec<ThreadInfo>, String> {
+    let limit = limit.unwrap_or(100);
+    let conn = db.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
+         FROM threads ORDER BY created_at DESC LIMIT ?1"
+    ).map_err(|e| e.to_string())?;
+
+    let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![limit], |row| {
+        Ok(ThreadInfo {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            prompt: row.get(2)?,
+            status: row.get(3)?,
+            summary: row.get(4)?,
+            cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
+            duration_ms: row.get(6)?,
+            created_at: row.get(7)?,
+            events: vec![],
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    let mut result = Vec::with_capacity(threads.len());
+    for mut thread in threads {
+        let mut evt_stmt = conn.prepare(
+            "SELECT data FROM events WHERE thread_id = ?1 ORDER BY id ASC"
+        ).map_err(|e| e.to_string())?;
+
+        let events: Vec<serde_json::Value> = evt_stmt.query_map(
+            rusqlite::params![thread.id], |row| {
+                let data: String = row.get(0)?;
+                Ok(serde_json::from_str(&data).unwrap_or(serde_json::Value::Null))
+            }
+        ).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .filter(|v| !v.is_null())
+        .collect();
+
+        thread.events = events;
+        result.push(thread);
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 pub async fn delete_thread(
     db: tauri::State<'_, DbState>,
     thread_id: String,
@@ -704,6 +756,66 @@ mod tests {
         tx.execute("DELETE FROM costs WHERE thread_id = ?1", rusqlite::params!["nope"]).unwrap();
         tx.execute("DELETE FROM threads WHERE id = ?1", rusqlite::params!["nope"]).unwrap();
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn test_list_all_threads_multi_workspace() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/ws1");
+        insert_test_workspace(&conn, "ws2", "/tmp/ws2");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        insert_test_thread(&conn, "t2", "ws2", None);
+
+        let mut stmt = conn.prepare(
+            "SELECT id FROM threads ORDER BY created_at DESC"
+        ).unwrap();
+        let ids: Vec<String> = stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"t1".to_string()));
+        assert!(ids.contains(&"t2".to_string()));
+    }
+
+    #[test]
+    fn test_list_all_threads_ordering() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/ws1");
+        // Insert with different timestamps
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at)
+             VALUES ('t_old', 'ws1', 'claude', 'completed', 'old', '2024-01-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at)
+             VALUES ('t_new', 'ws1', 'claude', 'completed', 'new', '2024-06-01T00:00:00Z')",
+            [],
+        ).unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT id FROM threads ORDER BY created_at DESC LIMIT 100"
+        ).unwrap();
+        let ids: Vec<String> = stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(ids[0], "t_new");
+        assert_eq!(ids[1], "t_old");
+    }
+
+    #[test]
+    fn test_list_all_threads_empty() {
+        let conn = setup_test_db();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM threads ORDER BY created_at DESC LIMIT 100"
+        ).unwrap();
+        let ids: Vec<String> = stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(ids.is_empty());
     }
 
     #[test]

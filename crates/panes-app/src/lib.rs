@@ -91,6 +91,7 @@ pub fn run() {
             commands::commit_changes,
             commands::revert_changes,
             commands::list_threads,
+            commands::list_all_threads,
             commands::delete_thread,
             commands::extract_memories,
             commands::get_memories,

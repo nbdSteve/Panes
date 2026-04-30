@@ -1,3 +1,4 @@
+import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -7,6 +8,7 @@ interface CompletionCardProps {
   durationMs: number;
   turns: number;
   hasFileChanges: boolean;
+  filesChanged?: { path: string; action: "created" | "modified" }[];
   completionAction?: "committed" | "reverted" | "kept";
   onCommit: () => void;
   onRevert: () => void;
@@ -19,11 +21,13 @@ export default function CompletionCard({
   durationMs,
   turns,
   hasFileChanges,
+  filesChanged,
   completionAction,
   onCommit,
   onRevert,
   onKeep,
 }: CompletionCardProps) {
+  const [showFiles, setShowFiles] = useState(false);
   const durationStr =
     durationMs < 60000
       ? `${(durationMs / 1000).toFixed(1)}s`
@@ -50,6 +54,40 @@ export default function CompletionCard({
           <span className="completion-stat">{turns} {turns === 1 ? "turn" : "turns"}</span>
         </div>
       </div>
+
+      {filesChanged && filesChanged.length > 0 && (
+        <div className="files-changed">
+          <button
+            className="files-changed-summary"
+            onClick={() => setShowFiles(!showFiles)}
+          >
+            <span className="files-changed-count">
+              {filesChanged.length} file{filesChanged.length !== 1 ? "s" : ""} changed
+              {(() => {
+                const created = filesChanged.filter(f => f.action === "created").length;
+                const modified = filesChanged.filter(f => f.action === "modified").length;
+                const parts: string[] = [];
+                if (created > 0) parts.push(`${created} created`);
+                if (modified > 0) parts.push(`${modified} modified`);
+                return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+              })()}
+            </span>
+            <span className={`files-changed-chevron ${showFiles ? "open" : ""}`}>&#9654;</span>
+          </button>
+          {showFiles && (
+            <ul className="files-changed-list">
+              {filesChanged.map((f, i) => (
+                <li key={i} className="files-changed-item">
+                  <span className={`files-changed-icon ${f.action}`}>
+                    {f.action === "created" ? "+" : "~"}
+                  </span>
+                  <span className="files-changed-path">{f.path}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {summary && (
         <div className="completion-summary markdown-body">

@@ -73,6 +73,7 @@ function mapBackendEvent(raw: Record<string, unknown>): AgentEvent | null {
         id: raw.id as string,
         success: raw.success as boolean,
         output: raw.output as string,
+        duration_ms: raw.duration_ms as number | undefined,
       };
     case "cost_update":
       return { event_type: "cost_update", total_usd: raw.total_usd as number };

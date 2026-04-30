@@ -268,6 +268,31 @@ export default function ThreadView({ workspace, thread, onStartThread, onComplet
 
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
 
+function collectFilesChanged(events: AgentEvent[]): { path: string; action: "created" | "modified" }[] {
+  const files: { path: string; action: "created" | "modified" }[] = [];
+  const seen = new Set<string>();
+
+  for (const e of events) {
+    if (e.event_type !== "tool_request") continue;
+    const toolName = e.tool_name ?? "";
+    if (!["Write", "Edit", "NotebookEdit"].includes(toolName)) continue;
+
+    const desc = e.description ?? "";
+    // Extract path from descriptions like "Edit file: src/main.rs" or "Create file: src/main.rs"
+    const match = desc.match(/(?:Edit|Write|Create|Modify)\s+(?:file:\s*|to\s+)?(.+)/i);
+    const path = match ? match[1].trim() : desc;
+
+    if (path && !seen.has(path)) {
+      seen.add(path);
+      files.push({
+        path,
+        action: toolName === "Write" ? "created" : "modified",
+      });
+    }
+  }
+  return files;
+}
+
 interface CompletionCallbacks {
   onCommit: (summary: string) => void;
   onRevert: () => void;
@@ -282,11 +307,15 @@ function renderEvents(
   callbacks: CompletionCallbacks,
 ) {
   let segmentHasWrites = false;
+  let segmentEvents: AgentEvent[] = [];
 
   return events.map((event, i) => {
     if (event.event_type === "follow_up") {
       segmentHasWrites = false;
+      segmentEvents = [];
     }
+
+    segmentEvents.push(event);
 
     if (
       event.event_type === "tool_request" &&
@@ -400,6 +429,13 @@ function renderEvents(
             </span>
             <span className="step-description">
               {event.success ? "Done" : "Failed"}
+              {event.duration_ms != null && event.duration_ms > 0 && (
+                <span className="step-elapsed">
+                  {event.duration_ms < 1000
+                    ? `${event.duration_ms}ms`
+                    : `${(event.duration_ms / 1000).toFixed(1)}s`}
+                </span>
+              )}
               {event.output && (
                 <div className="result-preview">
                   {event.output.substring(0, 200)}
@@ -411,7 +447,9 @@ function renderEvents(
 
       case "complete": {
         const hadWrites = segmentHasWrites;
+        const filesChanged = collectFilesChanged(segmentEvents);
         segmentHasWrites = false;
+        segmentEvents = [];
         return (
           <CompletionCard
             key={i}
@@ -420,6 +458,7 @@ function renderEvents(
             durationMs={event.duration_ms || 0}
             turns={event.turns || 0}
             hasFileChanges={hadWrites}
+            filesChanged={filesChanged}
             completionAction={completionAction}
             onCommit={() => callbacks.onCommit(event.summary || "")}
             onRevert={callbacks.onRevert}
