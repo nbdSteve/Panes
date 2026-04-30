@@ -485,38 +485,44 @@ mod tests {
     #[tokio::test]
     async fn test_unicode_emoji_store_and_search() {
         let store = make_store();
-        store.add("Use dark mode \u{1F30D}\u{2728} for all themes", Some("ws1"), "t1").await.unwrap();
-        let results = store.search("\u{1F30D}", Some("ws1"), 5).await.unwrap();
-        // Main assertion: no crash, no error
-        let all = store.get_all(Some("ws1")).await.unwrap();
-        assert!(!all.is_empty());
-        let _ = results;
+        store
+            .add("🚀 rocket launch 🎉", Some("ws1"), "t1")
+            .await
+            .unwrap();
+
+        let results = store.search("rocket", Some("ws1"), 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("🚀"));
+        assert!(results[0].content.contains("rocket"));
+        assert!(results[0].content.contains("🎉"));
     }
 
     #[tokio::test]
     async fn test_cjk_text_store_and_retrieve() {
         let store = make_store();
-        store.add("\u{4F7F}\u{7528} TypeScript \u{4E25}\u{683C}\u{6A21}\u{5F0F}", Some("ws1"), "t1").await.unwrap();
-        store.add("\u{30D1}\u{30C3}\u{30B1}\u{30FC}\u{30B8}\u{7BA1}\u{7406}\u{306B} pnpm \u{3092}\u{4F7F}\u{7528}", Some("ws1"), "t2").await.unwrap();
+        let cjk_input = "这是一个测试";
+        store.add(cjk_input, Some("ws1"), "t1").await.unwrap();
 
         let all = store.get_all(Some("ws1")).await.unwrap();
-        assert_eq!(all.len(), 2);
-
-        let search = store.search("TypeScript", Some("ws1"), 5).await.unwrap();
-        let _ = search; // no crash
+        assert_eq!(all.len(), 1);
+        // The add method wraps content with "Thread completed: " prefix
+        assert!(all[0].content.contains(cjk_input));
     }
 
     #[tokio::test]
     async fn test_very_long_content() {
         let store = make_store();
-        let long_content = "a".repeat(10_000);
+        let long_content = "x".repeat(10_000);
         store.add(&long_content, Some("ws1"), "t1").await.unwrap();
 
         let all = store.get_all(Some("ws1")).await.unwrap();
         assert_eq!(all.len(), 1);
+        // Content is truncated to 200 chars by the add method, but it stores and retrieves fine
+        assert!(!all[0].content.is_empty());
 
-        let results = store.search("aaaa", Some("ws1"), 5).await.unwrap();
-        let _ = results; // no crash
+        // Search for "Thread" which is part of the "Thread completed:" prefix added by add()
+        let results = store.search("Thread", Some("ws1"), 10).await.unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[tokio::test]
@@ -527,5 +533,6 @@ mod tests {
 
         let all = store.get_all(Some("ws1")).await.unwrap();
         assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, mems[0].id);
     }
 }
