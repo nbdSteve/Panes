@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import Sidebar from "./components/Sidebar";
 import ThreadList from "./components/ThreadList";
 import ThreadView from "./components/ThreadView";
@@ -8,78 +7,16 @@ import MemoryPanel from "./components/MemoryPanel";
 import FeedView from "./components/FeedView";
 import SettingsPanel from "./components/SettingsPanel";
 import { mapBackendEvent } from "./lib/eventMapper";
+import { api } from "./lib/api";
+import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs } from "./types";
 
-export interface WorkspaceInfo {
-  id: string;
-  path: string;
-  name: string;
-  defaultAgent?: string;
-  budgetCap?: number | null;
-}
-
-export interface AgentInfo {
-  name: string;
-  model: string | null;
-  description: string | null;
-}
-
-export interface ModelInfo {
-  id: string;
-  label: string;
-  description: string;
-}
+export type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs };
 
 const FALLBACK_MODELS: ModelInfo[] = [
   { id: "sonnet", label: "Sonnet", description: "Fast & capable" },
   { id: "opus", label: "Opus", description: "Most capable" },
   { id: "haiku", label: "Haiku", description: "Fastest" },
 ];
-
-export interface AgentEvent {
-  event_type: string;
-  text?: string;
-  id?: string;
-  tool_name?: string;
-  description?: string;
-  risk_level?: string;
-  needs_approval?: boolean;
-  summary?: string;
-  total_cost_usd?: number;
-  duration_ms?: number;
-  turns?: number;
-  total_usd?: number;
-  success?: boolean;
-  output?: string;
-  message?: string;
-  input?: Record<string, unknown>;
-  parent_tool_use_id?: string;
-  cost_usd?: number;
-  input_tokens?: number;
-  output_tokens?: number;
-  cache_read_tokens?: number;
-  cache_creation_tokens?: number;
-  model?: string;
-}
-
-export interface ThreadInfo {
-  id: string;
-  workspaceId: string;
-  prompt: string;
-  status: "starting" | "running" | "gate" | "complete" | "error" | "interrupted";
-  costUsd?: number;
-  completionAction?: "committed" | "reverted" | "kept";
-  queuedFollowUp?: string;
-  events: AgentEvent[];
-  memoryCount?: number;
-  hasBriefing?: boolean;
-  createdAt: number;
-}
-
-export interface ConfigPrefs {
-  adapter: string;
-  agent: string;
-  model: string;
-}
 
 const DEFAULT_CONFIG: ConfigPrefs = { adapter: "claude-code", agent: "", model: "sonnet" };
 
@@ -105,7 +42,7 @@ function App() {
 
   const loadThreadsForWorkspace = useCallback(async (workspaceId: string) => {
     try {
-      const persisted = await invoke<{
+      const persisted = await api.listThreads(workspaceId) as {
         id: string;
         workspaceId: string;
         prompt: string;
@@ -115,7 +52,7 @@ function App() {
         durationMs: number | null;
         createdAt: string;
         events: AgentEvent[];
-      }[]>("list_threads", { workspaceId });
+      }[];
 
       setThreads((prev) => {
         const liveIds = new Set(prev.filter((t) => t.workspaceId === workspaceId).map((t) => t.id));
@@ -136,18 +73,18 @@ function App() {
   }, []);
 
   useEffect(() => {
-    invoke<WorkspaceInfo[]>("list_workspaces").then((ws) => {
-      setWorkspaces(ws);
+    api.listWorkspaces().then((ws) => {
+      setWorkspaces(ws as WorkspaceInfo[]);
       for (const w of ws) {
         loadThreadsForWorkspace(w.id);
       }
     }).catch(() => {});
-    invoke<string[]>("list_adapters").then((a) => {
+    api.listAdapters().then((a) => {
       setAdapters(a);
       if (a.length > 0) {
-        invoke<AgentInfo[]>("list_agents", { adapter: a[0] }).then(setAgents).catch(() => {});
-        invoke<ModelInfo[]>("list_models", { adapter: a[0] })
-          .then((m) => setModels(m.length > 0 ? m : FALLBACK_MODELS))
+        api.listAgents(a[0]).then((ag) => setAgents(ag as AgentInfo[])).catch(() => {});
+        api.listModels(a[0])
+          .then((m) => { const models = m as ModelInfo[]; setModels(models.length > 0 ? models : FALLBACK_MODELS); })
           .catch(() => setModels(FALLBACK_MODELS));
       }
     }).catch(() => {});
@@ -167,7 +104,7 @@ function App() {
   const handleCancelThread = useCallback(
     async (threadId: string) => {
       try {
-        await invoke("cancel_thread", { threadId });
+        await api.cancelThread(threadId);
       } catch {}
       setThreads((prev) =>
         prev.map((t) =>
@@ -201,7 +138,7 @@ function App() {
       const mapped = mapBackendEvent(event);
       if (!mapped) return null;
       if (parent_tool_use_id) {
-        mapped.parent_tool_use_id = parent_tool_use_id;
+        (mapped as unknown as Record<string, unknown>).parent_tool_use_id = parent_tool_use_id;
       }
       return { thread_id, mapped };
     };
@@ -229,7 +166,7 @@ function App() {
             pendingResumeRef.current = { threadId: t.id, prompt: t.queuedFollowUp };
           }
 
-          const costUsd = (newStatus === "complete" && mapped.total_cost_usd != null)
+          const costUsd = (newStatus === "complete" && mapped.event_type === "complete")
             ? (t.costUsd ?? 0) + mapped.total_cost_usd
             : t.costUsd;
 
@@ -295,13 +232,13 @@ function App() {
       setActiveThread(tempId);
 
       try {
-        const result = await invoke<{ threadId: string; memoryCount: number; hasBriefing: boolean }>("start_thread", {
+        const result = await api.startThread({
           workspaceId: workspace.id,
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          agent: agent || workspace.defaultAgent || null,
-          model: model ?? null,
+          agent: agent || workspace.defaultAgent || undefined,
+          model: model ?? undefined,
         });
 
         const threadId = result.threadId;
@@ -342,13 +279,13 @@ function App() {
       );
 
       try {
-        await invoke("resume_thread", {
+        await api.resumeThread({
           threadId,
           workspaceId: workspace.id,
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          agent: workspace.defaultAgent || null,
+          agent: workspace.defaultAgent || undefined,
         });
       } catch (e) {
         setThreads((prev) =>
@@ -393,7 +330,7 @@ function App() {
 
   const handleSetBudgetCap = useCallback(async (workspaceId: string, budgetCap: number | null) => {
     try {
-      await invoke("set_workspace_budget_cap", { workspaceId, budgetCap });
+      await api.setWorkspaceBudgetCap(workspaceId, budgetCap);
       setWorkspaces((prev) =>
         prev.map((w) => (w.id === workspaceId ? { ...w, budgetCap } : w))
       );
@@ -401,7 +338,7 @@ function App() {
   }, []);
 
   const handleRemoveWorkspace = useCallback(async (id: string) => {
-    try { await invoke("remove_workspace", { workspaceId: id }); } catch {}
+    try { await api.removeWorkspace(id); } catch {}
     setWorkspaces((prev) => prev.filter((w) => w.id !== id));
     setThreads((prev) => prev.filter((t) => t.workspaceId !== id));
     if (activeWorkspace === id) {
@@ -412,7 +349,7 @@ function App() {
   }, [activeWorkspace]);
 
   const handleDeleteThread = useCallback(async (id: string) => {
-    try { await invoke("delete_thread", { threadId: id }); } catch {}
+    try { await api.deleteThread(id); } catch {}
     setThreads((prev) => prev.filter((t) => t.id !== id));
     if (activeThread === id) {
       setActiveThread(null);
@@ -421,15 +358,12 @@ function App() {
 
   const extractMemoriesFromThread = useCallback((thread: ThreadInfo) => {
     const textEvents = thread.events
-      .filter((e) => e.event_type === "text" && e.text)
+      .filter((e): e is import("./types").TextEvent => e.event_type === "text" && !!e.text)
       .map((e) => `Assistant: ${e.text}`)
       .join("\n");
     const transcript = `User: ${thread.prompt}\n${textEvents}`;
-    invoke("extract_memories", {
-      workspaceId: thread.workspaceId,
-      threadId: thread.id,
-      transcript,
-    }).catch((e) => console.error("extract_memories failed:", e));
+    api.extractMemories(thread.workspaceId, thread.id, transcript)
+      .catch((e) => console.error("extract_memories failed:", e));
   }, []);
 
   const activeWs = workspaces.find((w) => w.id === activeWorkspace);
@@ -467,10 +401,7 @@ function App() {
         onRemoveWorkspace={handleRemoveWorkspace}
         onAddWorkspace={async (ws) => {
           try {
-            const saved = await invoke<WorkspaceInfo>("add_workspace", {
-              path: ws.path,
-              name: ws.name,
-            });
+            const saved = await api.addWorkspace(ws.path, ws.name) as WorkspaceInfo;
             setWorkspaces((prev) => [...prev, saved]);
             setActiveWorkspace(saved.id);
           } catch {

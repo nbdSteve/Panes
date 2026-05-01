@@ -1,20 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
-
-interface MemoryInfo {
-  id: string;
-  workspaceId: string | null;
-  memoryType: string;
-  content: string;
-  sourceThreadId: string;
-  pinned: boolean;
-  createdAt: string;
-}
-
-interface BriefingInfo {
-  workspaceId: string;
-  content: string;
-}
+import { api, type MemoryInfo, type BriefingInfo } from "../lib/api";
 
 interface MemoryPanelProps {
   workspaceId: string;
@@ -33,7 +18,7 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
 
   const loadMemories = useCallback(async () => {
     try {
-      const mems = await invoke<MemoryInfo[]>("get_memories", { workspaceId });
+      const mems = await api.getMemories(workspaceId);
       setMemories(mems);
     } catch {
       setError("Failed to load memories");
@@ -42,7 +27,7 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
 
   const loadBriefing = useCallback(async () => {
     try {
-      const b = await invoke<BriefingInfo | null>("get_briefing", { workspaceId });
+      const b = await api.getBriefing(workspaceId);
       setBriefing(b);
     } catch {
       setError("Failed to load briefing");
@@ -64,30 +49,30 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
   const handleSaveBriefing = async () => {
     const trimmed = briefingDraft.trim();
     if (trimmed) {
-      await invoke("set_briefing", { workspaceId, content: trimmed });
+      await api.setBriefing(workspaceId, trimmed);
     } else {
-      await invoke("delete_briefing", { workspaceId });
+      await api.deleteBriefing(workspaceId);
     }
     setEditingBriefing(false);
     loadBriefing();
   };
 
   const handlePin = async (id: string, pinned: boolean) => {
-    await invoke("pin_memory", { memoryId: id, pinned });
+    await api.pinMemory(id, pinned);
     loadMemories();
   };
 
   const handleDelete = (id: string) => {
     if (confirmDeleteId === id) {
       setConfirmDeleteId(null);
-      invoke("delete_memory", { memoryId: id }).then(() => loadMemories());
+      api.deleteMemory(id).then(() => loadMemories());
     } else {
       setConfirmDeleteId(id);
     }
   };
 
   const handleSaveMemory = async (id: string) => {
-    await invoke("update_memory", { memoryId: id, content: memoryDraft });
+    await api.updateMemory(id, memoryDraft);
     setEditingMemory(null);
     loadMemories();
   };

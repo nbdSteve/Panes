@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "../lib/api";
 import type { WorkspaceInfo } from "../App";
 import { timeAgo, formatCost, truncatePrompt } from "../lib/utils";
 import FluidBackground from "./FluidBackground";
@@ -32,8 +32,8 @@ export default function FeedView({
 
   useEffect(() => {
     Promise.all([
-      invoke<BackendThread[]>("list_all_threads", { limit: 100 }),
-      invoke<number>("get_aggregate_cost"),
+      api.listAllThreads(100) as Promise<BackendThread[]>,
+      api.getAggregateCost(),
     ])
       .then(([t, cost]) => {
         setThreads(t);

@@ -1,6 +1,61 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use tokio::sync::{mpsc, oneshot};
 use tracing::info;
+
+type DbOp = Box<dyn FnOnce(&Connection) + Send>;
+
+#[derive(Clone)]
+pub struct DbHandle {
+    tx: mpsc::Sender<DbOp>,
+}
+
+impl DbHandle {
+    pub fn new(conn: Connection) -> Self {
+        let (tx, rx) = mpsc::channel::<DbOp>(256);
+        std::thread::spawn(move || Self::actor_loop(conn, rx));
+        Self { tx }
+    }
+
+    fn actor_loop(conn: Connection, mut rx: mpsc::Receiver<DbOp>) {
+        while let Some(op) = rx.blocking_recv() {
+            op(&conn);
+        }
+    }
+
+    pub async fn execute<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.tx
+            .send(Box::new(move |conn| {
+                let _ = resp_tx.send(f(conn));
+            }))
+            .await
+            .map_err(|_| anyhow::anyhow!("db actor shut down"))?;
+        resp_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("db actor dropped response"))?
+    }
+
+    pub fn try_execute_blocking<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.tx
+            .try_send(Box::new(move |conn| {
+                let _ = resp_tx.send(f(conn));
+            }))
+            .map_err(|_| anyhow::anyhow!("db actor shut down or full"))?;
+        resp_rx
+            .blocking_recv()
+            .map_err(|_| anyhow::anyhow!("db actor dropped response"))?
+    }
+}
 
 pub fn initialize(db_path: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)
@@ -187,5 +242,67 @@ mod tests {
         add_column_if_missing(&conn, "threads", "session_id", "TEXT").unwrap();
         // Should not error on second call
         add_column_if_missing(&conn, "threads", "session_id", "TEXT").unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_db_handle_execute() {
+        let conn = setup_db();
+        let db = DbHandle::new(conn);
+
+        db.execute(|conn| {
+            insert_workspace(conn, "ws-actor");
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let name: String = db
+            .execute(|conn| {
+                Ok(conn.query_row(
+                    "SELECT name FROM workspaces WHERE id = ?1",
+                    rusqlite::params!["ws-actor"],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(name, "ws-actor");
+    }
+
+    #[test]
+    fn test_db_handle_try_execute_blocking() {
+        let conn = setup_db();
+        let db = DbHandle::new(conn);
+
+        db.try_execute_blocking(|conn| {
+            insert_workspace(conn, "ws-blocking");
+            Ok(())
+        })
+        .unwrap();
+
+        let name: String = db
+            .try_execute_blocking(|conn| {
+                Ok(conn.query_row(
+                    "SELECT name FROM workspaces WHERE id = ?1",
+                    rusqlite::params!["ws-blocking"],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(name, "ws-blocking");
+    }
+
+    #[tokio::test]
+    async fn test_db_handle_error_propagation() {
+        let conn = setup_db();
+        let db = DbHandle::new(conn);
+
+        let result = db
+            .execute(|conn| {
+                conn.execute("INSERT INTO nonexistent_table VALUES (1)", [])?;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
     }
 }

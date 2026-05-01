@@ -1,6 +1,6 @@
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AgentEvent } from "../App";
+import type { AgentEvent } from "../types";
 import { formatCost } from "../lib/utils";
 
 interface TranscriptViewProps {

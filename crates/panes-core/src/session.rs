@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,11 +8,12 @@ use futures::StreamExt;
 use panes_adapters::{AgentAdapter, AgentSession};
 use panes_cost::{self, CostTracker};
 use panes_events::{AgentEvent, SessionContext, ThreadEvent};
-use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::db::DbHandle;
+use crate::error::PanesError;
 use crate::git;
 
 #[derive(Debug)]
@@ -55,6 +56,30 @@ impl std::fmt::Display for ThreadStatus {
 
 type GateSender = Arc<Mutex<Option<oneshot::Sender<GateDecision>>>>;
 
+/// Drop guard that persists thread costs even if `consume_events` is aborted.
+///
+/// `try_execute_blocking` calls `blocking_recv()` in Drop, which is safe
+/// because the `DbHandle` actor runs on a dedicated `std::thread` (not a
+/// tokio task). The `blocking_recv` completes as soon as the actor processes
+/// the operation, or returns immediately if the actor has shut down.
+struct CostFinalizer {
+    thread_id: String,
+    cost_tracker: Arc<CostTracker>,
+    db: DbHandle,
+}
+
+impl Drop for CostFinalizer {
+    fn drop(&mut self) {
+        if let Some(cost) = self.cost_tracker.finalize(&self.thread_id) {
+            let db = self.db.clone();
+            let _ = db.try_execute_blocking(move |conn| {
+                panes_cost::save_cost(conn, &cost).ok();
+                Ok(())
+            });
+        }
+    }
+}
+
 struct ActiveThread {
     #[allow(dead_code)]
     workspace_id: String,
@@ -65,23 +90,25 @@ struct ActiveThread {
 
 pub struct SessionManager {
     active_threads: Arc<Mutex<HashMap<String, ActiveThread>>>,
+    reservations: Arc<Mutex<HashSet<String>>>,
     session_ids: Arc<Mutex<HashMap<String, String>>>,
     adapters: HashMap<String, Arc<dyn AgentAdapter>>,
     cost_tracker: Arc<CostTracker>,
     event_tx: mpsc::UnboundedSender<ThreadEvent>,
-    db: Arc<std::sync::Mutex<Connection>>,
+    pub(crate) db: DbHandle,
 }
 
 impl SessionManager {
-    pub fn new(
+    pub async fn new(
         cost_tracker: Arc<CostTracker>,
         event_tx: mpsc::UnboundedSender<ThreadEvent>,
-        db: Arc<std::sync::Mutex<Connection>>,
+        db: DbHandle,
     ) -> Self {
-        let session_ids = Self::load_session_ids(&db);
+        let session_ids = Self::load_session_ids(&db).await;
 
         Self {
             active_threads: Arc::new(Mutex::new(HashMap::new())),
+            reservations: Arc::new(Mutex::new(HashSet::new())),
             session_ids: Arc::new(Mutex::new(session_ids)),
             adapters: HashMap::new(),
             cost_tracker,
@@ -90,21 +117,22 @@ impl SessionManager {
         }
     }
 
-    fn load_session_ids(db: &Arc<std::sync::Mutex<Connection>>) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        if let Ok(conn) = db.lock() {
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT id, session_id FROM threads WHERE session_id IS NOT NULL"
-            ) {
-                if let Ok(rows) = stmt.query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                }) {
-                    for row in rows.flatten() {
-                        map.insert(row.0, row.1);
-                    }
-                }
-            }
-        }
+    async fn load_session_ids(db: &DbHandle) -> HashMap<String, String> {
+        let map = db
+            .execute(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, session_id FROM threads WHERE session_id IS NOT NULL",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect::<HashMap<String, String>>();
+                Ok(rows)
+            })
+            .await
+            .unwrap_or_default();
         if !map.is_empty() {
             info!(count = map.len(), "restored session_ids from database");
         }
@@ -122,20 +150,51 @@ impl SessionManager {
         agent_name: &str,
         context: SessionContext,
         model: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<String, PanesError> {
         let adapter = self
             .adapters
             .get(agent_name)
-            .with_context(|| format!("unknown agent: {agent_name}"))?
+            .ok_or_else(|| PanesError::AdapterNotFound {
+                adapter: agent_name.to_string(),
+                message: format!("unknown agent: {agent_name}"),
+            })?
             .clone();
 
         {
             let active = self.active_threads.lock().await;
-            if active.values().any(|t| t.workspace_id == workspace.id) {
-                anyhow::bail!("A thread is already running in this workspace. Wait for it to complete or cancel it first.");
+            let mut reserved = self.reservations.lock().await;
+            if active.values().any(|t| t.workspace_id == workspace.id)
+                || reserved.contains(&workspace.id)
+            {
+                return Err(PanesError::WorkspaceOccupied {
+                    workspace_id: workspace.id.clone(),
+                    message: "A thread is already running in this workspace. Wait for it to complete or cancel it first.".to_string(),
+                });
             }
+            reserved.insert(workspace.id.clone());
         }
 
+        let result = self
+            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model)
+            .await
+            .map_err(PanesError::from);
+
+        if result.is_err() {
+            self.reservations.lock().await.remove(&workspace.id);
+        }
+
+        result
+    }
+
+    async fn start_thread_inner(
+        &self,
+        workspace: &Workspace,
+        prompt: &str,
+        agent_name: &str,
+        adapter: Arc<dyn AgentAdapter>,
+        context: SessionContext,
+        model: Option<&str>,
+    ) -> Result<String> {
         // Git snapshot
         let snapshot = if git::is_git_repo(&workspace.path).await {
             match git::snapshot(&workspace.path).await {
@@ -170,13 +229,19 @@ impl SessionManager {
         {
             let now = Utc::now().to_rfc3339();
             let snapshot_hash = snapshot.as_ref().map(|s| s.commit_hash.clone());
-            if let Ok(conn) = self.db.lock() {
-                let _ = conn.execute(
+            let tid = thread_id.clone();
+            let wid = workspace.id.clone();
+            let agent = agent_name.to_string();
+            let p = prompt.to_string();
+            let sid = session_id.clone();
+            let _ = self.db.execute(move |conn| {
+                conn.execute(
                     "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, started_at, created_at)
                      VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?7)",
-                    rusqlite::params![thread_id, workspace.id, agent_name, prompt, session_id, snapshot_hash, now],
-                );
-            }
+                    rusqlite::params![tid, wid, agent, p, sid, snapshot_hash, now],
+                )?;
+                Ok(())
+            }).await;
         }
 
         self.cost_tracker
@@ -194,6 +259,7 @@ impl SessionManager {
         {
             let mut active = self.active_threads.lock().await;
             active.insert(thread_id.clone(), active_thread);
+            self.reservations.lock().await.remove(&workspace.id);
         }
 
         let event_stream = {
@@ -223,7 +289,7 @@ impl SessionManager {
             .await;
         });
 
-        info!(thread_id = %thread_id, agent = agent_name, "thread started");
+        info!(thread_id = %thread_id, "thread started");
         Ok(thread_id)
     }
 
@@ -234,20 +300,56 @@ impl SessionManager {
         prompt: &str,
         agent_name: &str,
         model: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<(), PanesError> {
         let adapter = self
             .adapters
             .get(agent_name)
-            .with_context(|| format!("unknown agent: {agent_name}"))?
+            .ok_or_else(|| PanesError::AdapterNotFound {
+                adapter: agent_name.to_string(),
+                message: format!("unknown agent: {agent_name}"),
+            })?
             .clone();
 
         {
             let active = self.active_threads.lock().await;
-            if active.iter().any(|(id, t)| t.workspace_id == workspace.id && id != thread_id) {
-                anyhow::bail!("A thread is already running in this workspace. Wait for it to complete or cancel it first.");
+            let mut reserved = self.reservations.lock().await;
+            if active.contains_key(thread_id) {
+                return Err(PanesError::WorkspaceOccupied {
+                    workspace_id: workspace.id.clone(),
+                    message: format!("thread {thread_id} is still active. Wait for it to complete first."),
+                });
             }
+            if active.iter().any(|(id, t)| t.workspace_id == workspace.id && id != thread_id)
+                || reserved.contains(&workspace.id)
+            {
+                return Err(PanesError::WorkspaceOccupied {
+                    workspace_id: workspace.id.clone(),
+                    message: "A thread is already running in this workspace. Wait for it to complete or cancel it first.".to_string(),
+                });
+            }
+            reserved.insert(workspace.id.clone());
         }
 
+        let result = self
+            .resume_thread_inner(thread_id, workspace, prompt, adapter, model)
+            .await
+            .map_err(PanesError::from);
+
+        if result.is_err() {
+            self.reservations.lock().await.remove(&workspace.id);
+        }
+
+        result
+    }
+
+    async fn resume_thread_inner(
+        &self,
+        thread_id: &str,
+        workspace: &Workspace,
+        prompt: &str,
+        adapter: Arc<dyn AgentAdapter>,
+        model: Option<&str>,
+    ) -> Result<()> {
         let claude_session_id = {
             let sids = self.session_ids.lock().await;
             sids.get(thread_id)
@@ -267,12 +369,15 @@ impl SessionManager {
             sids.insert(thread_id.to_string(), new_session_id.clone());
         }
         {
-            if let Ok(conn) = self.db.lock() {
-                let _ = conn.execute(
+            let sid = new_session_id.clone();
+            let tid = thread_id.to_string();
+            let _ = self.db.execute(move |conn| {
+                conn.execute(
                     "UPDATE threads SET session_id = ?1, status = 'running' WHERE id = ?2",
-                    rusqlite::params![new_session_id, thread_id],
-                );
-            }
+                    rusqlite::params![sid, tid],
+                )?;
+                Ok(())
+            }).await;
         }
 
         self.cost_tracker
@@ -290,6 +395,7 @@ impl SessionManager {
         {
             let mut active = self.active_threads.lock().await;
             active.insert(thread_id.to_string(), active_thread);
+            self.reservations.lock().await.remove(&workspace.id);
         }
 
         let event_stream = {
@@ -330,9 +436,15 @@ impl SessionManager {
         active_threads: Arc<Mutex<HashMap<String, ActiveThread>>>,
         budget_cap: Option<f64>,
         mut events_stream: std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send>>,
-        db: Arc<std::sync::Mutex<Connection>>,
+        db: DbHandle,
         gate_tx: GateSender,
     ) {
+        let _cost_guard = CostFinalizer {
+            thread_id: thread_id.clone(),
+            cost_tracker: cost_tracker.clone(),
+            db: db.clone(),
+        };
+
         let mut final_status = "completed";
 
         while let Some(event) = events_stream.next().await {
@@ -351,7 +463,7 @@ impl SessionManager {
                         message: format!("Budget cap of ${cap:.2} exceeded. Session terminated."),
                         recoverable: false,
                     };
-                    Self::persist_event(&db, &thread_id, &error_event);
+                    Self::persist_event(&db, &thread_id, &error_event).await;
                     let _ = event_tx.send(ThreadEvent {
                         thread_id: thread_id.clone(),
                         timestamp: Utc::now(),
@@ -363,7 +475,7 @@ impl SessionManager {
                 }
             }
 
-            Self::persist_event(&db, &thread_id, &event);
+            Self::persist_event(&db, &thread_id, &event).await;
 
             let gate_tool_id = match &event {
                 AgentEvent::ToolRequest { id, needs_approval: true, .. } => Some(id.clone()),
@@ -371,12 +483,14 @@ impl SessionManager {
             };
 
             if gate_tool_id.is_some() {
-                if let Ok(conn) = db.lock() {
-                    let _ = conn.execute(
+                let tid = thread_id.clone();
+                let _ = db.execute(move |conn| {
+                    conn.execute(
                         "UPDATE threads SET status = 'gate' WHERE id = ?1",
-                        rusqlite::params![thread_id],
-                    );
-                }
+                        rusqlite::params![tid],
+                    )?;
+                    Ok(())
+                }).await;
             }
 
             // Set up gate oneshot BEFORE sending the event so approve/reject
@@ -417,12 +531,14 @@ impl SessionManager {
                                 thread.session.approve(&tool_id).await.ok();
                             }
                         }
-                        if let Ok(conn) = db.lock() {
-                            let _ = conn.execute(
+                        let tid = thread_id.clone();
+                        let _ = db.execute(move |conn| {
+                            conn.execute(
                                 "UPDATE threads SET status = 'running' WHERE id = ?1",
-                                rusqlite::params![thread_id],
-                            );
-                        }
+                                rusqlite::params![tid],
+                            )?;
+                            Ok(())
+                        }).await;
                     }
                     Ok(GateDecision::Abort) | Err(_) => {
                         info!(thread_id = %thread_id, "gate aborted — killing session");
@@ -437,7 +553,7 @@ impl SessionManager {
                             message: "Gate rejected by user".to_string(),
                             recoverable: false,
                         };
-                        Self::persist_event(&db, &thread_id, &abort_event);
+                        Self::persist_event(&db, &thread_id, &abort_event).await;
                         let _ = event_tx.send(ThreadEvent {
                             thread_id: thread_id.clone(),
                             timestamp: Utc::now(),
@@ -450,15 +566,23 @@ impl SessionManager {
                 }
             }
 
+            // threads.cost_usd comes from the Complete event (authoritative per-run
+            // cost from the agent). The costs table (CostFinalizer/CostTracker) is an
+            // independent audit log — slight divergence is expected and by design.
             match &event {
                 AgentEvent::Complete { summary, total_cost_usd, duration_ms, .. } => {
-                    if let Ok(conn) = db.lock() {
-                        let now = Utc::now().to_rfc3339();
-                        let _ = conn.execute(
+                    let now = Utc::now().to_rfc3339();
+                    let s = summary.clone();
+                    let cost = *total_cost_usd;
+                    let dur = *duration_ms as i64;
+                    let tid = thread_id.clone();
+                    let _ = db.execute(move |conn| {
+                        conn.execute(
                             "UPDATE threads SET status = 'completed', summary = ?1, cost_usd = cost_usd + ?2, duration_ms = ?3, completed_at = ?4 WHERE id = ?5",
-                            rusqlite::params![summary, total_cost_usd, *duration_ms as i64, now, thread_id],
-                        );
-                    }
+                            rusqlite::params![s, cost, dur, now, tid],
+                        )?;
+                        Ok(())
+                    }).await;
                     final_status = "completed";
                     break;
                 }
@@ -471,77 +595,87 @@ impl SessionManager {
         }
 
         if final_status == "error" || final_status == "interrupted" {
-            if let Ok(conn) = db.lock() {
-                let _ = conn.execute(
+            let status = final_status.to_string();
+            let tid = thread_id.clone();
+            let _ = db.execute(move |conn| {
+                conn.execute(
                     "UPDATE threads SET status = ?1 WHERE id = ?2",
-                    rusqlite::params![final_status, thread_id],
-                );
-            }
-        }
-
-        if let Some(cost) = cost_tracker.finalize(&thread_id) {
-            info!(thread_id = %thread_id, cost = cost.total_usd, "thread completed — persisting cost");
-            if let Ok(conn) = db.lock() {
-                if let Err(e) = panes_cost::save_cost(&conn, &cost) {
-                    warn!(error = %e, "failed to persist cost to SQLite");
-                }
-            }
+                    rusqlite::params![status, tid],
+                )?;
+                Ok(())
+            }).await;
         }
 
         let mut active = active_threads.lock().await;
         active.remove(&thread_id);
     }
 
-    fn persist_event(db: &Arc<std::sync::Mutex<Connection>>, thread_id: &str, event: &AgentEvent) {
-        if let Ok(conn) = db.lock() {
-            let event_type = match event {
-                AgentEvent::Thinking { .. } => "thinking",
-                AgentEvent::Text { .. } => "text",
-                AgentEvent::ToolRequest { .. } => "tool_request",
-                AgentEvent::ToolResult { .. } => "tool_result",
-                AgentEvent::CostUpdate { .. } => "cost_update",
-                AgentEvent::Error { .. } => "error",
-                AgentEvent::SubAgentSpawned { .. } => "sub_agent_spawned",
-                AgentEvent::SubAgentComplete { .. } => "sub_agent_complete",
-                AgentEvent::Complete { .. } => "complete",
-            };
-            let data = serde_json::to_string(event).unwrap_or_default();
-            let now = Utc::now().to_rfc3339();
-            let _ = conn.execute(
+    async fn persist_event(db: &DbHandle, thread_id: &str, event: &AgentEvent) {
+        let event_type = match event {
+            AgentEvent::Thinking { .. } => "thinking",
+            AgentEvent::Text { .. } => "text",
+            AgentEvent::ToolRequest { .. } => "tool_request",
+            AgentEvent::ToolResult { .. } => "tool_result",
+            AgentEvent::CostUpdate { .. } => "cost_update",
+            AgentEvent::Error { .. } => "error",
+            AgentEvent::SubAgentSpawned { .. } => "sub_agent_spawned",
+            AgentEvent::SubAgentComplete { .. } => "sub_agent_complete",
+            AgentEvent::Complete { .. } => "complete",
+        }
+        .to_string();
+        let data = serde_json::to_string(event).unwrap_or_default();
+        let now = Utc::now().to_rfc3339();
+        let tid = thread_id.to_string();
+        let _ = db.execute(move |conn| {
+            conn.execute(
                 "INSERT INTO events (thread_id, event_type, timestamp, data) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![thread_id, event_type, now, data],
-            );
-        }
+                rusqlite::params![tid, event_type, now, data],
+            )?;
+            Ok(())
+        }).await;
     }
 
-    pub async fn approve(&self, thread_id: &str, _tool_use_id: &str) -> Result<()> {
+    pub async fn approve(&self, thread_id: &str, _tool_use_id: &str) -> Result<(), PanesError> {
         let active = self.active_threads.lock().await;
         let thread = active
             .get(thread_id)
-            .context("thread not found")?;
+            .ok_or_else(|| PanesError::ThreadNotFound {
+                thread_id: thread_id.to_string(),
+                message: "thread not found".to_string(),
+            })?;
         let mut slot = thread.gate_tx.lock().await;
-        if let Some(tx) = slot.take() {
-            let _ = tx.send(GateDecision::Continue);
+        match slot.take() {
+            Some(tx) => { let _ = tx.send(GateDecision::Continue); Ok(()) }
+            None => Err(PanesError::NoGatePending {
+                thread_id: thread_id.to_string(),
+                message: format!("no gate pending for thread {thread_id}"),
+            }),
         }
-        Ok(())
     }
 
-    pub async fn reject(&self, thread_id: &str, _tool_use_id: &str, _reason: &str) -> Result<()> {
+    pub async fn reject(&self, thread_id: &str, _tool_use_id: &str, _reason: &str) -> Result<(), PanesError> {
         let active = self.active_threads.lock().await;
         let thread = active
             .get(thread_id)
-            .context("thread not found")?;
+            .ok_or_else(|| PanesError::ThreadNotFound {
+                thread_id: thread_id.to_string(),
+                message: "thread not found".to_string(),
+            })?;
         let mut slot = thread.gate_tx.lock().await;
-        if let Some(tx) = slot.take() {
-            let _ = tx.send(GateDecision::Abort);
+        match slot.take() {
+            Some(tx) => { let _ = tx.send(GateDecision::Abort); Ok(()) }
+            None => Err(PanesError::NoGatePending {
+                thread_id: thread_id.to_string(),
+                message: format!("no gate pending for thread {thread_id}"),
+            }),
         }
-        Ok(())
     }
 
-    pub async fn cancel(&self, thread_id: &str) -> Result<()> {
+    pub async fn cancel(&self, thread_id: &str) -> Result<(), PanesError> {
         let active = self.active_threads.lock().await;
         if let Some(thread) = active.get(thread_id) {
-            thread.session.cancel().await?;
+            thread.session.cancel().await
+                .map_err(|e| PanesError::Internal { message: e.to_string() })?;
         }
         Ok(())
     }
@@ -562,12 +696,16 @@ impl SessionManager {
         self.adapters.keys().cloned().collect()
     }
 
-    pub async fn list_models(&self, adapter_name: &str) -> anyhow::Result<Vec<panes_adapters::ModelInfo>> {
+    pub async fn list_models(&self, adapter_name: &str) -> Result<Vec<panes_adapters::ModelInfo>, PanesError> {
         let adapter = self
             .adapters
             .get(adapter_name)
-            .with_context(|| format!("unknown adapter: {adapter_name}"))?;
+            .ok_or_else(|| PanesError::AdapterNotFound {
+                adapter: adapter_name.to_string(),
+                message: format!("unknown adapter: {adapter_name}"),
+            })?;
         adapter.list_models().await
+            .map_err(|e| PanesError::Internal { message: e.to_string() })
     }
 }
 
@@ -576,14 +714,14 @@ mod tests {
     use super::*;
     use panes_adapters::fake::{FakeAdapter, FakeScenario};
 
-    fn setup_session_manager() -> (SessionManager, mpsc::UnboundedReceiver<ThreadEvent>) {
-        let conn = Connection::open(":memory:").unwrap();
+    async fn setup_session_manager() -> (SessionManager, mpsc::UnboundedReceiver<ThreadEvent>) {
+        let conn = rusqlite::Connection::open(":memory:").unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::run_migrations(&conn).unwrap();
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = crate::db::DbHandle::new(conn);
         let cost_tracker = Arc::new(CostTracker::new());
         let (tx, rx) = mpsc::unbounded_channel();
-        (SessionManager::new(cost_tracker, tx, db), rx)
+        (SessionManager::new(cost_tracker, tx, db).await, rx)
     }
 
     fn make_workspace() -> Workspace {
@@ -596,9 +734,44 @@ mod tests {
         }
     }
 
+    async fn wait_for_thread_cleanup(mgr: &SessionManager, thread_id: &str, timeout_ms: u64) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            if !mgr.active_threads.lock().await.contains_key(thread_id) {
+                return;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("thread {} not cleaned up within {}ms", thread_id, timeout_ms);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn wait_for_db_status(mgr: &SessionManager, thread_id: &str, expected: &str, timeout_ms: u64) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let tid = thread_id.to_string();
+            if let Ok(status) = mgr.db.execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT status FROM threads WHERE id = ?1",
+                    rusqlite::params![tid],
+                    |row| row.get::<_, String>(0),
+                )?)
+            }).await {
+                if status == expected {
+                    return;
+                }
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("thread {} did not reach status '{}' within {}ms", thread_id, expected, timeout_ms);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     #[tokio::test]
     async fn test_start_thread_unknown_agent() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let ws = make_workspace();
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let result = mgr.start_thread(&ws, "hello", "nonexistent-agent", ctx, None).await;
@@ -608,7 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_thread_empty_agent_name_rejected() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let ws = make_workspace();
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let result = mgr.start_thread(&ws, "hello", "", ctx, None).await;
@@ -618,7 +791,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_thread_empty_agent_name_rejected() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let ws = make_workspace();
         let result = mgr.resume_thread("t1", &ws, "hello", "", None).await;
         assert!(result.is_err());
@@ -627,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_approve_nonexistent_thread() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let result = mgr.approve("no-such-thread", "tool1").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("thread not found"));
@@ -635,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reject_nonexistent_thread() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let result = mgr.reject("no-such-thread", "tool1", "reason").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("thread not found"));
@@ -643,27 +816,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_nonexistent_thread_is_ok() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let result = mgr.cancel("no-such-thread").await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_start_and_complete_with_fake() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Hello!".to_string(),
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        {
-            let conn = mgr.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![ws.id, ws.path.to_string_lossy(), ws.name, "2024-01-01"],
-            ).unwrap();
-        }
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
@@ -682,13 +849,20 @@ mod tests {
     // ---------------------------------------------------------------
     // Helper: insert workspace row into the DB (needed for FK)
     // ---------------------------------------------------------------
-    fn insert_workspace_row(mgr: &SessionManager, ws: &Workspace) {
-        let conn = mgr.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![ws.id, ws.path.to_string_lossy(), ws.name, "2024-01-01"],
-        )
-        .unwrap();
+    async fn insert_workspace_row(mgr: &SessionManager, ws: &Workspace) {
+        let id = ws.id.clone();
+        let path = ws.path.to_string_lossy().to_string();
+        let name = ws.name.clone();
+        mgr.db
+            .execute(move |conn| {
+                conn.execute(
+                    "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![id, path, name, "2024-01-01"],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     fn make_workspace_with_budget(cap: Option<f64>) -> Workspace {
@@ -699,6 +873,20 @@ mod tests {
             default_agent: None,
             budget_cap: cap,
         }
+    }
+
+    async fn query_thread_status(mgr: &SessionManager, thread_id: &str) -> String {
+        let tid = thread_id.to_string();
+        mgr.db
+            .execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT status FROM threads WHERE id = ?1",
+                    rusqlite::params![tid],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
     }
 
     /// Collect all events until Complete, Error, or timeout.
@@ -905,7 +1093,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_thread_success() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "First reply".to_string(),
         })
@@ -913,7 +1101,7 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         // Start a thread first so we have a stored session_id
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -921,6 +1109,7 @@ mod tests {
 
         // Drain all events from the first run
         let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
         // Now resume the same thread
         mgr.resume_thread(&thread_id, &ws, "follow up", "fake", None)
@@ -936,7 +1125,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_thread_nonexistent() {
-        let (mut mgr, _rx) = setup_session_manager();
+        let (mut mgr, _rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "x".to_string(),
         })
@@ -954,7 +1143,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_thread_unknown_agent() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let ws = make_workspace();
         let result = mgr.resume_thread("t1", &ws, "prompt", "nonexistent-agent", None).await;
         assert!(result.is_err());
@@ -969,7 +1158,7 @@ mod tests {
     async fn test_budget_cap_exceeded() {
         // FakeScenario::TextOnly emits CostUpdate with total_usd: 0.003
         // Set budget_cap to 0.001 — well below the cost
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Expensive answer".to_string(),
         })
@@ -977,7 +1166,7 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace_with_budget(Some(0.001));
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
@@ -999,7 +1188,7 @@ mod tests {
     #[tokio::test]
     async fn test_budget_cap_not_exceeded() {
         // Set budget_cap to 10.0 — well above the 0.003 cost
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Cheap answer".to_string(),
         })
@@ -1007,7 +1196,7 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace_with_budget(Some(10.0));
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
@@ -1031,11 +1220,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_approve_completes_thread() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr
@@ -1063,11 +1252,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_reject_interrupts_thread() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr
@@ -1083,8 +1272,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Give the background task time to cancel and clean up
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
         // Drain any remaining events — should NOT have a Complete
         let mut remaining = vec![];
@@ -1100,15 +1288,7 @@ mod tests {
         assert!(!has_complete, "rejected gate should NOT lead to Complete");
 
         // Verify DB status is interrupted
-        let status: String = {
-            let conn = mgr.db.lock().unwrap();
-            conn.query_row(
-                "SELECT status FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let status = query_thread_status(&mgr, &thread_id).await;
         assert_eq!(status, "interrupted");
     }
 
@@ -1118,7 +1298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_snapshot_nonexistent() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let result = mgr.get_snapshot("no-such-thread").await;
         assert!(result.is_none());
     }
@@ -1129,7 +1309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_thread() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Hi".to_string(),
         })
@@ -1137,7 +1317,7 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
@@ -1162,7 +1342,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_adapters() {
-        let (mut mgr, _rx) = setup_session_manager();
+        let (mut mgr, _rx) = setup_session_manager().await;
         assert!(mgr.list_adapters().is_empty(), "no adapters registered yet");
 
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
@@ -1177,7 +1357,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_adapters_multiple() {
-        let (mut mgr, _rx) = setup_session_manager();
+        let (mut mgr, _rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(
             FakeAdapter::new(FakeScenario::TextOnly { response: "a".into() }),
         ));
@@ -1194,14 +1374,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_models_unknown_adapter() {
-        let (mgr, _rx) = setup_session_manager();
+        let (mgr, _rx) = setup_session_manager().await;
         let result = mgr.list_models("nonexistent").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_list_models_fake_adapter() {
-        let (mut mgr, _rx) = setup_session_manager();
+        let (mut mgr, _rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(FakeAdapter::new(FakeScenario::TextOnly {
             response: "x".into(),
         })));
@@ -1232,7 +1412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_events_persisted_to_db() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Stored!".to_string(),
         })
@@ -1240,7 +1420,7 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
@@ -1248,31 +1428,29 @@ mod tests {
         // Wait for thread to complete
         let _ = collect_events_until_done(&mut rx).await;
 
-        // Give the background task a moment to finish persisting
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
         // Query the events table
-        let conn = mgr.db.lock().unwrap();
-        let event_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM events WHERE thread_id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
+        let tid = thread_id.clone();
+        let (event_count, types) = mgr.db
+            .execute(move |conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM events WHERE thread_id = ?1",
+                    rusqlite::params![tid],
+                    |row| row.get(0),
+                )?;
+                let mut stmt = conn.prepare("SELECT event_type FROM events WHERE thread_id = ?1 ORDER BY id")?;
+                let types: Vec<String> = stmt
+                    .query_map(rusqlite::params![tid], |row| row.get(0))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Ok((count, types))
+            })
+            .await
             .unwrap();
 
         // TextOnly emits: Thinking, CostUpdate, Text, Complete = 4 events
         assert_eq!(event_count, 4, "all events should be persisted to DB");
-
-        // Verify specific event types are present
-        let mut stmt = conn
-            .prepare("SELECT event_type FROM events WHERE thread_id = ?1 ORDER BY id")
-            .unwrap();
-        let types: Vec<String> = stmt
-            .query_map(rusqlite::params![thread_id], |row| row.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
         assert_eq!(types, vec!["thinking", "cost_update", "text", "complete"]);
     }
 
@@ -1282,7 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_thread_status_completed_in_db() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Done!".to_string(),
         })
@@ -1290,38 +1468,35 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let _ = collect_events_until_done(&mut rx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
-        let conn = mgr.db.lock().unwrap();
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let status = query_thread_status(&mgr, &thread_id).await;
         assert_eq!(status, "completed");
 
         // Verify summary and cost_usd were set
-        let summary: String = conn
-            .query_row(
-                "SELECT summary FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
+        let tid = thread_id.clone();
+        let summary: String = mgr.db
+            .execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT summary FROM threads WHERE id = ?1",
+                    rusqlite::params![tid],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
             .unwrap();
         assert_eq!(summary, "Done!");
     }
 
     #[tokio::test]
     async fn test_thread_status_error_in_db() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::Error {
             message: "Something went wrong".to_string(),
         })
@@ -1329,28 +1504,21 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let _ = collect_events_until_done(&mut rx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
-        let conn = mgr.db.lock().unwrap();
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let status = query_thread_status(&mgr, &thread_id).await;
         assert_eq!(status, "error");
     }
 
     #[tokio::test]
     async fn test_budget_cap_sets_error_status_in_db() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Expensive".to_string(),
         })
@@ -1358,22 +1526,15 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace_with_budget(Some(0.001));
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
 
         let _ = collect_events_until_done(&mut rx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
-        let conn = mgr.db.lock().unwrap();
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let status = query_thread_status(&mgr, &thread_id).await;
         assert_eq!(status, "error");
     }
 
@@ -1383,7 +1544,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_id_stored_and_loadable() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "x".to_string(),
         })
@@ -1391,7 +1552,7 @@ mod tests {
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
@@ -1404,19 +1565,21 @@ mod tests {
         }
 
         // Verify session_id is in the DB
-        let stored_sid: String = {
-            let conn = mgr.db.lock().unwrap();
-            conn.query_row(
-                "SELECT session_id FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let tid = thread_id.clone();
+        let stored_sid: String = mgr.db
+            .execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT session_id FROM threads WHERE id = ?1",
+                    rusqlite::params![tid],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
         assert!(!stored_sid.is_empty());
 
         // Verify load_session_ids can reconstruct the map from DB
-        let loaded = SessionManager::load_session_ids(&mgr.db);
+        let loaded = SessionManager::load_session_ids(&mgr.db).await;
         assert_eq!(loaded.get(&thread_id).unwrap(), &stored_sid);
     }
 
@@ -1430,14 +1593,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_thread_with_model() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Hi".to_string(),
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, Some("opus")).await.unwrap();
@@ -1449,14 +1612,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_thread_model_none_uses_default() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "Hi".to_string(),
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let _thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
@@ -1467,18 +1630,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_thread_with_model() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "First".to_string(),
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
         let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
         mgr.resume_thread(&thread_id, &ws, "follow up", "fake", Some("sonnet"))
             .await
@@ -1490,11 +1654,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_status_set_in_db() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
         let ws = make_workspace();
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr
@@ -1505,18 +1669,9 @@ mod tests {
         // Wait for the gate event
         let _tool_use_id = wait_for_gate_event(&mut rx).await;
 
-        // Give consume_events a moment to set the DB status to 'gate'
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_db_status(&mgr, &thread_id, "gate", 2000).await;
 
-        let status: String = {
-            let conn = mgr.db.lock().unwrap();
-            conn.query_row(
-                "SELECT status FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let status = query_thread_status(&mgr, &thread_id).await;
         assert_eq!(status, "gate", "DB should show gate status while paused");
 
         // Clean up — reject so the background task stops
@@ -1539,11 +1694,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_blocks_second_start_same_workspace() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
         let ws = make_workspace_with_id("ws-guard-1");
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let _tid_a = mgr.start_thread(&ws, "first", "gate-test", ctx, None).await.unwrap();
@@ -1559,13 +1714,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_different_workspace_concurrent_ok() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
         let ws1 = make_workspace_with_id("ws-guard-2a");
         let ws2 = make_workspace_with_id("ws-guard-2b");
-        insert_workspace_row(&mgr, &ws1);
-        insert_workspace_row(&mgr, &ws2);
+        insert_workspace_row(&mgr, &ws1).await;
+        insert_workspace_row(&mgr, &ws2).await;
 
         let ctx1 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let tid_a = mgr.start_thread(&ws1, "first", "gate-test", ctx1, None).await.unwrap();
@@ -1584,7 +1739,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_blocks_if_other_thread_active() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
 
         let fake = FakeAdapter::new(FakeScenario::TextOnly {
             response: "done".to_string(),
@@ -1593,12 +1748,13 @@ mod tests {
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
         let ws = make_workspace_with_id("ws-guard-3");
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         // Start and complete thread A
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let tid_a = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
         let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &tid_a, 2000).await;
 
         // Start thread C (gate-test) in same workspace — it will be active at the gate
         let ctx2 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -1615,22 +1771,92 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_succeeds_same_thread_only() {
-        let (mut mgr, mut rx) = setup_session_manager();
+        let (mut mgr, mut rx) = setup_session_manager().await;
         let adapter = FakeAdapter::new(FakeScenario::TextOnly {
             response: "reply".to_string(),
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
         let ws = make_workspace_with_id("ws-guard-4");
-        insert_workspace_row(&mgr, &ws);
+        insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let tid = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
         let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &tid, 2000).await;
 
         // Resume same thread in same workspace — no other active thread
         let result = mgr.resume_thread(&tid, &ws, "follow up", "fake", None).await;
         assert!(result.is_ok(), "resume of own thread should succeed");
         let _ = collect_events_until_done(&mut rx).await;
+    }
+
+    // ---------------------------------------------------------------
+    // Fix #1: Gate approve/reject robustness
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_approve_no_pending_gate() {
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "done".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
+        let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &tid, 2000).await;
+
+        let result = mgr.approve(&tid, "fake-tool-id").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("thread not found"));
+    }
+
+    #[tokio::test]
+    async fn test_double_approve_returns_error() {
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
+
+        let ws = make_workspace_with_id("ws-double-approve");
+        insert_workspace_row(&mgr, &ws).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid = mgr.start_thread(&ws, "gate me", "gate-test", ctx, None).await.unwrap();
+        let gate_id = wait_for_gate_event(&mut rx).await;
+
+        mgr.approve(&tid, &gate_id).await.unwrap();
+
+        let result = mgr.approve(&tid, &gate_id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no gate pending") || err.contains("thread not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reject_no_pending_gate() {
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "done".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
+        let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &tid, 2000).await;
+
+        let result = mgr.reject(&tid, "fake-tool-id", "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("thread not found"));
     }
 }

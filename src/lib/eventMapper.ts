@@ -1,4 +1,4 @@
-import type { AgentEvent } from "../App";
+import type { AgentEvent } from "../types";
 
 export function mapBackendEvent(
   raw: Record<string, unknown>

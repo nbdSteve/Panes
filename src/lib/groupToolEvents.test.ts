@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { groupToolEvents, type ToolGroup } from "./groupToolEvents";
-import type { AgentEvent } from "../App";
+import type { AgentEvent } from "../types";
 
 describe("groupToolEvents", () => {
   it("returns empty array for empty input", () => {

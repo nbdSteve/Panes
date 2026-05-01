@@ -82,12 +82,12 @@ describe("mapBackendEvent", () => {
       success: true,
       output: "done",
     });
-    expect(result?.duration_ms).toBeUndefined();
+    expect(result?.event_type === "tool_result" ? result.duration_ms : undefined).toBeUndefined();
   });
 
   it("maps cost_update event", () => {
     const result = mapBackendEvent({ event_type: "cost_update", total_usd: 0.05 });
-    expect(result?.total_usd).toBe(0.05);
+    expect(result?.event_type === "cost_update" ? result.total_usd : undefined).toBe(0.05);
   });
 
   it("maps cost_update event with token fields", () => {

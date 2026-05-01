@@ -11,13 +11,15 @@ use serde_json::Value;
 use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
+use panes_core::db::DbHandle;
 use panes_core::session::SessionManager;
 use panes_cost::CostTracker;
 use panes_events::{SessionContext, ThreadEvent};
 use panes_memory::manager::MemoryManager;
+use panes_memory::{BriefingStore, MemoryStore};
 
 pub type SessionState = Arc<Mutex<SessionManager>>;
-pub type DbState = Arc<std::sync::Mutex<rusqlite::Connection>>;
+pub type DbState = DbHandle;
 pub type MemoryManagerState = Arc<MemoryManager>;
 
 #[derive(Clone)]
@@ -26,7 +28,6 @@ struct BridgeState {
     #[allow(dead_code)]
     cost_tracker: Arc<CostTracker>,
     db: DbState,
-    #[allow(dead_code)]
     memory_manager: MemoryManagerState,
     events_tx: broadcast::Sender<ThreadEvent>,
 }
@@ -135,28 +136,33 @@ async fn dispatch_command(
             }
             let id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "INSERT INTO workspaces (id, path, name, default_agent, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![id, expanded, name, "claude-code", now],
-            ).map_err(|e| e.to_string())?;
+            let id2 = id.clone();
+            let expanded2 = expanded.clone();
+            let name2 = name.to_string();
+            state.db.execute(move |conn| {
+                conn.execute(
+                    "INSERT INTO workspaces (id, path, name, default_agent, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![id2, expanded2, name2, "claude-code", now],
+                )?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
             Ok(serde_json::json!({ "id": id, "path": expanded, "name": name, "defaultAgent": "claude-code" }))
         }
         "list_workspaces" => {
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare("SELECT id, path, name, default_agent FROM workspaces ORDER BY created_at")
-                .map_err(|e| e.to_string())?;
-            let rows: Vec<Value> = stmt.query_map([], |row| {
-                Ok(serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "path": row.get::<_, String>(1)?,
-                    "name": row.get::<_, String>(2)?,
-                    "defaultAgent": row.get::<_, Option<String>>(3)?,
-                }))
-            }).map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-            Ok(Value::Array(rows))
+            state.db.execute(|conn| {
+                let mut stmt = conn.prepare("SELECT id, path, name, default_agent FROM workspaces ORDER BY created_at")?;
+                let rows: Vec<Value> = stmt.query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "path": row.get::<_, String>(1)?,
+                        "name": row.get::<_, String>(2)?,
+                        "defaultAgent": row.get::<_, Option<String>>(3)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+                Ok(Value::Array(rows))
+            }).await.map_err(|e| e.to_string())
         }
         "start_thread" => {
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
@@ -251,14 +257,14 @@ async fn dispatch_command(
         "revert_changes" => {
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?;
-            let snapshot_hash: String = {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                conn.query_row(
+            let tid = thread_id.to_string();
+            let snapshot_hash: String = state.db.execute(move |conn| {
+                Ok(conn.query_row(
                     "SELECT snapshot_ref FROM threads WHERE id = ?1",
-                    rusqlite::params![thread_id],
+                    rusqlite::params![tid],
                     |row| row.get(0),
-                ).map_err(|e| format!("no snapshot for thread: {e}"))?
-            };
+                )?)
+            }).await.map_err(|e| format!("no snapshot for thread: {e}"))?;
             let expanded = crate::commands::expand_tilde(workspace_path);
             let path = std::path::PathBuf::from(&expanded);
             panes_core::git::revert(&path, &panes_core::git::SnapshotRef { commit_hash: snapshot_hash })
@@ -267,67 +273,73 @@ async fn dispatch_command(
             Ok(Value::Null)
         }
         "list_threads" => {
-            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare(
-                "SELECT id, prompt, status, cost_usd, created_at FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
-            ).map_err(|e| e.to_string())?;
-            let rows: Vec<Value> = stmt.query_map(rusqlite::params![workspace_id], |row| {
-                Ok(serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "workspaceId": workspace_id,
-                    "prompt": row.get::<_, String>(1)?,
-                    "status": row.get::<_, String>(2)?,
-                    "costUsd": row.get::<_, f64>(3).unwrap_or(0.0),
-                    "createdAt": row.get::<_, String>(4)?,
-                    "events": [],
-                }))
-            }).map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-            Ok(Value::Array(rows))
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            state.db.execute(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, workspace_id, prompt, status, cost_usd, created_at FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
+                )?;
+                let rows: Vec<Value> = stmt.query_map(rusqlite::params![workspace_id], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "workspaceId": row.get::<_, String>(1)?,
+                        "prompt": row.get::<_, String>(2)?,
+                        "status": row.get::<_, String>(3)?,
+                        "costUsd": row.get::<_, f64>(4).unwrap_or(0.0),
+                        "createdAt": row.get::<_, String>(5)?,
+                        "events": [],
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+                Ok(Value::Array(rows))
+            }).await.map_err(|e| e.to_string())
         }
         "list_all_threads" => {
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare(
-                "SELECT id, workspace_id, prompt, status, cost_usd, summary, duration_ms, created_at FROM threads ORDER BY created_at DESC LIMIT 100"
-            ).map_err(|e| e.to_string())?;
-            let rows: Vec<Value> = stmt.query_map([], |row| {
-                Ok(serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "workspaceId": row.get::<_, String>(1)?,
-                    "prompt": row.get::<_, String>(2)?,
-                    "status": row.get::<_, String>(3)?,
-                    "costUsd": row.get::<_, f64>(4).unwrap_or(0.0),
-                    "summary": row.get::<_, Option<String>>(5).unwrap_or(None),
-                    "durationMs": row.get::<_, Option<i64>>(6).unwrap_or(None),
-                    "createdAt": row.get::<_, String>(7)?,
-                    "events": [],
-                }))
-            }).map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-            Ok(Value::Array(rows))
+            state.db.execute(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, workspace_id, prompt, status, cost_usd, summary, duration_ms, created_at FROM threads ORDER BY created_at DESC LIMIT 100"
+                )?;
+                let rows: Vec<Value> = stmt.query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "workspaceId": row.get::<_, String>(1)?,
+                        "prompt": row.get::<_, String>(2)?,
+                        "status": row.get::<_, String>(3)?,
+                        "costUsd": row.get::<_, f64>(4).unwrap_or(0.0),
+                        "summary": row.get::<_, Option<String>>(5).unwrap_or(None),
+                        "durationMs": row.get::<_, Option<i64>>(6).unwrap_or(None),
+                        "createdAt": row.get::<_, String>(7)?,
+                        "events": [],
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+                Ok(Value::Array(rows))
+            }).await.map_err(|e| e.to_string())
         }
         "delete_thread" => {
-            let thread_id = args["threadId"].as_str().ok_or("missing threadId")?;
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM events WHERE thread_id = ?1", rusqlite::params![thread_id]).map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM costs WHERE thread_id = ?1", rusqlite::params![thread_id]).map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM threads WHERE id = ?1", rusqlite::params![thread_id]).map_err(|e| e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
+            let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();
+            state.db.execute(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                tx.execute("DELETE FROM events WHERE thread_id = ?1", rusqlite::params![thread_id])?;
+                tx.execute("DELETE FROM costs WHERE thread_id = ?1", rusqlite::params![thread_id])?;
+                tx.execute("DELETE FROM threads WHERE id = ?1", rusqlite::params![thread_id])?;
+                tx.commit()?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "remove_workspace" => {
-            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)", rusqlite::params![workspace_id]).map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM costs WHERE workspace_id = ?1", rusqlite::params![workspace_id]).map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM threads WHERE workspace_id = ?1", rusqlite::params![workspace_id]).map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![workspace_id]).map_err(|e| e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            state.db.execute(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                tx.execute("DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)", rusqlite::params![workspace_id])?;
+                tx.execute("DELETE FROM costs WHERE workspace_id = ?1", rusqlite::params![workspace_id])?;
+                tx.execute("DELETE FROM threads WHERE workspace_id = ?1", rusqlite::params![workspace_id])?;
+                tx.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![workspace_id])?;
+                tx.commit()?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "list_adapters" => {
@@ -342,29 +354,165 @@ async fn dispatch_command(
             Ok(serde_json::to_value(models).unwrap_or(Value::Array(vec![])))
         }
         "get_aggregate_cost" => {
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let total: f64 = conn.query_row(
-                "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs", [], |row| row.get(0),
-            ).map_err(|e| e.to_string())?;
+            let total: f64 = state.db.execute(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs", [], |row| row.get(0),
+                )?)
+            }).await.map_err(|e| e.to_string())?;
             Ok(serde_json::json!(total))
         }
         "get_workspace_cost" => {
-            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let total: f64 = conn.query_row(
-                "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs WHERE workspace_id = ?1",
-                rusqlite::params![workspace_id], |row| row.get(0),
-            ).map_err(|e| e.to_string())?;
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            let total: f64 = state.db.execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs WHERE workspace_id = ?1",
+                    rusqlite::params![workspace_id], |row| row.get(0),
+                )?)
+            }).await.map_err(|e| e.to_string())?;
             Ok(serde_json::json!(total))
         }
         "get_changed_files" => {
             Ok(serde_json::json!([]))
         }
-        "get_briefing" | "set_briefing" | "delete_briefing"
-        | "get_memories" | "search_memories" | "extract_memories"
-        | "update_memory" | "delete_memory" | "pin_memory"
-        | "set_workspace_budget_cap"
-        | "get_memory_backend_status" | "set_memory_backend" => {
+        "extract_memories" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
+            let thread_id = args["threadId"].as_str().ok_or("missing threadId")?;
+            let transcript = args["transcript"].as_str().ok_or("missing transcript")?;
+            let memories = state.memory_manager
+                .add(transcript, Some(workspace_id), thread_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let infos: Vec<Value> = memories.into_iter().map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "workspaceId": m.workspace_id,
+                    "memoryType": m.memory_type.to_string(),
+                    "content": m.content,
+                    "sourceThreadId": m.source_thread_id,
+                    "pinned": m.pinned,
+                    "createdAt": m.created_at.to_rfc3339(),
+                })
+            }).collect();
+            Ok(Value::Array(infos))
+        }
+        "get_memories" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
+            let memories = state.memory_manager
+                .get_all(Some(workspace_id))
+                .await
+                .map_err(|e| e.to_string())?;
+            let infos: Vec<Value> = memories.into_iter().map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "workspaceId": m.workspace_id,
+                    "memoryType": m.memory_type.to_string(),
+                    "content": m.content,
+                    "sourceThreadId": m.source_thread_id,
+                    "pinned": m.pinned,
+                    "createdAt": m.created_at.to_rfc3339(),
+                })
+            }).collect();
+            Ok(Value::Array(infos))
+        }
+        "search_memories" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
+            let query = args["query"].as_str().ok_or("missing query")?;
+            let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+            let memories = state.memory_manager
+                .search(query, Some(workspace_id), limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            let infos: Vec<Value> = memories.into_iter().map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "workspaceId": m.workspace_id,
+                    "memoryType": m.memory_type.to_string(),
+                    "content": m.content,
+                    "sourceThreadId": m.source_thread_id,
+                    "pinned": m.pinned,
+                    "createdAt": m.created_at.to_rfc3339(),
+                })
+            }).collect();
+            Ok(Value::Array(infos))
+        }
+        "update_memory" => {
+            let memory_id = args["memoryId"].as_str().ok_or("missing memoryId")?;
+            let content = args["content"].as_str().ok_or("missing content")?;
+            state.memory_manager
+                .update(memory_id, content)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_memory" => {
+            let memory_id = args["memoryId"].as_str().ok_or("missing memoryId")?;
+            state.memory_manager
+                .delete(memory_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "pin_memory" => {
+            let memory_id = args["memoryId"].as_str().ok_or("missing memoryId")?;
+            let pinned = args["pinned"].as_bool().ok_or("missing pinned")?;
+            state.memory_manager
+                .pin(memory_id, pinned)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "get_briefing" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
+            let briefing = state.memory_manager
+                .get_briefing(workspace_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            match briefing {
+                Some(b) => Ok(serde_json::json!({
+                    "workspaceId": b.workspace_id,
+                    "content": b.content,
+                })),
+                None => Ok(Value::Null),
+            }
+        }
+        "set_briefing" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
+            let content = args["content"].as_str().ok_or("missing content")?;
+            state.memory_manager
+                .set_briefing(workspace_id, content)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_briefing" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
+            state.memory_manager
+                .delete_briefing(workspace_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "set_workspace_budget_cap" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            let budget_cap = args["budgetCap"].as_f64();
+            state.db.execute(move |conn| {
+                conn.execute(
+                    "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+                    rusqlite::params![budget_cap, workspace_id],
+                )?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "get_memory_backend_status" => {
+            Ok(serde_json::json!({
+                "backend": state.memory_manager.get_active_backend().to_string(),
+                "mem0Configured": state.memory_manager.is_mem0_configured(),
+            }))
+        }
+        "set_memory_backend" => {
+            let backend = args["backend"].as_str().ok_or("missing backend")?;
+            state.memory_manager.set_active_backend(backend).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         _ => Err(format!("unknown command: {cmd}")),

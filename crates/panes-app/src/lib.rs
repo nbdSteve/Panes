@@ -45,7 +45,7 @@ pub fn run() {
     eprintln!("[panes] app starting (test_mode={})", test_mode);
 
     let conn = db::initialize(&db_path()).expect("failed to initialize database");
-    let db = Arc::new(std::sync::Mutex::new(conn));
+    let db = db::DbHandle::new(conn);
 
     let memory_config = if test_mode {
         MemoryConfig::for_test()
@@ -59,7 +59,9 @@ pub fn run() {
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ThreadEvent>();
     let cost_tracker = Arc::new(CostTracker::new());
 
-    let mut session_manager = SessionManager::new(cost_tracker.clone(), event_tx, db.clone());
+    let mut session_manager = tauri::async_runtime::block_on(
+        SessionManager::new(cost_tracker.clone(), event_tx, db.clone()),
+    );
 
     let bridge_tx: Option<broadcast::Sender<ThreadEvent>> = if test_mode {
         let (tx, _) = broadcast::channel(256);

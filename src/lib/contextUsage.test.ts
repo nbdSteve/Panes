@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { calculateContextUsage } from "./contextUsage";
-import type { AgentEvent } from "../App";
+import type { AgentEvent } from "../types";
 
 describe("calculateContextUsage", () => {
   it("returns null when no cost_update events", () => {

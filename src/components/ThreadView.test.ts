@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { collectTestResults, parseGitStatus } from "./ThreadView";
-import type { AgentEvent } from "../App";
+import { collectTestResults, parseGitStatus } from "../lib/threadHelpers";
+import type { AgentEvent } from "../types";
 
 describe("collectTestResults", () => {
   it("returns undefined when no test commands ran", () => {

@@ -1,12 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { api, type MemoryBackendStatus } from "../lib/api";
 import type { WorkspaceInfo } from "../App";
 import { formatCost } from "../lib/utils";
-
-interface MemoryBackendStatus {
-  backend: string;
-  mem0Configured: boolean;
-}
 
 interface SettingsPanelProps {
   workspaces: WorkspaceInfo[];
@@ -21,7 +16,7 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
 
   const loadStatus = useCallback(async () => {
     try {
-      const status = await invoke<MemoryBackendStatus>("get_memory_backend_status");
+      const status = await api.getMemoryBackendStatus();
       setBackendStatus(status);
     } catch {
       setError("Failed to load settings");
@@ -31,14 +26,14 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
   useEffect(() => {
     Promise.all([
       loadStatus(),
-      invoke<number>("get_aggregate_cost").then(setTotalCost).catch(() => {}),
+      api.getAggregateCost().then(setTotalCost).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, [loadStatus]);
 
   const handleToggleBackend = async (backend: string) => {
     setSwitching(true);
     try {
-      await invoke("set_memory_backend", { backend });
+      await api.setMemoryBackend(backend);
       await loadStatus();
     } catch {}
     setSwitching(false);

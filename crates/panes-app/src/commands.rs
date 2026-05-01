@@ -1,18 +1,19 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use panes_core::db::DbHandle;
+use panes_core::error::PanesError;
 use panes_core::git;
 use panes_core::session::{SessionManager, Workspace};
 use panes_events::SessionContext;
 use panes_memory::manager::MemoryManager;
 use panes_memory::{BriefingStore, MemoryStore};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 type SessionState = Arc<Mutex<SessionManager>>;
-type DbState = Arc<std::sync::Mutex<Connection>>;
+pub(crate) type DbState = DbHandle;
 pub(crate) type MemoryManagerState = Arc<MemoryManager>;
 
 fn resolve_agent_name(agent: Option<String>) -> String {
@@ -43,21 +44,28 @@ pub async fn add_workspace(
     db: tauri::State<'_, DbState>,
     path: String,
     name: String,
-) -> Result<WorkspaceInfo, String> {
+) -> Result<WorkspaceInfo, PanesError> {
     let expanded = expand_tilde(&path);
     let workspace_path = PathBuf::from(&expanded);
     if !workspace_path.exists() {
-        return Err(format!("Path does not exist: {expanded}"));
+        return Err(PanesError::ValidationError {
+            message: format!("Path does not exist: {expanded}"),
+        });
     }
 
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO workspaces (id, path, name, default_agent, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![id, expanded, name, "claude-code", now],
-    ).map_err(|e| e.to_string())?;
+    let id2 = id.clone();
+    let expanded2 = expanded.clone();
+    let name2 = name.clone();
+    db.execute(move |conn| {
+        conn.execute(
+            "INSERT INTO workspaces (id, path, name, default_agent, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id2, expanded2, name2, "claude-code", now],
+        )?;
+        Ok(())
+    }).await.map_err(PanesError::from)?;
 
     Ok(WorkspaceInfo {
         id,
@@ -71,14 +79,12 @@ pub async fn add_workspace(
 #[tauri::command]
 pub async fn list_workspaces(
     db: tauri::State<'_, DbState>,
-) -> Result<Vec<WorkspaceInfo>, String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare("SELECT id, path, name, default_agent, budget_cap FROM workspaces ORDER BY created_at")
-        .map_err(|e| e.to_string())?;
-
-    let rows = stmt
-        .query_map([], |row| {
+) -> Result<Vec<WorkspaceInfo>, PanesError> {
+    db.execute(|conn| {
+        let mut stmt = conn
+            .prepare("SELECT id, path, name, default_agent, budget_cap FROM workspaces ORDER BY created_at")?;
+        let mut workspaces = vec![];
+        let rows = stmt.query_map([], |row| {
             Ok(WorkspaceInfo {
                 id: row.get(0)?,
                 path: row.get(1)?,
@@ -86,41 +92,40 @@ pub async fn list_workspaces(
                 default_agent: row.get(3)?,
                 budget_cap: row.get(4)?,
             })
-        })
-        .map_err(|e| e.to_string())?;
-
-    let mut workspaces = vec![];
-    for row in rows {
-        workspaces.push(row.map_err(|e| e.to_string())?);
-    }
-    Ok(workspaces)
+        })?;
+        for row in rows {
+            workspaces.push(row?);
+        }
+        Ok(workspaces)
+    }).await.map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn remove_workspace(
     db: tauri::State<'_, DbState>,
     workspace_id: String,
-) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)",
-        rusqlite::params![workspace_id],
-    ).map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM costs WHERE workspace_id = ?1",
-        rusqlite::params![workspace_id],
-    ).map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM threads WHERE workspace_id = ?1",
-        rusqlite::params![workspace_id],
-    ).map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM workspaces WHERE id = ?1",
-        rusqlite::params![workspace_id],
-    ).map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(())
+) -> Result<(), PanesError> {
+    db.execute(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.execute(
+            "DELETE FROM costs WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.execute(
+            "DELETE FROM threads WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.execute(
+            "DELETE FROM workspaces WHERE id = ?1",
+            rusqlite::params![workspace_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }).await.map_err(PanesError::from)
 }
 
 #[derive(Serialize)]
@@ -141,126 +146,127 @@ pub struct ThreadInfo {
 pub async fn list_threads(
     db: tauri::State<'_, DbState>,
     workspace_id: String,
-) -> Result<Vec<ThreadInfo>, String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
+) -> Result<Vec<ThreadInfo>, PanesError> {
+    db.execute(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
+             FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
+        )?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
-         FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
-    ).map_err(|e| e.to_string())?;
-
-    let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![workspace_id], |row| {
-        Ok(ThreadInfo {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            prompt: row.get(2)?,
-            status: row.get(3)?,
-            summary: row.get(4)?,
-            cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
-            duration_ms: row.get(6)?,
-            created_at: row.get(7)?,
-            events: vec![],
-        })
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
-
-    let mut result = Vec::with_capacity(threads.len());
-    for mut thread in threads {
-        let mut evt_stmt = conn.prepare(
-            "SELECT data FROM events WHERE thread_id = ?1 ORDER BY id ASC"
-        ).map_err(|e| e.to_string())?;
-
-        let events: Vec<serde_json::Value> = evt_stmt.query_map(
-            rusqlite::params![thread.id], |row| {
-                let data: String = row.get(0)?;
-                Ok(serde_json::from_str(&data).unwrap_or(serde_json::Value::Null))
-            }
-        ).map_err(|e| e.to_string())?
+        let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![workspace_id], |row| {
+            Ok(ThreadInfo {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                prompt: row.get(2)?,
+                status: row.get(3)?,
+                summary: row.get(4)?,
+                cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
+                duration_ms: row.get(6)?,
+                created_at: row.get(7)?,
+                events: vec![],
+            })
+        })?
         .filter_map(|r| r.ok())
-        .filter(|v| !v.is_null())
         .collect();
 
-        thread.events = events;
-        result.push(thread);
-    }
+        let mut result = Vec::with_capacity(threads.len());
+        for mut thread in threads {
+            let mut evt_stmt = conn.prepare(
+                "SELECT data FROM events WHERE thread_id = ?1 ORDER BY id ASC"
+            )?;
 
-    Ok(result)
+            let events: Vec<serde_json::Value> = evt_stmt.query_map(
+                rusqlite::params![thread.id], |row| {
+                    let data: String = row.get(0)?;
+                    Ok(serde_json::from_str(&data).unwrap_or(serde_json::Value::Null))
+                }
+            )?
+            .filter_map(|r| r.ok())
+            .filter(|v| !v.is_null())
+            .collect();
+
+            thread.events = events;
+            result.push(thread);
+        }
+
+        Ok(result)
+    }).await.map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn list_all_threads(
     db: tauri::State<'_, DbState>,
     limit: Option<u32>,
-) -> Result<Vec<ThreadInfo>, String> {
+) -> Result<Vec<ThreadInfo>, PanesError> {
     let limit = limit.unwrap_or(100);
-    let conn = db.lock().map_err(|e| e.to_string())?;
+    db.execute(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
+             FROM threads ORDER BY created_at DESC LIMIT ?1"
+        )?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
-         FROM threads ORDER BY created_at DESC LIMIT ?1"
-    ).map_err(|e| e.to_string())?;
-
-    let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![limit], |row| {
-        Ok(ThreadInfo {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            prompt: row.get(2)?,
-            status: row.get(3)?,
-            summary: row.get(4)?,
-            cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
-            duration_ms: row.get(6)?,
-            created_at: row.get(7)?,
-            events: vec![],
-        })
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
-
-    let mut result = Vec::with_capacity(threads.len());
-    for mut thread in threads {
-        let mut evt_stmt = conn.prepare(
-            "SELECT data FROM events WHERE thread_id = ?1 ORDER BY id ASC"
-        ).map_err(|e| e.to_string())?;
-
-        let events: Vec<serde_json::Value> = evt_stmt.query_map(
-            rusqlite::params![thread.id], |row| {
-                let data: String = row.get(0)?;
-                Ok(serde_json::from_str(&data).unwrap_or(serde_json::Value::Null))
-            }
-        ).map_err(|e| e.to_string())?
+        let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![limit], |row| {
+            Ok(ThreadInfo {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                prompt: row.get(2)?,
+                status: row.get(3)?,
+                summary: row.get(4)?,
+                cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
+                duration_ms: row.get(6)?,
+                created_at: row.get(7)?,
+                events: vec![],
+            })
+        })?
         .filter_map(|r| r.ok())
-        .filter(|v| !v.is_null())
         .collect();
 
-        thread.events = events;
-        result.push(thread);
-    }
+        let mut result = Vec::with_capacity(threads.len());
+        for mut thread in threads {
+            let mut evt_stmt = conn.prepare(
+                "SELECT data FROM events WHERE thread_id = ?1 ORDER BY id ASC"
+            )?;
 
-    Ok(result)
+            let events: Vec<serde_json::Value> = evt_stmt.query_map(
+                rusqlite::params![thread.id], |row| {
+                    let data: String = row.get(0)?;
+                    Ok(serde_json::from_str(&data).unwrap_or(serde_json::Value::Null))
+                }
+            )?
+            .filter_map(|r| r.ok())
+            .filter(|v| !v.is_null())
+            .collect();
+
+            thread.events = events;
+            result.push(thread);
+        }
+
+        Ok(result)
+    }).await.map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn delete_thread(
     db: tauri::State<'_, DbState>,
     thread_id: String,
-) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM events WHERE thread_id = ?1",
-        rusqlite::params![thread_id],
-    ).map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM costs WHERE thread_id = ?1",
-        rusqlite::params![thread_id],
-    ).map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM threads WHERE id = ?1",
-        rusqlite::params![thread_id],
-    ).map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(())
+) -> Result<(), PanesError> {
+    db.execute(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM events WHERE thread_id = ?1",
+            rusqlite::params![thread_id],
+        )?;
+        tx.execute(
+            "DELETE FROM costs WHERE thread_id = ?1",
+            rusqlite::params![thread_id],
+        )?;
+        tx.execute(
+            "DELETE FROM threads WHERE id = ?1",
+            rusqlite::params![thread_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }).await.map_err(PanesError::from)
 }
 
 #[derive(Serialize)]
@@ -282,16 +288,16 @@ pub async fn start_thread(
     prompt: String,
     agent: Option<String>,
     model: Option<String>,
-) -> Result<StartThreadResult, String> {
+) -> Result<StartThreadResult, PanesError> {
     let expanded_path = expand_tilde(&workspace_path);
-    let budget_cap: Option<f64> = {
-        let conn = db.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
+    let ws_id = workspace_id.clone();
+    let budget_cap: Option<f64> = db.execute(move |conn| {
+        Ok(conn.query_row(
             "SELECT budget_cap FROM workspaces WHERE id = ?1",
-            rusqlite::params![workspace_id],
+            rusqlite::params![ws_id],
             |row| row.get(0),
-        ).unwrap_or(None)
-    };
+        ).unwrap_or(None))
+    }).await.map_err(PanesError::from)?;
     let workspace = Workspace {
         id: workspace_id.clone(),
         path: PathBuf::from(&expanded_path),
@@ -323,8 +329,7 @@ pub async fn start_thread(
 
     let mgr = session_manager.lock().await;
     let thread_id = mgr.start_thread(&workspace, &prompt, &agent_name, context, model.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     Ok(StartThreadResult {
         thread_id,
@@ -344,16 +349,16 @@ pub async fn resume_thread(
     prompt: String,
     agent: Option<String>,
     model: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     let expanded_path = expand_tilde(&workspace_path);
-    let budget_cap: Option<f64> = {
-        let conn = db.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
+    let ws_id = workspace_id.clone();
+    let budget_cap: Option<f64> = db.execute(move |conn| {
+        Ok(conn.query_row(
             "SELECT budget_cap FROM workspaces WHERE id = ?1",
-            rusqlite::params![workspace_id],
+            rusqlite::params![ws_id],
             |row| row.get(0),
-        ).unwrap_or(None)
-    };
+        ).unwrap_or(None))
+    }).await.map_err(PanesError::from)?;
     let workspace = Workspace {
         id: workspace_id,
         path: PathBuf::from(&expanded_path),
@@ -367,7 +372,6 @@ pub async fn resume_thread(
     let mgr = session_manager.lock().await;
     mgr.resume_thread(&thread_id, &workspace, &prompt, &agent_name, model.as_deref())
         .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -375,11 +379,10 @@ pub async fn approve_gate(
     session_manager: tauri::State<'_, SessionState>,
     thread_id: String,
     tool_use_id: String,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     let mgr = session_manager.lock().await;
     mgr.approve(&thread_id, &tool_use_id)
         .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -388,34 +391,32 @@ pub async fn reject_gate(
     thread_id: String,
     tool_use_id: String,
     reason: String,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     let mgr = session_manager.lock().await;
     mgr.reject(&thread_id, &tool_use_id, &reason)
         .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn cancel_thread(
     session_manager: tauri::State<'_, SessionState>,
     thread_id: String,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     let mgr = session_manager.lock().await;
     mgr.cancel(&thread_id)
         .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn commit_changes(
     workspace_path: String,
     message: String,
-) -> Result<String, String> {
+) -> Result<String, PanesError> {
     let expanded = expand_tilde(&workspace_path);
     let path = PathBuf::from(&expanded);
     git::commit(&path, &message)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 #[tauri::command]
@@ -423,32 +424,33 @@ pub async fn revert_changes(
     db: tauri::State<'_, DbState>,
     workspace_path: String,
     thread_id: String,
-) -> Result<(), String> {
-    let snapshot_hash: String = {
-        let conn = db.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
+) -> Result<(), PanesError> {
+    let tid = thread_id.clone();
+    let snapshot_hash: String = db.execute(move |conn| {
+        Ok(conn.query_row(
             "SELECT snapshot_ref FROM threads WHERE id = ?1",
-            rusqlite::params![thread_id],
+            rusqlite::params![tid],
             |row| row.get(0),
-        )
-        .map_err(|e| format!("no snapshot for thread: {e}"))?
-    };
+        )?)
+    }).await.map_err(|e| PanesError::GitError {
+        message: format!("no snapshot for thread: {e}"),
+    })?;
     let expanded = expand_tilde(&workspace_path);
     let path = PathBuf::from(&expanded);
     git::revert(&path, &git::SnapshotRef { commit_hash: snapshot_hash })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn get_changed_files(
     workspace_path: String,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, PanesError> {
     let expanded = expand_tilde(&workspace_path);
     let path = PathBuf::from(&expanded);
     git::get_changed_files(&path)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 // --- Memory extraction ---
@@ -459,11 +461,11 @@ pub async fn extract_memories(
     workspace_id: String,
     thread_id: String,
     transcript: String,
-) -> Result<Vec<MemoryInfo>, String> {
+) -> Result<Vec<MemoryInfo>, PanesError> {
     let memories = memory_manager
         .add(&transcript, Some(&workspace_id), &thread_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(PanesError::from)?;
 
     Ok(memories.into_iter().map(MemoryInfo::from).collect())
 }
@@ -500,11 +502,11 @@ impl From<panes_memory::types::Memory> for MemoryInfo {
 pub async fn get_memories(
     memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
-) -> Result<Vec<MemoryInfo>, String> {
+) -> Result<Vec<MemoryInfo>, PanesError> {
     let memories = memory_manager
         .get_all(Some(&workspace_id))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(PanesError::from)?;
 
     Ok(memories.into_iter().map(MemoryInfo::from).collect())
 }
@@ -515,11 +517,11 @@ pub async fn search_memories(
     workspace_id: String,
     query: String,
     limit: Option<usize>,
-) -> Result<Vec<MemoryInfo>, String> {
+) -> Result<Vec<MemoryInfo>, PanesError> {
     let memories = memory_manager
         .search(&query, Some(&workspace_id), limit.unwrap_or(10))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(PanesError::from)?;
 
     Ok(memories.into_iter().map(MemoryInfo::from).collect())
 }
@@ -529,22 +531,22 @@ pub async fn update_memory(
     memory_manager: tauri::State<'_, MemoryManagerState>,
     memory_id: String,
     content: String,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     memory_manager
         .update(&memory_id, &content)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn delete_memory(
     memory_manager: tauri::State<'_, MemoryManagerState>,
     memory_id: String,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     memory_manager
         .delete(&memory_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 #[tauri::command]
@@ -552,11 +554,11 @@ pub async fn pin_memory(
     memory_manager: tauri::State<'_, MemoryManagerState>,
     memory_id: String,
     pinned: bool,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     memory_manager
         .pin(&memory_id, pinned)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 // --- Briefing CRUD ---
@@ -572,11 +574,11 @@ pub struct BriefingInfo {
 pub async fn get_briefing(
     memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
-) -> Result<Option<BriefingInfo>, String> {
+) -> Result<Option<BriefingInfo>, PanesError> {
     let briefing = memory_manager
         .get_briefing(&workspace_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(PanesError::from)?;
 
     Ok(briefing.map(|b| BriefingInfo {
         workspace_id: b.workspace_id,
@@ -589,49 +591,49 @@ pub async fn set_briefing(
     memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
     content: String,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     memory_manager
         .set_briefing(&workspace_id, &content)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn delete_briefing(
     memory_manager: tauri::State<'_, MemoryManagerState>,
     workspace_id: String,
-) -> Result<(), String> {
+) -> Result<(), PanesError> {
     memory_manager
         .delete_briefing(&workspace_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn get_aggregate_cost(
     db: tauri::State<'_, DbState>,
-) -> Result<f64, String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    let total: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads",
-        [],
-        |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    Ok(total)
+) -> Result<f64, PanesError> {
+    db.execute(|conn| {
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads",
+            [],
+            |row| row.get(0),
+        )?)
+    }).await.map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn get_workspace_cost(
     db: tauri::State<'_, DbState>,
     workspace_id: String,
-) -> Result<f64, String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    let total: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads WHERE workspace_id = ?1",
-        rusqlite::params![workspace_id],
-        |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    Ok(total)
+) -> Result<f64, PanesError> {
+    db.execute(move |conn| {
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        )?)
+    }).await.map_err(PanesError::from)
 }
 
 #[derive(Serialize)]
@@ -644,7 +646,7 @@ pub struct MemoryBackendStatus {
 #[tauri::command]
 pub async fn get_memory_backend_status(
     memory: tauri::State<'_, MemoryManagerState>,
-) -> Result<MemoryBackendStatus, String> {
+) -> Result<MemoryBackendStatus, PanesError> {
     Ok(MemoryBackendStatus {
         backend: memory.get_active_backend().to_string(),
         mem0_configured: memory.is_mem0_configured(),
@@ -655,14 +657,14 @@ pub async fn get_memory_backend_status(
 pub async fn set_memory_backend(
     memory: tauri::State<'_, MemoryManagerState>,
     backend: String,
-) -> Result<(), String> {
-    memory.set_active_backend(&backend)
+) -> Result<(), PanesError> {
+    memory.set_active_backend(&backend).map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn list_adapters(
     session_manager: tauri::State<'_, SessionState>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, PanesError> {
     let mgr = session_manager.lock().await;
     Ok(mgr.list_adapters())
 }
@@ -679,29 +681,28 @@ pub struct AgentInfo {
 pub async fn list_models(
     session_manager: tauri::State<'_, SessionState>,
     adapter: String,
-) -> Result<Vec<panes_adapters::ModelInfo>, String> {
+) -> Result<Vec<panes_adapters::ModelInfo>, PanesError> {
     let mgr = session_manager.lock().await;
     mgr.list_models(&adapter)
         .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn list_agents(adapter: String) -> Result<Vec<AgentInfo>, String> {
+pub fn list_agents(adapter: String) -> Result<Vec<AgentInfo>, PanesError> {
     match adapter.as_str() {
         "claude-code" => list_agents_claude(),
         _ => Ok(vec![]),
     }
 }
 
-fn list_agents_claude() -> Result<Vec<AgentInfo>, String> {
+fn list_agents_claude() -> Result<Vec<AgentInfo>, PanesError> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let agents_dir = PathBuf::from(&home).join(".claude").join("agents");
     if !agents_dir.is_dir() {
         return Ok(vec![]);
     }
     let mut agents = Vec::new();
-    let entries = std::fs::read_dir(&agents_dir).map_err(|e| e.to_string())?;
+    let entries = std::fs::read_dir(&agents_dir).map_err(|e| PanesError::Internal { message: e.to_string() })?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -764,13 +765,14 @@ pub async fn set_workspace_default_agent(
     db: tauri::State<'_, DbState>,
     workspace_id: String,
     agent: String,
-) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE workspaces SET default_agent = ?1 WHERE id = ?2",
-        rusqlite::params![agent, workspace_id],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+) -> Result<(), PanesError> {
+    db.execute(move |conn| {
+        conn.execute(
+            "UPDATE workspaces SET default_agent = ?1 WHERE id = ?2",
+            rusqlite::params![agent, workspace_id],
+        )?;
+        Ok(())
+    }).await.map_err(PanesError::from)
 }
 
 #[tauri::command]
@@ -778,13 +780,14 @@ pub async fn set_workspace_budget_cap(
     db: tauri::State<'_, DbState>,
     workspace_id: String,
     budget_cap: Option<f64>,
-) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
-        rusqlite::params![budget_cap, workspace_id],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+) -> Result<(), PanesError> {
+    db.execute(move |conn| {
+        conn.execute(
+            "UPDATE workspaces SET budget_cap = ?1 WHERE id = ?2",
+            rusqlite::params![budget_cap, workspace_id],
+        )?;
+        Ok(())
+    }).await.map_err(PanesError::from)
 }
 
 #[cfg(test)]

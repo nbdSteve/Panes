@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import TranscriptView from "./TranscriptView";
-import type { AgentEvent } from "../App";
+import type { AgentEvent } from "../types";
 
 describe("TranscriptView", () => {
   it("renders prompt as You message", () => {
@@ -41,7 +41,7 @@ describe("TranscriptView", () => {
 
   it("renders tool_request event", () => {
     const events: AgentEvent[] = [
-      { event_type: "tool_request", tool_name: "Bash", description: "ls -la", id: "t1" },
+      { event_type: "tool_request", tool_name: "Bash", description: "ls -la", id: "t1", risk_level: "low", needs_approval: false },
     ];
     render(<TranscriptView events={events} prompt="test" />);
 
@@ -113,7 +113,7 @@ describe("TranscriptView", () => {
 
   it("renders complete event with cost and turns", () => {
     const events: AgentEvent[] = [
-      { event_type: "complete", summary: "All done", total_cost_usd: 0.035, turns: 3 },
+      { event_type: "complete", summary: "All done", total_cost_usd: 0.035, duration_ms: 1200, turns: 3 },
     ];
     render(<TranscriptView events={events} prompt="test" />);
 

@@ -1,11 +1,11 @@
-import type { AgentEvent } from "../App";
+import type { AgentEvent, ToolRequestEvent, ToolResultEvent, SubAgentSpawnedEvent, SubAgentCompleteEvent } from "../types";
 
 export interface ToolGroup {
   type: "tool_group";
-  request: AgentEvent;
-  result: AgentEvent | null;
-  subAgentSpawned: AgentEvent | null;
-  subAgentComplete: AgentEvent | null;
+  request: ToolRequestEvent;
+  result: ToolResultEvent | null;
+  subAgentSpawned: SubAgentSpawnedEvent | null;
+  subAgentComplete: SubAgentCompleteEvent | null;
 }
 
 export type RenderItem =
@@ -13,9 +13,9 @@ export type RenderItem =
   | ToolGroup;
 
 export function groupToolEvents(events: AgentEvent[]): RenderItem[] {
-  const resultById = new Map<string, AgentEvent>();
-  const spawnedByParent = new Map<string, AgentEvent>();
-  const completeByParent = new Map<string, AgentEvent>();
+  const resultById = new Map<string, ToolResultEvent>();
+  const spawnedByParent = new Map<string, SubAgentSpawnedEvent>();
+  const completeByParent = new Map<string, SubAgentCompleteEvent>();
   for (const e of events) {
     if (e.event_type === "tool_result" && e.id) {
       resultById.set(e.id, e);

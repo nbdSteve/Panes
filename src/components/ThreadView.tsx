@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "../lib/api";
 import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs, ModelInfo } from "../App";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
@@ -10,6 +10,7 @@ import { threadDisplayCost } from "../lib/cost";
 import { calculateContextUsage } from "../lib/contextUsage";
 import { normalizeModelId } from "../lib/utils";
 import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
+import { collectTestResults, parseGitStatus, collectFilesChanged, FILE_WRITE_TOOLS } from "../lib/threadHelpers";
 import TranscriptView from "./TranscriptView";
 
 interface ThreadViewProps {
@@ -58,7 +59,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
     const threadId = thread?.id;
     if (hasComplete && threadId && gitFilesFetched.current !== threadId) {
       gitFilesFetched.current = threadId;
-      invoke<string[]>("get_changed_files", { workspacePath: workspace.path })
+      api.getChangedFiles(workspace.path)
         .then(setGitFiles)
         .catch(() => setGitFiles(null));
     }
@@ -213,7 +214,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               onRevert: () => setRevertConfirm(thread.id),
               onKeep: () => onCompletionAction(thread.id, "kept"),
               onSteer: (tid, toolUseId, text) => {
-                invoke("reject_gate", { threadId: tid, toolUseId, reason: `Steer: ${text}` }).catch(console.error);
+                api.rejectGate(tid, toolUseId, `Steer: ${text}`).catch(console.error);
                 onQueueFollowUp(tid, text);
               },
             })}
@@ -254,10 +255,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               className="btn btn-success btn-sm"
               onClick={async () => {
                 try {
-                  await invoke("commit_changes", {
-                    workspacePath: workspace.path,
-                    message: commitMessage,
-                  });
+                  await api.commitChanges(workspace.path, commitMessage);
                   onCompletionAction(commitDialog.threadId, "committed");
                 } catch (e) {
                   console.error("Commit failed:", e);
@@ -283,7 +281,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               className="btn btn-danger btn-sm"
               onClick={async () => {
                 try {
-                  await invoke("revert_changes", { workspacePath: workspace.path, threadId: revertConfirm });
+                  await api.revertChanges(workspace.path, revertConfirm);
                   onCompletionAction(revertConfirm, "reverted");
                 } catch (e) {
                   console.error("Revert failed:", e);
@@ -613,68 +611,6 @@ function ToolGroupCard({ group }: { group: ToolGroup }) {
   );
 }
 
-const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
-
-const TEST_CMD_PATTERN = /\b(test|spec|jest|vitest|pytest|cargo\s+test|npm\s+test|yarn\s+test|npx\s+vitest|npx\s+jest)\b/i;
-
-export function collectTestResults(events: AgentEvent[]): string | undefined {
-  const results: string[] = [];
-  const requestById = new Map<string, AgentEvent>();
-
-  for (const e of events) {
-    if (e.event_type === "tool_request" && e.id) {
-      requestById.set(e.id, e);
-    }
-  }
-
-  for (const e of events) {
-    if (e.event_type !== "tool_result" || !e.id || !e.output) continue;
-    const req = requestById.get(e.id);
-    if (!req) continue;
-    const desc = req.description || "";
-    if (TEST_CMD_PATTERN.test(desc)) {
-      results.push(e.output);
-    }
-  }
-
-  return results.length > 0 ? results.join("\n---\n") : undefined;
-}
-
-export function parseGitStatus(lines: string[]): { path: string; action: "created" | "modified" | "deleted" | "untracked" }[] {
-  return lines.map((line) => {
-    const status = line.substring(0, 2);
-    const path = line.substring(3).trim();
-    if (status === "??") return { path, action: "untracked" as const };
-    if (status.includes("D")) return { path, action: "deleted" as const };
-    if (status.includes("A")) return { path, action: "created" as const };
-    return { path, action: "modified" as const };
-  });
-}
-
-function collectFilesChanged(events: AgentEvent[]): { path: string; action: "created" | "modified" }[] {
-  const files: { path: string; action: "created" | "modified" }[] = [];
-  const seen = new Set<string>();
-
-  for (const e of events) {
-    if (e.event_type !== "tool_request") continue;
-    const toolName = e.tool_name ?? "";
-    if (!["Write", "Edit", "NotebookEdit"].includes(toolName)) continue;
-
-    const desc = e.description ?? "";
-    // Extract path from descriptions like "Edit file: src/main.rs" or "Create file: src/main.rs"
-    const match = desc.match(/(?:Edit|Write|Create|Modify)\s+(?:file:\s*|to\s+)?(.+)/i);
-    const path = match ? match[1].trim() : desc;
-
-    if (path && !seen.has(path)) {
-      seen.add(path);
-      files.push({
-        path,
-        action: toolName === "Write" ? "created" : "modified",
-      });
-    }
-  }
-  return files;
-}
 
 interface RenderCallbacks {
   onCommit: (summary: string) => void;
@@ -698,9 +634,10 @@ function renderEvents(
   // Build a skip-text set: text events where the next non-cost event is complete with same content
   const skipTextIndices = new Set<number>();
   for (let i = 0; i < events.length; i++) {
-    if (events[i].event_type === "text") {
+    const ev = events[i];
+    if (ev.event_type === "text") {
       const next = events[i + 1];
-      if (next?.event_type === "complete" && next.summary === events[i].text) {
+      if (next?.event_type === "complete" && next.summary === ev.text) {
         skipTextIndices.add(i);
       }
     }
@@ -807,10 +744,10 @@ function renderEvents(
               runningCost={runningCost}
               resolved={resolved}
               onApprove={() => {
-                invoke("approve_gate", { threadId, toolUseId: gateId }).catch(console.error);
+                api.approveGate(threadId, gateId).catch(console.error);
               }}
               onReject={() => {
-                invoke("reject_gate", { threadId, toolUseId: gateId, reason: "User rejected" }).catch(console.error);
+                api.rejectGate(threadId, gateId, "User rejected").catch(console.error);
               }}
               onSteer={(text) => callbacks.onSteer(threadId, gateId, text)}
             />

@@ -1,4 +1,4 @@
-import type { AgentEvent } from "../App";
+import type { AgentEvent } from "../types";
 
 const MODEL_CONTEXT_LIMITS: Record<string, number> = {
   "claude-opus-4-6": 200_000,
