@@ -28,7 +28,14 @@ pub struct MemoryConfig {
 
 impl MemoryConfig {
     pub fn from_env(data_dir: &Path) -> Self {
-        let mem0_python = std::env::var("PANES_MEM0_PYTHON").ok();
+        let mem0_python = std::env::var("PANES_MEM0_PYTHON").ok().or_else(|| {
+            let bundled = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/.venv/bin/python3"));
+            if bundled.exists() {
+                Some(bundled.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
         let mem0_server_script = std::env::var("PANES_MEM0_SERVER_SCRIPT")
             .unwrap_or_else(|_| {
                 concat!(env!("CARGO_MANIFEST_DIR"), "/mem0_server.py").to_string()
