@@ -197,6 +197,7 @@ test.describe("Memory CRUD Operations", () => {
     expect(initialCount).toBeGreaterThanOrEqual(1);
 
     await page.locator("[title='Delete']").first().click();
+    await page.locator("button:has-text('Confirm?')").first().click();
 
     await expect(page.locator(".memory-card")).toHaveCount(initialCount - 1);
   });

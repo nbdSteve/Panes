@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import type { ThreadInfo } from "../App";
 
 interface ThreadListProps {
@@ -15,6 +16,23 @@ export default function ThreadList({
   onNewThread,
   onDeleteThread,
 }: ThreadListProps) {
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!confirmDeleteId) return;
+    const timer = setTimeout(() => setConfirmDeleteId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmDeleteId]);
+
+  const handleDelete = (id: string) => {
+    if (confirmDeleteId === id) {
+      setConfirmDeleteId(null);
+      onDeleteThread(id);
+    } else {
+      setConfirmDeleteId(id);
+    }
+  };
+
   const sorted = [...threads].sort((a, b) => b.createdAt - a.createdAt);
 
   const statusDot = (status: ThreadInfo["status"]) => {
@@ -75,15 +93,24 @@ export default function ThreadList({
                 {timeAgo(thread.createdAt)}
               </span>
             </div>
-            <button
-              className="btn-icon btn-delete-inline"
-              onClick={(e) => { e.stopPropagation(); onDeleteThread(thread.id); }}
-              title="Delete thread"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-              </svg>
-            </button>
+            {confirmDeleteId === thread.id ? (
+              <button
+                className="btn btn-sm btn-danger"
+                onClick={(e) => { e.stopPropagation(); handleDelete(thread.id); }}
+              >
+                Confirm?
+              </button>
+            ) : (
+              <button
+                className="btn-icon btn-delete-inline"
+                onClick={(e) => { e.stopPropagation(); handleDelete(thread.id); }}
+                title="Delete thread"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                </svg>
+              </button>
+            )}
           </div>
         ))}
       </div>

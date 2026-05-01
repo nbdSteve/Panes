@@ -23,29 +23,43 @@ interface MemoryPanelProps {
 export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
   const [memories, setMemories] = useState<MemoryInfo[]>([]);
   const [briefing, setBriefing] = useState<BriefingInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [editingBriefing, setEditingBriefing] = useState(false);
   const [briefingDraft, setBriefingDraft] = useState("");
   const [editingMemory, setEditingMemory] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const loadMemories = useCallback(async () => {
     try {
       const mems = await invoke<MemoryInfo[]>("get_memories", { workspaceId });
       setMemories(mems);
-    } catch {}
+    } catch {
+      setError("Failed to load memories");
+    }
   }, [workspaceId]);
 
   const loadBriefing = useCallback(async () => {
     try {
       const b = await invoke<BriefingInfo | null>("get_briefing", { workspaceId });
       setBriefing(b);
-    } catch {}
+    } catch {
+      setError("Failed to load briefing");
+    }
   }, [workspaceId]);
 
   useEffect(() => {
-    loadMemories();
-    loadBriefing();
+    setLoading(true);
+    setError(null);
+    Promise.all([loadMemories(), loadBriefing()]).finally(() => setLoading(false));
   }, [loadMemories, loadBriefing]);
+
+  useEffect(() => {
+    if (!confirmDeleteId) return;
+    const timer = setTimeout(() => setConfirmDeleteId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmDeleteId]);
 
   const handleSaveBriefing = async () => {
     const trimmed = briefingDraft.trim();
@@ -63,9 +77,13 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
     loadMemories();
   };
 
-  const handleDelete = async (id: string) => {
-    await invoke("delete_memory", { memoryId: id });
-    loadMemories();
+  const handleDelete = (id: string) => {
+    if (confirmDeleteId === id) {
+      setConfirmDeleteId(null);
+      invoke("delete_memory", { memoryId: id }).then(() => loadMemories());
+    } else {
+      setConfirmDeleteId(id);
+    }
   };
 
   const handleSaveMemory = async (id: string) => {
@@ -76,6 +94,10 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
 
   const pinned = memories.filter((m) => m.pinned);
   const unpinned = memories.filter((m) => !m.pinned);
+
+  if (loading) return <div className="panel-loading"><span className="spinner" /></div>;
+
+  if (error) return <div className="inline-error"><span className="inline-error-icon">!</span>{error}</div>;
 
   return (
     <div className="memory-panel">
@@ -144,6 +166,7 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
                 key={m.id}
                 memory={m}
                 editing={editingMemory === m.id}
+                confirming={confirmDeleteId === m.id}
                 draft={memoryDraft}
                 onEdit={() => {
                   setEditingMemory(m.id);
@@ -169,6 +192,7 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
                 key={m.id}
                 memory={m}
                 editing={editingMemory === m.id}
+                confirming={confirmDeleteId === m.id}
                 draft={memoryDraft}
                 onEdit={() => {
                   setEditingMemory(m.id);
@@ -191,6 +215,7 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
 function MemoryCard({
   memory,
   editing,
+  confirming,
   draft,
   onEdit,
   onSave,
@@ -201,6 +226,7 @@ function MemoryCard({
 }: {
   memory: MemoryInfo;
   editing: boolean;
+  confirming: boolean;
   draft: string;
   onEdit: () => void;
   onSave: () => void;
@@ -254,12 +280,16 @@ function MemoryCard({
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                 </svg>
               </button>
-              <button className="btn-icon btn-danger" onClick={onDelete} title="Delete">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                </svg>
-              </button>
+              {confirming ? (
+                <button className="btn btn-sm btn-danger" onClick={onDelete}>Confirm?</button>
+              ) : (
+                <button className="btn-icon btn-danger" onClick={onDelete} title="Delete">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </button>
+              )}
             </div>
           </div>
         </>

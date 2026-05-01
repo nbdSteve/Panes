@@ -15,6 +15,8 @@ interface SettingsPanelProps {
 export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
   const [backendStatus, setBackendStatus] = useState<MemoryBackendStatus | null>(null);
   const [totalCost, setTotalCost] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
 
   const loadStatus = useCallback(async () => {
@@ -22,13 +24,15 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
       const status = await invoke<MemoryBackendStatus>("get_memory_backend_status");
       setBackendStatus(status);
     } catch {
-      setBackendStatus(null);
+      setError("Failed to load settings");
     }
   }, []);
 
   useEffect(() => {
-    loadStatus();
-    invoke<number>("get_aggregate_cost").then(setTotalCost).catch(() => {});
+    Promise.all([
+      loadStatus(),
+      invoke<number>("get_aggregate_cost").then(setTotalCost).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, [loadStatus]);
 
   const handleToggleBackend = async (backend: string) => {
@@ -39,6 +43,10 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
     } catch {}
     setSwitching(false);
   };
+
+  if (loading) return <div className="panel-loading"><span className="spinner" /></div>;
+
+  if (error) return <div className="inline-error"><span className="inline-error-icon">!</span>{error}</div>;
 
   return (
     <div className="settings-panel">

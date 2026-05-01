@@ -12,8 +12,9 @@ test.describe("Workspace Management", () => {
     const wsItem = page.locator(".sidebar-item", { hasText: "RemoveMe" });
     await expect(wsItem).toBeVisible();
 
-    // Click the delete button on the workspace
+    // First click shows confirm, second click removes
     await wsItem.locator(".btn-delete-inline").click();
+    await wsItem.locator("button:has-text('Confirm?')").click();
 
     // Workspace should be gone
     await expect(wsItem).not.toBeVisible();

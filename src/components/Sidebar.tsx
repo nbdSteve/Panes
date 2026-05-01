@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import type { WorkspaceInfo, ThreadInfo } from "../App";
 import { formatCost } from "../lib/utils";
 import { workspaceDisplayCost } from "../lib/cost";
@@ -32,6 +32,22 @@ export default function Sidebar({
   const [showAdd, setShowAdd] = useState(false);
   const [addPath, setAddPath] = useState("");
   const [addName, setAddName] = useState("");
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!confirmRemoveId) return;
+    const timer = setTimeout(() => setConfirmRemoveId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmRemoveId]);
+
+  const handleRemove = (id: string) => {
+    if (confirmRemoveId === id) {
+      setConfirmRemoveId(null);
+      onRemoveWorkspace(id);
+    } else {
+      setConfirmRemoveId(id);
+    }
+  };
   const workspaceCosts = useMemo(() => {
     const costs: Record<string, number> = {};
     for (const ws of workspaces) {
@@ -118,15 +134,24 @@ export default function Sidebar({
                 {wsThreads.length > 0 && (
                   <span className="thread-count">{wsThreads.length}</span>
                 )}
-                <button
-                  className="btn-icon btn-delete-inline"
-                  onClick={(e) => { e.stopPropagation(); onRemoveWorkspace(ws.id); }}
-                  title="Remove workspace"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                  </svg>
-                </button>
+                {confirmRemoveId === ws.id ? (
+                  <button
+                    className="btn btn-sm btn-danger"
+                    onClick={(e) => { e.stopPropagation(); handleRemove(ws.id); }}
+                  >
+                    Confirm?
+                  </button>
+                ) : (
+                  <button
+                    className="btn-icon btn-delete-inline"
+                    onClick={(e) => { e.stopPropagation(); handleRemove(ws.id); }}
+                    title="Remove workspace"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                    </svg>
+                  </button>
+                )}
               </div>
             );
           })}

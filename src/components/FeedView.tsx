@@ -28,6 +28,7 @@ export default function FeedView({
   const [threads, setThreads] = useState<BackendThread[]>([]);
   const [totalCost, setTotalCost] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -39,7 +40,10 @@ export default function FeedView({
         setTotalCost(cost);
         setLoaded(true);
       })
-      .catch(() => setLoaded(true));
+      .catch(() => {
+        setError("Failed to load activity feed");
+        setLoaded(true);
+      });
   }, []);
 
   const outcomeClass = (status: string) => {
@@ -53,7 +57,9 @@ export default function FeedView({
   const workspaceName = (wsId: string) =>
     workspaces.find((w) => w.id === wsId)?.name ?? "Unknown";
 
-  if (!loaded) return null;
+  if (!loaded) return <div className="panel-loading"><span className="spinner" /></div>;
+
+  if (error) return <div className="inline-error"><span className="inline-error-icon">!</span>{error}</div>;
 
   if (threads.length === 0) {
     return (

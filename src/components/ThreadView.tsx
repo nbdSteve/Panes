@@ -127,7 +127,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
     setPrompt(e.target.value);
     const el = e.target;
     el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    el.style.height = Math.min(el.scrollHeight, 200) + "px";
   };
 
   const runningCost = thread ? threadDisplayCost(thread) : 0;

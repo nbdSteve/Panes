@@ -97,7 +97,7 @@ describe("TranscriptView", () => {
 
     expect(screen.getByText("Sub-agent complete")).toBeInTheDocument();
     expect(screen.getByText(/found the answer/)).toBeInTheDocument();
-    expect(screen.getByText(/\$0\.0120/)).toBeInTheDocument();
+    expect(screen.getByText(/\$0\.01/)).toBeInTheDocument();
   });
 
   it("renders error event", () => {
@@ -119,7 +119,7 @@ describe("TranscriptView", () => {
 
     expect(screen.getByText("Session complete")).toBeInTheDocument();
     expect(screen.getByText(/All done/)).toBeInTheDocument();
-    expect(screen.getByText(/\$0\.0350/)).toBeInTheDocument();
+    expect(screen.getByText(/\$0\.04/)).toBeInTheDocument();
     expect(screen.getByText(/3 turns/)).toBeInTheDocument();
   });
 });

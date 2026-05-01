@@ -112,6 +112,7 @@ describe("MemoryPanel", () => {
     });
 
     await user.click(screen.getByTitle("Delete"));
+    await user.click(screen.getByText("Confirm?"));
 
     await waitFor(() => {
       expect(screen.getByText("No memories yet. Complete a thread to start building context.")).toBeInTheDocument();

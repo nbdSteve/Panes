@@ -20,7 +20,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
         switch (event.event_type) {
           case "thinking":
             return (
-              <div key={i} className="transcript-message transcript-assistant transcript-thinking">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-assistant transcript-thinking">
                 <span className="transcript-role">Thinking</span>
                 <div className="transcript-body">{event.text}</div>
               </div>
@@ -28,7 +28,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "text":
             return (
-              <div key={i} className="transcript-message transcript-assistant">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-assistant">
                 <span className="transcript-role">Assistant</span>
                 <div className="transcript-body markdown-body">
                   <Markdown remarkPlugins={[remarkGfm]}>{event.text || ""}</Markdown>
@@ -38,7 +38,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "tool_request":
             return (
-              <div key={i} className="transcript-message transcript-system">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-system">
                 <span className="transcript-role">Tool call: {event.tool_name}</span>
                 <div className="transcript-body">
                   <code>{event.description}</code>
@@ -48,7 +48,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "tool_result":
             return (
-              <div key={i} className="transcript-message transcript-system">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-system">
                 <span className="transcript-role">{event.success ? "Tool result" : "Tool error"}</span>
                 {event.output && (
                   <pre className="transcript-code">{event.output}</pre>
@@ -58,7 +58,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "follow_up":
             return (
-              <div key={i} className="transcript-message transcript-user">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-user">
                 <span className="transcript-role">You</span>
                 <div className="transcript-body">{event.text}</div>
               </div>
@@ -66,7 +66,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "sub_agent_spawned":
             return (
-              <div key={i} className="transcript-message transcript-system">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-system">
                 <span className="transcript-role">Sub-agent spawned</span>
                 <div className="transcript-body">{event.description}</div>
               </div>
@@ -74,7 +74,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "sub_agent_complete":
             return (
-              <div key={i} className="transcript-message transcript-system">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-system">
                 <span className="transcript-role">Sub-agent complete</span>
                 <div className="transcript-body">
                   {event.summary}
@@ -87,7 +87,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "error":
             return (
-              <div key={i} className="transcript-message transcript-error">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-error">
                 <span className="transcript-role">Error</span>
                 <div className="transcript-body">{event.message}</div>
               </div>
@@ -95,7 +95,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
 
           case "complete":
             return (
-              <div key={i} className="transcript-message transcript-system">
+              <div key={`${event.event_type}-${i}`} className="transcript-message transcript-system">
                 <span className="transcript-role">Session complete</span>
                 <div className="transcript-body">
                   {event.summary}
