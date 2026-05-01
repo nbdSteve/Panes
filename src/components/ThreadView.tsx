@@ -589,8 +589,25 @@ function ToolGroupCard({ group }: { group: ToolGroup }) {
           {result && !result.success && !result.output && (
             <span className="tool-group-failed">Failed</span>
           )}
-          {inProgress && (
+          {inProgress && !group.subAgentSpawned && (
             <span className="tool-group-pending">Running...</span>
+          )}
+          {group.subAgentSpawned && (
+            <div className="sub-agent-nested">
+              <div className="sub-agent-nested-header">
+                Sub-agent: {group.subAgentSpawned.description}
+              </div>
+              {group.subAgentComplete ? (
+                <div className="sub-agent-nested-result">
+                  <span>{group.subAgentComplete.summary}</span>
+                  {group.subAgentComplete.cost_usd != null && (
+                    <span className="sub-agent-cost">${group.subAgentComplete.cost_usd.toFixed(4)}</span>
+                  )}
+                </div>
+              ) : (
+                <span className="tool-group-pending">Sub-agent running...</span>
+              )}
+            </div>
           )}
         </div>
       )}
