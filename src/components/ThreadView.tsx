@@ -7,7 +7,10 @@ import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
 import CostBadge from "./CostBadge";
 import { calculateRunningCost } from "../lib/cost";
+import { calculateContextUsage } from "../lib/contextUsage";
 import { normalizeModelId } from "../lib/utils";
+import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
+import TranscriptView from "./TranscriptView";
 
 const MODELS = [
   { id: "sonnet", label: "Sonnet", desc: "Fast & capable" },
@@ -45,12 +48,30 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
   const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string } | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [gitFiles, setGitFiles] = useState<string[] | null>(null);
+  const gitFilesFetched = useRef<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const isRunning = thread?.status === "starting" || thread?.status === "running";
   const isActive = isRunning || thread?.status === "gate";
   const events = thread?.events ?? [];
+
+  useEffect(() => {
+    const hasComplete = events.some((e) => e.event_type === "complete");
+    const threadId = thread?.id;
+    if (hasComplete && threadId && gitFilesFetched.current !== threadId) {
+      gitFilesFetched.current = threadId;
+      invoke<string[]>("get_changed_files", { workspacePath: workspace.path })
+        .then(setGitFiles)
+        .catch(() => setGitFiles(null));
+    }
+    if (!hasComplete) {
+      setGitFiles(null);
+      gitFilesFetched.current = null;
+    }
+  }, [events, thread?.id, workspace.path]);
 
   useEffect(() => {
     onConfigChange({ adapter: selectedAdapter, agent: selectedAgent, model: selectedModel });
@@ -110,6 +131,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
   };
 
   const runningCost = calculateRunningCost(events);
+  const contextUsage = calculateContextUsage(events);
 
   const visibleEvents = events.filter(
     (e) => e.event_type !== "cost_update"
@@ -127,7 +149,25 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
             </span>
           )}
         </div>
-        {runningCost > 0 && <CostBadge cost={runningCost} label="Cost" budgetCap={workspace.budgetCap ?? undefined} />}
+        <div className="thread-header-right">
+          {thread && events.length > 0 && (
+            <button
+              className={`btn-icon transcript-toggle ${showTranscript ? "active" : ""}`}
+              onClick={() => setShowTranscript(!showTranscript)}
+              title={showTranscript ? "Timeline view" : "Transcript view"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="17" y1="10" x2="3" y2="10" /><line x1="21" y1="6" x2="3" y2="6" /><line x1="21" y1="14" x2="3" y2="14" /><line x1="17" y1="18" x2="3" y2="18" />
+              </svg>
+            </button>
+          )}
+          {contextUsage && (
+            <span className={`context-usage context-usage-${contextUsage.level}`} title={`${contextUsage.inputTokens.toLocaleString()} tokens`}>
+              {Math.round(contextUsage.percentage)}%
+            </span>
+          )}
+          {runningCost > 0 && <CostBadge cost={runningCost} label="Cost" budgetCap={workspace.budgetCap ?? undefined} />}
+        </div>
       </div>
 
       <div className="thread-content" ref={contentRef}>
@@ -143,12 +183,23 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
           </div>
         )}
 
-        {thread && (
+        {thread && showTranscript && (
+          <TranscriptView events={visibleEvents} prompt={thread.prompt} />
+        )}
+
+        {thread && !showTranscript && (
           <>
             <div className="thread-prompt-display">
               <span className="thread-prompt-label">You</span>
               <span className="thread-prompt-text">{thread.prompt}</span>
             </div>
+
+            {(thread.memoryCount != null && thread.memoryCount > 0 || thread.hasBriefing) && (
+              <div className="context-indicator">
+                Using {thread.memoryCount || 0} {thread.memoryCount === 1 ? "memory" : "memories"}
+                {thread.hasBriefing && " · 1 briefing"}
+              </div>
+            )}
 
             {isRunning && visibleEvents.length === 0 && (
               <div className="step-card">
@@ -159,13 +210,17 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
               </div>
             )}
 
-            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionAction, {
+            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionAction, gitFiles, {
               onCommit: (summary: string) => {
                 setCommitDialog({ threadId: thread.id, summary });
                 setCommitMessage(summary);
               },
               onRevert: () => setRevertConfirm(thread.id),
               onKeep: () => onCompletionAction(thread.id, "kept"),
+              onSteer: (tid, toolUseId, text) => {
+                invoke("reject_gate", { threadId: tid, toolUseId, reason: `Steer: ${text}` }).catch(console.error);
+                onQueueFollowUp(tid, text);
+              },
             })}
 
             {isRunning && visibleEvents.length > 0 && (
@@ -481,7 +536,105 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
   );
 }
 
+function ToolGroupCard({ group }: { group: ToolGroup }) {
+  const [expanded, setExpanded] = useState(false);
+  const { request, result } = group;
+  const inProgress = result === null;
+  const duration = result?.duration_ms;
+
+  return (
+    <div className={`tool-group ${expanded ? "expanded" : ""}`}>
+      <button className="tool-group-header" onClick={() => setExpanded(!expanded)}>
+        <span className="step-icon icon-tool">
+          {inProgress ? (
+            <span className="spinner" />
+          ) : result?.success ? (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          )}
+        </span>
+        <span className="tool-group-label">
+          <span className="tool-name">{request.tool_name}</span>
+          <span className="tool-group-desc">{request.description}</span>
+        </span>
+        {duration != null && duration > 0 && (
+          <span className="step-elapsed">
+            {duration < 1000 ? `${duration}ms` : `${(duration / 1000).toFixed(1)}s`}
+          </span>
+        )}
+        <span className={`tool-group-chevron ${expanded ? "open" : ""}`}>
+          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+            <polyline points="9 6 15 12 9 18" />
+          </svg>
+        </span>
+      </button>
+      {expanded && (
+        <div className="tool-group-body">
+          {(() => {
+            const raw = request.input?.command as string | undefined;
+            return raw ? (
+              <pre className="tool-group-command">{raw}</pre>
+            ) : request.description ? (
+              <pre className="tool-group-command">{request.description}</pre>
+            ) : null;
+          })()}
+          {result?.output && (
+            <pre className="tool-group-output">{result.output}</pre>
+          )}
+          {result && !result.success && !result.output && (
+            <span className="tool-group-failed">Failed</span>
+          )}
+          {inProgress && (
+            <span className="tool-group-pending">Running...</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
+
+const TEST_CMD_PATTERN = /\b(test|spec|jest|vitest|pytest|cargo\s+test|npm\s+test|yarn\s+test|npx\s+vitest|npx\s+jest)\b/i;
+
+export function collectTestResults(events: AgentEvent[]): string | undefined {
+  const results: string[] = [];
+  const requestById = new Map<string, AgentEvent>();
+
+  for (const e of events) {
+    if (e.event_type === "tool_request" && e.id) {
+      requestById.set(e.id, e);
+    }
+  }
+
+  for (const e of events) {
+    if (e.event_type !== "tool_result" || !e.id || !e.output) continue;
+    const req = requestById.get(e.id);
+    if (!req) continue;
+    const desc = req.description || "";
+    if (TEST_CMD_PATTERN.test(desc)) {
+      results.push(e.output);
+    }
+  }
+
+  return results.length > 0 ? results.join("\n---\n") : undefined;
+}
+
+export function parseGitStatus(lines: string[]): { path: string; action: "created" | "modified" | "deleted" | "untracked" }[] {
+  return lines.map((line) => {
+    const status = line.substring(0, 2);
+    const path = line.substring(3).trim();
+    if (status === "??") return { path, action: "untracked" as const };
+    if (status.includes("D")) return { path, action: "deleted" as const };
+    if (status.includes("A")) return { path, action: "created" as const };
+    return { path, action: "modified" as const };
+  });
+}
 
 function collectFilesChanged(events: AgentEvent[]): { path: string; action: "created" | "modified" }[] {
   const files: { path: string; action: "created" | "modified" }[] = [];
@@ -508,10 +661,11 @@ function collectFilesChanged(events: AgentEvent[]): { path: string; action: "cre
   return files;
 }
 
-interface CompletionCallbacks {
+interface RenderCallbacks {
   onCommit: (summary: string) => void;
   onRevert: () => void;
   onKeep: () => void;
+  onSteer: (threadId: string, toolUseId: string, text: string) => void;
 }
 
 function renderEvents(
@@ -519,12 +673,44 @@ function renderEvents(
   runningCost: number,
   threadId: string,
   completionAction: "committed" | "reverted" | "kept" | undefined,
-  callbacks: CompletionCallbacks,
+  gitFiles: string[] | null,
+  callbacks: RenderCallbacks,
 ) {
   let segmentHasWrites = false;
   let segmentEvents: AgentEvent[] = [];
+  const items = groupToolEvents(events);
 
-  return events.map((event, i) => {
+  // Build a skip-text set: text events where the next non-cost event is complete with same content
+  const skipTextIndices = new Set<number>();
+  for (let i = 0; i < events.length; i++) {
+    if (events[i].event_type === "text") {
+      const next = events[i + 1];
+      if (next?.event_type === "complete" && next.summary === events[i].text) {
+        skipTextIndices.add(i);
+      }
+    }
+  }
+
+  // Track original event index for skip-text lookup
+  let origIdx = 0;
+  const eventToOrigIdx = new Map<AgentEvent, number>();
+  for (const e of events) {
+    eventToOrigIdx.set(e, origIdx++);
+  }
+
+  return items.map((item, i) => {
+    if (item.type === "tool_group") {
+      const { request } = item;
+      if (request.tool_name && FILE_WRITE_TOOLS.has(request.tool_name)) {
+        segmentHasWrites = true;
+      }
+      segmentEvents.push(request);
+      if (item.result) segmentEvents.push(item.result);
+      return <ToolGroupCard key={`tg-${i}`} group={item} />;
+    }
+
+    const event = item.event;
+
     if (event.event_type === "follow_up") {
       segmentHasWrites = false;
       segmentEvents = [];
@@ -540,12 +726,9 @@ function renderEvents(
       segmentHasWrites = true;
     }
 
-    // Skip text event if the next event is complete with the same content
-    if (event.event_type === "text") {
-      const next = events[i + 1];
-      if (next?.event_type === "complete" && next.summary === event.text) {
-        return null;
-      }
+    const oi = eventToOrigIdx.get(event);
+    if (event.event_type === "text" && oi !== undefined && skipTextIndices.has(oi)) {
+      return null;
     }
 
     switch (event.event_type) {
@@ -589,13 +772,16 @@ function renderEvents(
       case "tool_request":
         if (event.needs_approval) {
           const gateId = event.id || "";
-          const hasResult = events.slice(i + 1).some(
-            (e) => (e.event_type === "tool_result" && e.id === gateId),
-          );
-          const wasRejected = !hasResult && events.slice(i + 1).some(
+          const afterGate = events.filter((e) => (eventToOrigIdx.get(e) ?? 0) > (oi ?? 0));
+          const hasResult = afterGate.some((e) => e.event_type === "tool_result" && e.id === gateId);
+          const wasSteered = !hasResult && afterGate.some((e) => e.event_type === "follow_up");
+          const wasRejected = !hasResult && !wasSteered && afterGate.some(
             (e) => e.event_type === "complete" || e.event_type === "error",
           );
-          const resolved = hasResult ? "approved" as const : wasRejected ? "rejected" as const : undefined;
+          const resolved = hasResult ? "approved" as const
+            : wasSteered ? "steered" as const
+            : wasRejected ? "rejected" as const
+            : undefined;
           return (
             <GateCard
               key={i}
@@ -611,58 +797,22 @@ function renderEvents(
               onReject={() => {
                 invoke("reject_gate", { threadId, toolUseId: gateId, reason: "User rejected" }).catch(console.error);
               }}
+              onSteer={(text) => callbacks.onSteer(threadId, gateId, text)}
             />
           );
         }
-        return (
-          <div key={i} className="step-card">
-            <span className="step-icon icon-tool">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-              </svg>
-            </span>
-            <span className="step-description">
-              <span className="tool-name">{event.tool_name}</span>
-              <div className="tool-detail">{event.description}</div>
-            </span>
-          </div>
-        );
+        return null;
 
       case "tool_result":
-        return (
-          <div key={i} className="step-card">
-            <span className={`step-icon ${event.success ? "icon-success" : "icon-error"}`}>
-              {event.success ? (
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              )}
-            </span>
-            <span className="step-description">
-              {event.success ? "Done" : "Failed"}
-              {event.duration_ms != null && event.duration_ms > 0 && (
-                <span className="step-elapsed">
-                  {event.duration_ms < 1000
-                    ? `${event.duration_ms}ms`
-                    : `${(event.duration_ms / 1000).toFixed(1)}s`}
-                </span>
-              )}
-              {event.output && (
-                <div className="result-preview">
-                  {event.output.substring(0, 200)}
-                </div>
-              )}
-            </span>
-          </div>
-        );
+        return null;
 
       case "complete": {
         const hadWrites = segmentHasWrites;
-        const filesChanged = collectFilesChanged(segmentEvents);
+        const heuristicFiles = collectFilesChanged(segmentEvents);
+        const filesChanged = gitFiles && gitFiles.length > 0
+          ? parseGitStatus(gitFiles)
+          : heuristicFiles;
+        const testResults = collectTestResults(segmentEvents);
         segmentHasWrites = false;
         segmentEvents = [];
         return (
@@ -672,8 +822,9 @@ function renderEvents(
             totalCost={event.total_cost_usd || 0}
             durationMs={event.duration_ms || 0}
             turns={event.turns || 0}
-            hasFileChanges={hadWrites}
+            hasFileChanges={hadWrites || (gitFiles != null && gitFiles.length > 0)}
             filesChanged={filesChanged}
+            testResults={testResults}
             completionAction={completionAction}
             onCommit={() => callbacks.onCommit(event.summary || "")}
             onRevert={callbacks.onRevert}
@@ -690,7 +841,9 @@ function renderEvents(
           </div>
         );
 
-      case "error":
+      case "error": {
+        const msg = (event.message || "").toLowerCase();
+        const isAuth = msg.includes("auth") || msg.includes("token") || msg.includes("expired") || msg.includes("unauthorized") || msg.includes("forbidden");
         return (
           <div key={i} className="card error-card">
             <div className="error-label">
@@ -702,6 +855,54 @@ function renderEvents(
               <span className="error-label-text">Error</span>
             </div>
             <div className="error-message">{event.message}</div>
+            {isAuth && (
+              <div className="auth-guidance">
+                <span className="auth-guidance-text">Run this command in your terminal to re-authenticate:</span>
+                <code className="auth-guidance-cmd" onClick={() => navigator.clipboard?.writeText("claude auth")} title="Click to copy">
+                  claude auth
+                </code>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      case "sub_agent_spawned":
+        return (
+          <div key={i} className="sub-agent-section">
+            <div className="sub-agent-header">
+              <span className="step-icon icon-tool">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z" />
+                  <path d="M16 14H8a4 4 0 0 0-4 4v2h16v-2a4 4 0 0 0-4-4z" />
+                </svg>
+              </span>
+              <span className="sub-agent-desc">
+                <span className="sub-agent-label">Sub-agent</span>
+                {event.description}
+              </span>
+              <span className="spinner" />
+            </div>
+          </div>
+        );
+
+      case "sub_agent_complete":
+        return (
+          <div key={i} className="sub-agent-section sub-agent-done">
+            <div className="sub-agent-header">
+              <span className="step-icon icon-success">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              </span>
+              <span className="sub-agent-desc">
+                <span className="sub-agent-label">Sub-agent</span>
+                {event.summary}
+              </span>
+              {event.cost_usd != null && (
+                <span className="sub-agent-cost">${event.cost_usd.toFixed(4)}</span>
+              )}
+            </div>
           </div>
         );
 

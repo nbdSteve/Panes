@@ -186,7 +186,11 @@ async fn dispatch_command(
             let thread_id = mgr.start_thread(&workspace, prompt, &agent_name, context, model.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(Value::String(thread_id))
+            Ok(serde_json::json!({
+                "threadId": thread_id,
+                "memoryCount": 0,
+                "hasBriefing": false,
+            }))
         }
         "resume_thread" => {
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?;
@@ -346,6 +350,9 @@ async fn dispatch_command(
                 rusqlite::params![workspace_id], |row| row.get(0),
             ).map_err(|e| e.to_string())?;
             Ok(serde_json::json!(total))
+        }
+        "get_changed_files" => {
+            Ok(serde_json::json!([]))
         }
         "get_briefing" | "set_briefing" | "delete_briefing"
         | "get_memories" | "search_memories" | "extract_memories"

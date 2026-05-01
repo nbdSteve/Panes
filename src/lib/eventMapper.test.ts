@@ -33,6 +33,28 @@ describe("mapBackendEvent", () => {
       description: "Run ls",
       risk_level: "low",
       needs_approval: false,
+      input: undefined,
+    });
+  });
+
+  it("maps tool_request event with input field", () => {
+    const result = mapBackendEvent({
+      event_type: "tool_request",
+      id: "t1",
+      tool_name: "Bash",
+      description: "Run command: List files",
+      risk_level: "low",
+      needs_approval: false,
+      input: { command: "ls -la", description: "List files" },
+    });
+    expect(result).toEqual({
+      event_type: "tool_request",
+      id: "t1",
+      tool_name: "Bash",
+      description: "Run command: List files",
+      risk_level: "low",
+      needs_approval: false,
+      input: { command: "ls -la", description: "List files" },
     });
   });
 
@@ -65,7 +87,28 @@ describe("mapBackendEvent", () => {
 
   it("maps cost_update event", () => {
     const result = mapBackendEvent({ event_type: "cost_update", total_usd: 0.05 });
-    expect(result).toEqual({ event_type: "cost_update", total_usd: 0.05 });
+    expect(result?.total_usd).toBe(0.05);
+  });
+
+  it("maps cost_update event with token fields", () => {
+    const result = mapBackendEvent({
+      event_type: "cost_update",
+      total_usd: 0.05,
+      input_tokens: 12000,
+      output_tokens: 800,
+      cache_read_tokens: 500,
+      cache_creation_tokens: 100,
+      model: "claude-sonnet-4-6",
+    });
+    expect(result).toEqual({
+      event_type: "cost_update",
+      total_usd: 0.05,
+      input_tokens: 12000,
+      output_tokens: 800,
+      cache_read_tokens: 500,
+      cache_creation_tokens: 100,
+      model: "claude-sonnet-4-6",
+    });
   });
 
   it("maps complete event", () => {
@@ -92,6 +135,33 @@ describe("mapBackendEvent", () => {
 
   it("returns null for unknown event type", () => {
     expect(mapBackendEvent({ event_type: "unknown_type" })).toBeNull();
-    expect(mapBackendEvent({ event_type: "sub_agent_spawned" })).toBeNull();
+  });
+
+  it("maps sub_agent_spawned event", () => {
+    const result = mapBackendEvent({
+      event_type: "sub_agent_spawned",
+      parent_tool_use_id: "tool_1",
+      description: "Research authentication patterns",
+    });
+    expect(result).toEqual({
+      event_type: "sub_agent_spawned",
+      parent_tool_use_id: "tool_1",
+      description: "Research authentication patterns",
+    });
+  });
+
+  it("maps sub_agent_complete event", () => {
+    const result = mapBackendEvent({
+      event_type: "sub_agent_complete",
+      parent_tool_use_id: "tool_1",
+      summary: "Found 3 patterns",
+      cost_usd: 0.05,
+    });
+    expect(result).toEqual({
+      event_type: "sub_agent_complete",
+      parent_tool_use_id: "tool_1",
+      summary: "Found 3 patterns",
+      cost_usd: 0.05,
+    });
   });
 });

@@ -66,10 +66,6 @@ describe("calculateRunningCost", () => {
   });
 
   it("matches backend Complete event total", () => {
-    // Simulate what the backend CostTracker produces:
-    // Backend accumulates all cost_update.total_usd values then Complete overrides.
-    // Frontend takes last cost_update per turn, accumulates across turns.
-    // For single cost_update per turn, they agree.
     const events: ThreadEvent[] = [
       { event_type: "cost_update", total_usd: 0.012 },
       { event_type: "complete" },
@@ -78,7 +74,7 @@ describe("calculateRunningCost", () => {
       { event_type: "complete" },
     ];
     const frontendTotal = calculateRunningCost(events);
-    const backendTotal = 0.012 + 0.018; // backend accumulates
+    const backendTotal = 0.012 + 0.018;
     expect(frontendTotal).toBeCloseTo(backendTotal);
   });
 });

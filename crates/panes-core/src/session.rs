@@ -129,6 +129,13 @@ impl SessionManager {
             .with_context(|| format!("unknown agent: {agent_name}"))?
             .clone();
 
+        {
+            let active = self.active_threads.lock().await;
+            if active.values().any(|t| t.workspace_id == workspace.id) {
+                anyhow::bail!("A thread is already running in this workspace. Wait for it to complete or cancel it first.");
+            }
+        }
+
         // Git snapshot
         let snapshot = if git::is_git_repo(&workspace.path).await {
             match git::snapshot(&workspace.path).await {

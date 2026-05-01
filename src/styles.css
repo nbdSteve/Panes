@@ -1231,6 +1231,139 @@ body {
   overflow: hidden;
 }
 
+/* ─── Tool groups (collapsible) ─── */
+
+.tool-group {
+  border-radius: var(--radius-sm);
+  animation: step-enter 0.2s ease-out;
+}
+
+.tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+}
+
+.tool-group-header:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.tool-group-header .step-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.tool-group-header .step-icon svg {
+  width: 10px;
+  height: 10px;
+}
+
+.tool-group-header .step-icon.icon-tool {
+  background: rgba(251, 191, 36, 0.1);
+  color: var(--warning);
+}
+
+.tool-group-header .step-icon.icon-success {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.tool-group-header .step-icon.icon-error {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.tool-group-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tool-group-label .tool-name {
+  color: var(--warning);
+  font-weight: 500;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  flex-shrink: 0;
+}
+
+.tool-group-desc {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-group-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+  display: flex;
+  align-items: center;
+}
+
+.tool-group-chevron.open {
+  transform: rotate(90deg);
+}
+
+.tool-group-body {
+  padding: 0 14px 10px 42px;
+}
+
+.tool-group-command {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--warning);
+}
+
+.tool-group-output {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+
+.tool-group-failed {
+  color: var(--error);
+  font-size: 12px;
+}
+
+.tool-group-pending {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
 /* ─── Spinner ─── */
 
 .spinner {
@@ -1397,6 +1530,60 @@ body {
 .gate-rejected {
   border-color: rgba(248, 113, 113, 0.15);
   background: linear-gradient(135deg, var(--bg-card) 0%, rgba(248, 113, 113, 0.02) 100%);
+}
+
+.gate-steered {
+  border-color: rgba(129, 140, 248, 0.15);
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(129, 140, 248, 0.02) 100%);
+}
+
+.gate-steered .gate-resolved-label {
+  color: #818cf8;
+}
+
+.gate-resolved-icon.steered {
+  background: rgba(129, 140, 248, 0.15);
+  color: #818cf8;
+}
+
+.gate-steer-input {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.gate-steer-input textarea {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px;
+  resize: none;
+  font-family: inherit;
+}
+
+.gate-steer-input textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.btn-steer-submit {
+  background: #818cf8;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-steer-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .risk-badge {
@@ -1578,10 +1765,62 @@ body {
   color: var(--warning);
 }
 
+.files-changed-icon.deleted {
+  color: var(--error);
+}
+
+.files-changed-icon.untracked {
+  color: var(--success);
+}
+
 .files-changed-path {
   font-family: monospace;
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+/* ─── Test results ─── */
+
+.test-results {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.test-results-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+  width: 100%;
+  text-align: left;
+}
+
+.test-results-summary:hover {
+  color: var(--text-primary);
+}
+
+.test-results-label {
+  flex: 1;
+}
+
+.test-results-output {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 4px 0 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 8px;
 }
 
 /* ─── Commit dialog ─── */
@@ -1665,6 +1904,247 @@ body {
   font-size: 13px;
   color: var(--text-secondary);
   line-height: 1.55;
+}
+
+/* ─── Transcript view ─── */
+
+.transcript-toggle {
+  color: var(--text-muted);
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.transcript-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.transcript-toggle.active {
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.thread-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.transcript-view {
+  padding: 8px 0;
+}
+
+.transcript-message {
+  padding: 10px 14px;
+  border-left: 3px solid transparent;
+  margin-bottom: 2px;
+}
+
+.transcript-message .transcript-role {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.transcript-message .transcript-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.transcript-user {
+  border-left-color: var(--accent);
+}
+
+.transcript-user .transcript-role {
+  color: var(--accent);
+}
+
+.transcript-assistant {
+  border-left-color: var(--success);
+}
+
+.transcript-assistant .transcript-role {
+  color: var(--success);
+}
+
+.transcript-thinking {
+  border-left-color: #a78bfa;
+  opacity: 0.7;
+}
+
+.transcript-thinking .transcript-role {
+  color: #a78bfa;
+}
+
+.transcript-thinking .transcript-body {
+  font-style: italic;
+}
+
+.transcript-system {
+  border-left-color: var(--text-muted);
+}
+
+.transcript-system .transcript-role {
+  color: var(--text-muted);
+}
+
+.transcript-system .transcript-body {
+  color: var(--text-secondary);
+}
+
+.transcript-system code {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  background: var(--bg);
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.transcript-code {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 4px 0 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+
+.transcript-error {
+  border-left-color: var(--error);
+}
+
+.transcript-error .transcript-role {
+  color: var(--error);
+}
+
+.transcript-error .transcript-body {
+  color: var(--error);
+}
+
+.transcript-cost {
+  color: var(--cost);
+  font-size: 12px;
+}
+
+/* ─── Sub-agent sections ─── */
+
+.sub-agent-section {
+  padding: 8px 14px;
+  margin-left: 18px;
+  border-left: 2px solid rgba(167, 139, 250, 0.2);
+  animation: step-enter 0.2s ease-out;
+}
+
+.sub-agent-section.sub-agent-done {
+  border-left-color: rgba(52, 211, 153, 0.2);
+}
+
+.sub-agent-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.sub-agent-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a78bfa;
+  margin-right: 6px;
+}
+
+.sub-agent-done .sub-agent-label {
+  color: var(--success);
+}
+
+.sub-agent-desc {
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.sub-agent-cost {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--cost);
+}
+
+/* ─── Context indicator ─── */
+
+.context-indicator {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 14px 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ─── Context usage badge ─── */
+
+.context-usage {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.context-usage-ok {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.context-usage-warning {
+  color: var(--warning);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.context-usage-danger {
+  color: var(--error);
+  background: var(--error-bg);
+}
+
+/* ─── Auth guidance ─── */
+
+.auth-guidance {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-guidance-text {
+  color: var(--text-secondary);
+}
+
+.auth-guidance-cmd {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  background: var(--bg-hover);
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.auth-guidance-cmd:hover {
+  background: var(--accent-subtle);
 }
 
 /* ─── Cost badge ─── */

@@ -128,6 +128,7 @@ pub fn run() {
             commands::cancel_thread,
             commands::commit_changes,
             commands::revert_changes,
+            commands::get_changed_files,
             commands::list_threads,
             commands::list_all_threads,
             commands::delete_thread,
@@ -321,11 +322,43 @@ async fn forward_events(
     bridge_tx: Option<broadcast::Sender<ThreadEvent>>,
 ) {
     let mut rx = event_rx.lock().await;
-    while let Some(event) = rx.recv().await {
-        info!(thread_id = %event.thread_id, event = ?event.event, "forwarding event to frontend");
-        let _ = handle.emit("panes://thread-event", &event);
-        if let Some(ref tx) = bridge_tx {
-            let _ = tx.send(event);
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            Some(first) = rx.recv() => {
+                let mut batch = vec![first];
+                while let Ok(event) = rx.try_recv() {
+                    batch.push(event);
+                }
+                for event in &batch {
+                    info!(thread_id = %event.thread_id, event = ?event.event, "forwarding event to frontend");
+                }
+                let _ = handle.emit("panes://thread-events", &batch);
+                if let Some(ref tx) = bridge_tx {
+                    for event in batch {
+                        let _ = tx.send(event);
+                    }
+                }
+            }
+            _ = interval.tick() => {
+                let mut batch = Vec::new();
+                while let Ok(event) = rx.try_recv() {
+                    batch.push(event);
+                }
+                if !batch.is_empty() {
+                    for event in &batch {
+                        info!(thread_id = %event.thread_id, event = ?event.event, "forwarding event to frontend");
+                    }
+                    let _ = handle.emit("panes://thread-events", &batch);
+                    if let Some(ref tx) = bridge_tx {
+                        for event in batch {
+                            let _ = tx.send(event);
+                        }
+                    }
+                }
+            }
         }
     }
 }

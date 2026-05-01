@@ -39,6 +39,14 @@ export interface AgentEvent {
   success?: boolean;
   output?: string;
   message?: string;
+  input?: Record<string, unknown>;
+  parent_tool_use_id?: string;
+  cost_usd?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  model?: string;
 }
 
 export interface ThreadInfo {
@@ -49,6 +57,8 @@ export interface ThreadInfo {
   completionAction?: "committed" | "reverted" | "kept";
   queuedFollowUp?: string;
   events: AgentEvent[];
+  memoryCount?: number;
+  hasBriefing?: boolean;
   createdAt: number;
 }
 
@@ -167,14 +177,67 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    listen<ThreadEvent>("panes://thread-event", (ev) => {
-      if (cancelled) return;
-      const { thread_id, event } = ev.payload;
+
+    const processEvent = (threadEvent: ThreadEvent) => {
+      const { thread_id, event, parent_tool_use_id } = threadEvent;
       const mapped = mapBackendEvent(event);
-      if (!mapped) return;
+      if (!mapped) return null;
+      if (parent_tool_use_id) {
+        mapped.parent_tool_use_id = parent_tool_use_id;
+      }
+      return { thread_id, mapped };
+    };
+
+    // Listen for batched events (new format)
+    const p1 = listen<ThreadEvent[]>("panes://thread-events", (ev) => {
+      if (cancelled) return;
+      const batch = ev.payload;
+      const processed = batch.map(processEvent).filter(Boolean) as { thread_id: string; mapped: AgentEvent }[];
+      if (processed.length === 0) return;
 
       setThreads((prev) => {
-        const updated = prev.map((t) => {
+        let updated = [...prev];
+        for (const { thread_id, mapped } of processed) {
+          updated = updated.map((t) => {
+            if (t.id !== thread_id) return t;
+            const newStatus =
+              mapped.event_type === "complete"
+                ? "complete" as const
+                : mapped.event_type === "error"
+                  ? "error" as const
+                  : mapped.event_type === "tool_request" && mapped.needs_approval
+                    ? "gate" as const
+                    : "running" as const;
+
+            if (newStatus === "complete" && mapped.event_type === "complete") {
+              extractMemoriesFromThread(t);
+            }
+
+            if ((newStatus === "complete" || newStatus === "error") && t.queuedFollowUp) {
+              pendingResumeRef.current = { threadId: t.id, prompt: t.queuedFollowUp };
+            }
+
+            return {
+              ...t,
+              status: newStatus,
+              events: [...t.events, mapped],
+              queuedFollowUp: (newStatus === "complete" || newStatus === "error") ? undefined : t.queuedFollowUp,
+            };
+          });
+        }
+        return updated;
+      });
+    });
+
+    // Also listen for single events (backwards compat with mock/tests)
+    const p2 = listen<ThreadEvent>("panes://thread-event", (ev) => {
+      if (cancelled) return;
+      const result = processEvent(ev.payload);
+      if (!result) return;
+      const { thread_id, mapped } = result;
+
+      setThreads((prev) =>
+        prev.map((t) => {
           if (t.id !== thread_id) return t;
           const newStatus =
             mapped.event_type === "complete"
@@ -199,13 +262,15 @@ function App() {
             events: [...t.events, mapped],
             queuedFollowUp: (newStatus === "complete" || newStatus === "error") ? undefined : t.queuedFollowUp,
           };
-        });
-        return updated;
-      });
-    }).then((unlisten) => {
-      if (cancelled) { unlisten(); return; }
-      unlistenRef.current = unlisten;
+        })
+      );
     });
+
+    Promise.all([p1, p2]).then(([u1, u2]) => {
+      if (cancelled) { u1(); u2(); return; }
+      unlistenRef.current = () => { u1(); u2(); };
+    });
+
     return () => {
       cancelled = true;
       unlistenRef.current?.();
@@ -230,7 +295,7 @@ function App() {
       setActiveThread(tempId);
 
       try {
-        const threadId = await invoke<string>("start_thread", {
+        const result = await invoke<{ threadId: string; memoryCount: number; hasBriefing: boolean }>("start_thread", {
           workspaceId: workspace.id,
           workspacePath: workspace.path,
           workspaceName: workspace.name,
@@ -239,9 +304,10 @@ function App() {
           model: model ?? null,
         });
 
+        const threadId = result.threadId;
         setThreads((prev) =>
           prev.map((t) =>
-            t.id === tempId ? { ...t, id: threadId, status: "running" } : t
+            t.id === tempId ? { ...t, id: threadId, status: "running", memoryCount: result.memoryCount, hasBriefing: result.hasBriefing } : t
           )
         );
         setActiveThread(threadId);

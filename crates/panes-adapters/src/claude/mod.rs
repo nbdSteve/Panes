@@ -250,6 +250,8 @@ impl ClaudeAdapter {
                 || lower.contains("api key")
                 || lower.contains("expired")
                 || lower.contains("unauthorized")
+                || lower.contains("forbidden")
+                || lower.contains("401")
                 || lower.contains("403")
             {
                 warn!(stderr = %line, "detected auth-related error from claude CLI");

@@ -61,7 +61,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
       output: "Command executed successfully",
       duration_ms: 250,
     });
-    events.push({ event_type: "cost_update", total_usd: 0.018 });
+    events.push({ event_type: "cost_update", total_usd: 0.018, input_tokens: 12000, output_tokens: 800, model: "claude-sonnet-4-6" });
     events.push({
       event_type: "text",
       text: "The dangerous operation has been completed successfully.",
@@ -100,7 +100,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
         duration_ms: 80,
       });
     }
-    events.push({ event_type: "cost_update", total_usd: 0.025 });
+    events.push({ event_type: "cost_update", total_usd: 0.025, input_tokens: 18000, output_tokens: 1200, model: "claude-sonnet-4-6" });
     events.push({
       event_type: "text",
       text: "I've made the requested edits to the files.",
@@ -139,7 +139,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
         duration_ms: 150,
       });
     }
-    events.push({ event_type: "cost_update", total_usd: 0.012 });
+    events.push({ event_type: "cost_update", total_usd: 0.012, input_tokens: 15000, output_tokens: 600, model: "claude-sonnet-4-6" });
     events.push({
       event_type: "text",
       text: "Based on my analysis of the files, here is what I found:\n\n- The App component manages thread state centrally\n- Styles use CSS custom properties for theming\n- The architecture follows a unidirectional data flow pattern",
@@ -150,6 +150,50 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
         "Based on my analysis of the files, here is what I found:\n\n- The App component manages thread state centrally\n- Styles use CSS custom properties for theming\n- The architecture follows a unidirectional data flow pattern",
       total_cost_usd: 0.012,
       duration_ms: 5000,
+      turns: 2,
+    });
+  } else if (lower.includes("subagent") || lower.includes("delegate")) {
+    events.push({
+      event_type: "thinking",
+      text: "I'll delegate this to a sub-agent.",
+    });
+    events.push({
+      event_type: "tool_request",
+      id: "tool_0",
+      tool_name: "Task",
+      description: "Spawn sub-agent: Research authentication patterns",
+      needs_approval: false,
+      risk_level: "low",
+    });
+    events.push({
+      event_type: "sub_agent_spawned",
+      parent_tool_use_id: "tool_0",
+      description: "Research authentication patterns",
+    });
+    events.push({
+      event_type: "sub_agent_complete",
+      parent_tool_use_id: "tool_0",
+      summary: "Found 3 authentication patterns in the codebase",
+      cost_usd: 0.008,
+    });
+    events.push({
+      event_type: "tool_result",
+      id: "tool_0",
+      tool_name: "Task",
+      success: true,
+      output: "Found 3 authentication patterns",
+      duration_ms: 4500,
+    });
+    events.push({ event_type: "cost_update", total_usd: 0.018, input_tokens: 12000, output_tokens: 800, model: "claude-sonnet-4-6" });
+    events.push({
+      event_type: "text",
+      text: "Based on the sub-agent's research, I found 3 authentication patterns in the codebase.",
+    });
+    events.push({
+      event_type: "complete",
+      summary: "Based on the sub-agent's research, I found 3 authentication patterns in the codebase.",
+      total_cost_usd: 0.018,
+      duration_ms: 7000,
       turns: 2,
     });
   } else if (lower.includes("multi") || lower.includes("complex")) {
@@ -183,6 +227,9 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
       events.push({
         event_type: "cost_update",
         total_usd: 0.005 * (i + 1),
+        input_tokens: 8000 * (i + 1),
+        output_tokens: 400 * (i + 1),
+        model: "claude-sonnet-4-6",
       });
     }
     events.push({
@@ -201,7 +248,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
       event_type: "thinking",
       text: "Let me think about this...",
     });
-    events.push({ event_type: "cost_update", total_usd: 0.003 });
+    events.push({ event_type: "cost_update", total_usd: 0.003, input_tokens: 5000, output_tokens: 300, model: "claude-sonnet-4-6" });
     events.push({
       event_type: "text",
       text: `I received your message: "${prompt}"\n\nThis is a **fake response** from the test adapter.`,
@@ -352,7 +399,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         events: [],
       });
       setTimeout(() => emitThreadEvents(threadId, events), 300);
-      return threadId;
+      return { threadId, memoryCount: 0, hasBriefing: false };
     }
 
     case "resume_thread": {
@@ -536,6 +583,21 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
     case "delete_briefing":
       mockBriefings.delete(args?.workspaceId as string);
+      return null;
+
+    case "get_changed_files":
+      return [];
+
+    case "get_workspace_cost":
+      return 0;
+
+    case "set_workspace_budget_cap":
+      return null;
+
+    case "get_memory_backend_status":
+      return { active: "sqlite", mem0Available: false };
+
+    case "set_memory_backend":
       return null;
 
     case "list_adapters":

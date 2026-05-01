@@ -2,13 +2,16 @@ import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-interface CompletionCardProps {
+export type FileChangeAction = "created" | "modified" | "deleted" | "untracked";
+
+export interface CompletionCardProps {
   summary: string;
   totalCost: number;
   durationMs: number;
   turns: number;
   hasFileChanges: boolean;
-  filesChanged?: { path: string; action: "created" | "modified" }[];
+  filesChanged?: { path: string; action: FileChangeAction }[];
+  testResults?: string;
   completionAction?: "committed" | "reverted" | "kept";
   onCommit: () => void;
   onRevert: () => void;
@@ -22,12 +25,14 @@ export default function CompletionCard({
   turns,
   hasFileChanges,
   filesChanged,
+  testResults,
   completionAction,
   onCommit,
   onRevert,
   onKeep,
 }: CompletionCardProps) {
   const [showFiles, setShowFiles] = useState(false);
+  const [showTests, setShowTests] = useState(false);
   const durationStr =
     durationMs < 60000
       ? `${(durationMs / 1000).toFixed(1)}s`
@@ -79,12 +84,27 @@ export default function CompletionCard({
               {filesChanged.map((f, i) => (
                 <li key={i} className="files-changed-item">
                   <span className={`files-changed-icon ${f.action}`}>
-                    {f.action === "created" ? "+" : "~"}
+                    {f.action === "created" || f.action === "untracked" ? "+" : f.action === "deleted" ? "-" : "~"}
                   </span>
                   <span className="files-changed-path">{f.path}</span>
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+
+      {testResults && (
+        <div className="test-results">
+          <button
+            className="test-results-summary"
+            onClick={() => setShowTests(!showTests)}
+          >
+            <span className="test-results-label">Test results</span>
+            <span className={`files-changed-chevron ${showTests ? "open" : ""}`}>&#9654;</span>
+          </button>
+          {showTests && (
+            <pre className="test-results-output">{testResults}</pre>
           )}
         </div>
       )}

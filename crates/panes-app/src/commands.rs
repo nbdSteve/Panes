@@ -263,6 +263,14 @@ pub async fn delete_thread(
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartThreadResult {
+    pub thread_id: String,
+    pub memory_count: usize,
+    pub has_briefing: bool,
+}
+
 #[tauri::command]
 pub async fn start_thread(
     session_manager: tauri::State<'_, SessionState>,
@@ -274,7 +282,7 @@ pub async fn start_thread(
     prompt: String,
     agent: Option<String>,
     model: Option<String>,
-) -> Result<String, String> {
+) -> Result<StartThreadResult, String> {
     let expanded_path = expand_tilde(&workspace_path);
     let budget_cap: Option<f64> = {
         let conn = db.lock().map_err(|e| e.to_string())?;
@@ -302,6 +310,9 @@ pub async fn start_thread(
     .await
     .unwrap_or_default();
 
+    let memory_count = injected.memories.len();
+    let has_briefing = injected.briefing.is_some();
+
     let context = SessionContext {
         briefing: injected.briefing,
         memories: injected.memories.iter().map(|m| m.content.clone()).collect(),
@@ -311,9 +322,15 @@ pub async fn start_thread(
     let agent_name = resolve_agent_name(agent);
 
     let mgr = session_manager.lock().await;
-    mgr.start_thread(&workspace, &prompt, &agent_name, context, model.as_deref())
+    let thread_id = mgr.start_thread(&workspace, &prompt, &agent_name, context, model.as_deref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(StartThreadResult {
+        thread_id,
+        memory_count,
+        has_briefing,
+    })
 }
 
 #[tauri::command]
@@ -419,6 +436,17 @@ pub async fn revert_changes(
     let expanded = expand_tilde(&workspace_path);
     let path = PathBuf::from(&expanded);
     git::revert(&path, &git::SnapshotRef { commit_hash: snapshot_hash })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_changed_files(
+    workspace_path: String,
+) -> Result<Vec<String>, String> {
+    let expanded = expand_tilde(&workspace_path);
+    let path = PathBuf::from(&expanded);
+    git::get_changed_files(&path)
         .await
         .map_err(|e| e.to_string())
 }
