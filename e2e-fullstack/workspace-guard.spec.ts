@@ -43,11 +43,11 @@ test.describe("Full-Stack: Workspace Guard", () => {
     await addWorkspace(page, wsPath2, "WS-B");
 
     // Click on first workspace and start a slow task
-    await page.locator(".sidebar-item", { hasText: "WS-A" }).click();
+    await page.locator(".sidebar-item").filter({ has: page.locator("span", { hasText: /^WS-A$/ }) }).click();
     await sendPrompt(page, "slow task please");
 
     // Switch to second workspace and start a task
-    await page.locator(".sidebar-item", { hasText: "WS-B" }).click();
+    await page.locator(".sidebar-item").filter({ has: page.locator("span", { hasText: /^WS-B$/ }) }).click();
     await sendPrompt(page, "hello world");
 
     // Second workspace should complete (text-only is fast)
@@ -55,7 +55,7 @@ test.describe("Full-Stack: Workspace Guard", () => {
     await expect(page.locator(".completion-label-text").first()).toHaveText("Complete");
 
     // Switch back to first workspace — it should also eventually complete
-    await page.locator(".sidebar-item", { hasText: "WS-A" }).click();
+    await page.locator(".sidebar-item").filter({ has: page.locator("span", { hasText: /^WS-A$/ }) }).click();
     await waitForCompletion(page, 30_000);
   });
 });
