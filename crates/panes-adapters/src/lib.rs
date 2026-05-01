@@ -8,6 +8,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
 use panes_events::{AgentEvent, SessionContext, SessionInit};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
 
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
@@ -28,6 +37,10 @@ pub trait AgentAdapter: Send + Sync {
         prompt: &str,
         model: Option<&str>,
     ) -> Result<Box<dyn AgentSession>>;
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
 }
 
 #[async_trait]
@@ -42,4 +55,31 @@ pub trait AgentSession: Send + Sync {
     async fn reject(&self, tool_use_id: &str, reason: &str) -> Result<()>;
 
     async fn cancel(&self) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_info_serialization() {
+        let info = ModelInfo {
+            id: "sonnet".to_string(),
+            label: "Sonnet".to_string(),
+            description: "Fast & capable".to_string(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"id\""));
+        assert!(json.contains("\"label\""));
+        assert!(json.contains("\"description\""));
+        assert!(!json.contains("_"), "should use camelCase, not snake_case");
+    }
+
+    #[test]
+    fn test_model_info_deserialization() {
+        let json = r#"{"id":"opus","label":"Opus","description":"Most capable"}"#;
+        let info: ModelInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.id, "opus");
+        assert_eq!(info.label, "Opus");
+    }
 }

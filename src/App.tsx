@@ -23,6 +23,18 @@ export interface AgentInfo {
   description: string | null;
 }
 
+export interface ModelInfo {
+  id: string;
+  label: string;
+  description: string;
+}
+
+const FALLBACK_MODELS: ModelInfo[] = [
+  { id: "sonnet", label: "Sonnet", description: "Fast & capable" },
+  { id: "opus", label: "Opus", description: "Most capable" },
+  { id: "haiku", label: "Haiku", description: "Fastest" },
+];
+
 export interface AgentEvent {
   event_type: string;
   text?: string;
@@ -86,6 +98,7 @@ function App() {
   const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings">("feed");
   const [adapters, setAdapters] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const wsConfigRef = useRef<Map<string, ConfigPrefs>>(new Map());
   const globalConfigRef = useRef<ConfigPrefs>(DEFAULT_CONFIG);
@@ -133,6 +146,9 @@ function App() {
       setAdapters(a);
       if (a.length > 0) {
         invoke<AgentInfo[]>("list_agents", { adapter: a[0] }).then(setAgents).catch(() => {});
+        invoke<ModelInfo[]>("list_models", { adapter: a[0] })
+          .then((m) => setModels(m.length > 0 ? m : FALLBACK_MODELS))
+          .catch(() => setModels(FALLBACK_MODELS));
       }
     }).catch(() => {});
   }, [loadThreadsForWorkspace]);
@@ -496,6 +512,7 @@ function App() {
             thread={currentThread ?? null}
             adapters={adapters}
             agents={agents}
+            models={models.length > 0 ? models : FALLBACK_MODELS}
             defaultConfig={wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current}
             onConfigChange={(config) => {
               wsConfigRef.current.set(activeWs.id, config);

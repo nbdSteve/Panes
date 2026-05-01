@@ -561,6 +561,14 @@ impl SessionManager {
     pub fn list_adapters(&self) -> Vec<String> {
         self.adapters.keys().cloned().collect()
     }
+
+    pub async fn list_models(&self, adapter_name: &str) -> anyhow::Result<Vec<panes_adapters::ModelInfo>> {
+        let adapter = self
+            .adapters
+            .get(adapter_name)
+            .with_context(|| format!("unknown adapter: {adapter_name}"))?;
+        adapter.list_models().await
+    }
 }
 
 #[cfg(test)]
@@ -1178,6 +1186,30 @@ mod tests {
         let mut names = mgr.list_adapters();
         names.sort();
         assert_eq!(names, vec!["fake", "gate-test"]);
+    }
+
+    // ---------------------------------------------------------------
+    // list_models tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_list_models_unknown_adapter() {
+        let (mgr, _rx) = setup_session_manager();
+        let result = mgr.list_models("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_models_fake_adapter() {
+        let (mut mgr, _rx) = setup_session_manager();
+        mgr.register_adapter(Arc::new(FakeAdapter::new(FakeScenario::TextOnly {
+            response: "x".into(),
+        })));
+        let models = mgr.list_models("fake").await.unwrap();
+        assert!(!models.is_empty());
+        assert!(models.iter().any(|m| m.id == "sonnet"));
+        assert!(models.iter().any(|m| m.id == "opus"));
+        assert!(models.iter().any(|m| m.id == "haiku"));
     }
 
     // ---------------------------------------------------------------

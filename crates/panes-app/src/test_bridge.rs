@@ -335,6 +335,12 @@ async fn dispatch_command(
             Ok(Value::Array(mgr.list_adapters().into_iter().map(Value::String).collect()))
         }
         "list_agents" => Ok(serde_json::json!([])),
+        "list_models" => {
+            let adapter = args["adapter"].as_str().unwrap_or("claude-code");
+            let mgr = state.session_manager.lock().await;
+            let models = mgr.list_models(adapter).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(models).unwrap_or(Value::Array(vec![])))
+        }
         "get_aggregate_cost" => {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
             let total: f64 = conn.query_row(

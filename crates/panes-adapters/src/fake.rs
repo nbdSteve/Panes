@@ -132,6 +132,14 @@ impl AgentAdapter for FakeAdapter {
             model,
         ).await
     }
+
+    async fn list_models(&self) -> Result<Vec<crate::ModelInfo>> {
+        Ok(vec![
+            crate::ModelInfo { id: "sonnet".into(), label: "Sonnet".into(), description: "Fast & capable".into() },
+            crate::ModelInfo { id: "opus".into(), label: "Opus".into(), description: "Most capable".into() },
+            crate::ModelInfo { id: "haiku".into(), label: "Haiku".into(), description: "Fastest".into() },
+        ])
+    }
 }
 
 struct FakeSession {
@@ -409,6 +417,16 @@ fn build_events(scenario: &FakeScenario) -> Vec<AgentEvent> {
 mod tests {
     use super::*;
     use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_list_models() {
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "x".to_string(),
+        });
+        let models = adapter.list_models().await.unwrap();
+        assert!(!models.is_empty());
+        assert!(models.iter().any(|m| m.id == "sonnet"));
+    }
 
     #[tokio::test]
     async fn test_fake_text_only() {

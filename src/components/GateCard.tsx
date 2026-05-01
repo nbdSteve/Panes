@@ -151,6 +151,7 @@ export default function GateCard({
           <button
             className="btn btn-sm btn-steer-submit"
             disabled={!steerText.trim()}
+            title={!steerText.trim() ? "Enter a message to steer" : undefined}
             onClick={() => {
               if (steerText.trim()) {
                 onSteer(steerText.trim());

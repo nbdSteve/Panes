@@ -70,6 +70,7 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
                     className={`btn btn-sm ${backendStatus.backend === "sqlite" ? "btn-primary" : "btn-secondary"}`}
                     onClick={() => handleToggleBackend("sqlite")}
                     disabled={switching || backendStatus.backend === "sqlite"}
+                    title={switching ? "Switching backend..." : backendStatus.backend === "sqlite" ? "Already active" : undefined}
                   >
                     SQLite
                   </button>
@@ -77,6 +78,7 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
                     className={`btn btn-sm ${backendStatus.backend === "mem0" ? "btn-primary" : "btn-secondary"}`}
                     onClick={() => handleToggleBackend("mem0")}
                     disabled={switching || backendStatus.backend === "mem0"}
+                    title={switching ? "Switching backend..." : backendStatus.backend === "mem0" ? "Already active" : undefined}
                   >
                     Mem0
                   </button>

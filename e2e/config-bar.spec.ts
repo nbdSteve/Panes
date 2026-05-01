@@ -347,3 +347,68 @@ test.describe("Config Bar — Config Persistence", () => {
     await expect(triggers.nth(2)).toContainText("Opus");
   });
 });
+
+test.describe("Config Bar — Disabled Tooltips", () => {
+  test("config dropdowns show tooltip when disabled during run", async ({ page }) => {
+    await setupWorkspace(page);
+
+    await page.fill("textarea", "do something slow and complex");
+    await page.press("textarea", "Enter");
+    await expect(page.locator(".btn-stop")).toBeVisible({ timeout: 2000 });
+
+    const triggers = page.locator(".config-dropdown-trigger");
+    const count = await triggers.count();
+    for (let i = 0; i < count; i++) {
+      await expect(triggers.nth(i)).toHaveAttribute("title", "Cannot change while thread is running");
+    }
+  });
+
+  test("send button shows tooltip when empty", async ({ page }) => {
+    await setupWorkspace(page);
+    const sendBtn = page.locator(".btn-send");
+    await expect(sendBtn).toBeDisabled();
+    await expect(sendBtn).toHaveAttribute("title", "Enter a message to send");
+  });
+
+  test("send button tooltip changes when text is entered", async ({ page }) => {
+    await setupWorkspace(page);
+    await page.fill("textarea", "hello");
+    const sendBtn = page.locator(".btn-send");
+    await expect(sendBtn).toHaveAttribute("title", "Send (Enter)");
+  });
+
+  test("model dropdown shows locked tooltip when agent sets model", async ({ page }) => {
+    await setupWorkspace(page);
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    // Select an agent with a model (e.g. codebase-analyzer has model: sonnet)
+    await triggers.nth(1).click();
+    await page.click(".config-dropdown-item:has-text('codebase-analyzer')");
+
+    await expect(triggers.nth(2)).toHaveAttribute("title", "Set by codebase-analyzer agent");
+  });
+});
+
+test.describe("Config Bar — Dynamic Models", () => {
+  test("model dropdown shows models from backend", async ({ page }) => {
+    await setupWorkspace(page);
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    await triggers.nth(2).click();
+    const menu = page.locator(".config-dropdown-menu");
+    await expect(menu.locator("text=Sonnet")).toBeVisible();
+    await expect(menu.locator("text=Opus")).toBeVisible();
+    await expect(menu.locator("text=Haiku")).toBeVisible();
+  });
+
+  test("model descriptions are shown in dropdown", async ({ page }) => {
+    await setupWorkspace(page);
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    await triggers.nth(2).click();
+    const menu = page.locator(".config-dropdown-menu");
+    await expect(menu.locator("text=Fast & capable")).toBeVisible();
+    await expect(menu.locator("text=Most capable")).toBeVisible();
+    await expect(menu.locator("text=Fastest")).toBeVisible();
+  });
+});

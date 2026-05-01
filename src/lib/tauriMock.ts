@@ -618,6 +618,13 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       }
       return [];
 
+    case "list_models":
+      return [
+        { id: "sonnet", label: "Sonnet", description: "Fast & capable" },
+        { id: "opus", label: "Opus", description: "Most capable" },
+        { id: "haiku", label: "Haiku", description: "Fastest" },
+      ];
+
     case "set_workspace_default_agent": {
       const wsId = args?.workspaceId as string ?? args?.workspace_id as string;
       const agent = args?.agent as string;

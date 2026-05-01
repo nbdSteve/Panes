@@ -676,6 +676,17 @@ pub struct AgentInfo {
 }
 
 #[tauri::command]
+pub async fn list_models(
+    session_manager: tauri::State<'_, SessionState>,
+    adapter: String,
+) -> Result<Vec<panes_adapters::ModelInfo>, String> {
+    let mgr = session_manager.lock().await;
+    mgr.list_models(&adapter)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn list_agents(adapter: String) -> Result<Vec<AgentInfo>, String> {
     match adapter.as_str() {
         "claude-code" => list_agents_claude(),

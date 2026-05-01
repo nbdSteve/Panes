@@ -234,6 +234,14 @@ impl AgentAdapter for ClaudeAdapter {
 
         Ok(Box::new(session))
     }
+
+    async fn list_models(&self) -> Result<Vec<crate::ModelInfo>> {
+        Ok(vec![
+            crate::ModelInfo { id: "sonnet".into(), label: "Sonnet".into(), description: "Fast & capable".into() },
+            crate::ModelInfo { id: "opus".into(), label: "Opus".into(), description: "Most capable".into() },
+            crate::ModelInfo { id: "haiku".into(), label: "Haiku".into(), description: "Fastest".into() },
+        ])
+    }
 }
 
 impl ClaudeAdapter {
@@ -370,6 +378,20 @@ mod tests {
     fn test_name() {
         let adapter = ClaudeAdapter::new();
         assert_eq!(adapter.name(), "claude-code");
+    }
+
+    #[tokio::test]
+    async fn test_list_models_returns_standard_models() {
+        let adapter = ClaudeAdapter::new();
+        let models = adapter.list_models().await.unwrap();
+        assert!(models.len() >= 3);
+        assert!(models.iter().any(|m| m.id == "sonnet"));
+        assert!(models.iter().any(|m| m.id == "opus"));
+        assert!(models.iter().any(|m| m.id == "haiku"));
+        for m in &models {
+            assert!(!m.label.is_empty());
+            assert!(!m.description.is_empty());
+        }
     }
 
     #[tokio::test]

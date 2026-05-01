@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
-import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs } from "../App";
+import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs, ModelInfo } from "../App";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
 import CostBadge from "./CostBadge";
@@ -12,17 +12,12 @@ import { normalizeModelId } from "../lib/utils";
 import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
 import TranscriptView from "./TranscriptView";
 
-const MODELS = [
-  { id: "sonnet", label: "Sonnet", desc: "Fast & capable" },
-  { id: "opus", label: "Opus", desc: "Most capable" },
-  { id: "haiku", label: "Haiku", desc: "Fastest" },
-];
-
 interface ThreadViewProps {
   workspace: WorkspaceInfo;
   thread: ThreadInfo | null;
   adapters: string[];
   agents: AgentInfo[];
+  models: ModelInfo[];
   defaultConfig: ConfigPrefs;
   onConfigChange: (config: ConfigPrefs) => void;
   onStartThread: (prompt: string, agent?: string, model?: string) => void;
@@ -32,7 +27,7 @@ interface ThreadViewProps {
   onSetBudgetCap: (workspaceId: string, budgetCap: number | null) => void;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, models, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
@@ -318,6 +313,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
                     className="config-dropdown-trigger"
                     onClick={() => { setAdapterOpen(!adapterOpen); setAgentOpen(false); setModelOpen(false); }}
                     disabled={isRunning}
+                    title={isRunning ? "Cannot change while thread is running" : undefined}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
@@ -349,6 +345,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
                   className="config-dropdown-trigger"
                   onClick={() => { setAgentOpen(!agentOpen); setAdapterOpen(false); setModelOpen(false); }}
                   disabled={isRunning}
+                  title={isRunning ? "Cannot change while thread is running" : undefined}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z" />
@@ -400,12 +397,12 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
                   className={`config-dropdown-trigger ${modelLocked ? "locked" : ""}`}
                   onClick={() => { if (!modelLocked) { setModelOpen(!modelOpen); setAdapterOpen(false); setAgentOpen(false); } }}
                   disabled={isRunning || modelLocked}
-                  title={modelLocked ? `Set by ${selectedAgent} agent` : undefined}
+                  title={modelLocked ? `Set by ${selectedAgent} agent` : isRunning ? "Cannot change while thread is running" : undefined}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
                   </svg>
-                  <span className="config-dropdown-value">{MODELS.find(m => m.id === effectiveModel)?.label ?? effectiveModel}</span>
+                  <span className="config-dropdown-value">{models.find(m => m.id === effectiveModel)?.label ?? effectiveModel}</span>
                   {modelLocked ? (
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
                   ) : (
@@ -414,7 +411,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
                 </button>
                 {modelOpen && !modelLocked && (
                   <div className="config-dropdown-menu">
-                    {MODELS.map(m => (
+                    {models.map(m => (
                       <button
                         key={m.id}
                         className={`config-dropdown-item ${m.id === selectedModel ? "active" : ""}`}
@@ -422,7 +419,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
                       >
                         <span className="config-dropdown-item-content">
                           <span className="config-dropdown-item-label">{m.label}</span>
-                          <span className="config-dropdown-item-desc">{m.desc}</span>
+                          <span className="config-dropdown-item-desc">{m.description}</span>
                         </span>
                         {m.id === selectedModel && (
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
@@ -469,6 +466,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
                     setEditingBudget(true);
                   }}
                   disabled={isRunning}
+                  title={isRunning ? "Cannot change while thread is running" : undefined}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="12" y1="1" x2="12" y2="23" /><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
@@ -523,7 +521,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
               className="btn-send"
               onClick={handleSend}
               disabled={!prompt.trim()}
-              title={isActive ? "Queue follow-up (Enter)" : "Send (Enter)"}
+              title={!prompt.trim() ? "Enter a message to send" : isActive ? "Queue follow-up (Enter)" : "Send (Enter)"}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />

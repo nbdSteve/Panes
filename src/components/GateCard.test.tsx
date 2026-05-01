@@ -72,6 +72,16 @@ describe("GateCard", () => {
     expect(screen.getByText("Send")).toBeDisabled();
   });
 
+  it("send button has tooltip when disabled", async () => {
+    const user = userEvent.setup();
+    render(<GateCard {...baseProps} onSteer={vi.fn()} />);
+
+    await user.click(screen.getByText("Steer"));
+    const sendBtn = screen.getByText("Send");
+    expect(sendBtn).toBeDisabled();
+    expect(sendBtn).toHaveAttribute("title", "Enter a message to steer");
+  });
+
   it("send button click calls onSteer", async () => {
     const user = userEvent.setup();
     const onSteer = vi.fn();

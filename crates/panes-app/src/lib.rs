@@ -143,6 +143,7 @@ pub fn run() {
             commands::delete_briefing,
             commands::list_adapters,
             commands::list_agents,
+            commands::list_models,
             commands::set_workspace_default_agent,
             commands::set_workspace_budget_cap,
             commands::get_aggregate_cost,
@@ -206,6 +207,14 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
         let scenario = route_prompt(prompt);
         let adapter = FakeAdapter::new(scenario).with_delay(80);
         adapter.resume(workspace_path, session_id, prompt, model).await
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<panes_adapters::ModelInfo>> {
+        Ok(vec![
+            panes_adapters::ModelInfo { id: "sonnet".into(), label: "Sonnet".into(), description: "Fast & capable".into() },
+            panes_adapters::ModelInfo { id: "opus".into(), label: "Opus".into(), description: "Most capable".into() },
+            panes_adapters::ModelInfo { id: "haiku".into(), label: "Haiku".into(), description: "Fastest".into() },
+        ])
     }
 }
 
