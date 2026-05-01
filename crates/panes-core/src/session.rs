@@ -241,6 +241,13 @@ impl SessionManager {
             .with_context(|| format!("unknown agent: {agent_name}"))?
             .clone();
 
+        {
+            let active = self.active_threads.lock().await;
+            if active.iter().any(|(id, t)| t.workspace_id == workspace.id && id != thread_id) {
+                anyhow::bail!("A thread is already running in this workspace. Wait for it to complete or cancel it first.");
+            }
+        }
+
         let claude_session_id = {
             let sids = self.session_ids.lock().await;
             sids.get(thread_id)
@@ -1482,5 +1489,116 @@ mod tests {
 
         // Clean up — reject so the background task stops
         mgr.reject(&thread_id, "gate_0", "test cleanup").await.unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // One-thread-per-workspace guard tests
+    // ---------------------------------------------------------------
+
+    fn make_workspace_with_id(id: &str) -> Workspace {
+        Workspace {
+            id: id.to_string(),
+            path: std::env::temp_dir().join(id),
+            name: format!("test-{id}"),
+            default_agent: None,
+            budget_cap: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_blocks_second_start_same_workspace() {
+        let (mut mgr, mut rx) = setup_session_manager();
+        mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
+
+        let ws = make_workspace_with_id("ws-guard-1");
+        insert_workspace_row(&mgr, &ws);
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let _tid_a = mgr.start_thread(&ws, "first", "gate-test", ctx, None).await.unwrap();
+        let _gate_id = wait_for_gate_event(&mut rx).await;
+
+        let ctx2 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = mgr.start_thread(&ws, "second", "gate-test", ctx2, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already running in this workspace"));
+
+        mgr.reject(&_tid_a, &_gate_id, "cleanup").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_start_different_workspace_concurrent_ok() {
+        let (mut mgr, mut rx) = setup_session_manager();
+        mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
+
+        let ws1 = make_workspace_with_id("ws-guard-2a");
+        let ws2 = make_workspace_with_id("ws-guard-2b");
+        insert_workspace_row(&mgr, &ws1);
+        insert_workspace_row(&mgr, &ws2);
+
+        let ctx1 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid_a = mgr.start_thread(&ws1, "first", "gate-test", ctx1, None).await.unwrap();
+        let gate_a = wait_for_gate_event(&mut rx).await;
+
+        let ctx2 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = mgr.start_thread(&ws2, "second", "gate-test", ctx2, None).await;
+        assert!(result.is_ok(), "different workspace should succeed");
+
+        let tid_b = result.unwrap();
+        let gate_b = wait_for_gate_event(&mut rx).await;
+
+        mgr.reject(&tid_a, &gate_a, "cleanup").await.unwrap();
+        mgr.reject(&tid_b, &gate_b, "cleanup").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resume_blocks_if_other_thread_active() {
+        let (mut mgr, mut rx) = setup_session_manager();
+
+        let fake = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "done".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(fake));
+        mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
+
+        let ws = make_workspace_with_id("ws-guard-3");
+        insert_workspace_row(&mgr, &ws);
+
+        // Start and complete thread A
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid_a = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
+        let _ = collect_events_until_done(&mut rx).await;
+
+        // Start thread C (gate-test) in same workspace — it will be active at the gate
+        let ctx2 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid_c = mgr.start_thread(&ws, "risky", "gate-test", ctx2, None).await.unwrap();
+        let gate_id = wait_for_gate_event(&mut rx).await;
+
+        // Try to resume thread A while C is active — should fail
+        let result = mgr.resume_thread(&tid_a, &ws, "follow up", "fake", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already running in this workspace"));
+
+        mgr.reject(&tid_c, &gate_id, "cleanup").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resume_succeeds_same_thread_only() {
+        let (mut mgr, mut rx) = setup_session_manager();
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "reply".to_string(),
+        }).with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = make_workspace_with_id("ws-guard-4");
+        insert_workspace_row(&mgr, &ws);
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
+        let _ = collect_events_until_done(&mut rx).await;
+
+        // Resume same thread in same workspace — no other active thread
+        let result = mgr.resume_thread(&tid, &ws, "follow up", "fake", None).await;
+        assert!(result.is_ok(), "resume of own thread should succeed");
+        let _ = collect_events_until_done(&mut rx).await;
     }
 }
