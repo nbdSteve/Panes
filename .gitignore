@@ -9,3 +9,6 @@ crates/panes-app/icons/Square*.png
 crates/panes-app/icons/StoreLogo.png
 crates/panes-app/icons/android/
 crates/panes-app/icons/ios/
+coverage/
+lcov.info
+tarpaulin-report.json
