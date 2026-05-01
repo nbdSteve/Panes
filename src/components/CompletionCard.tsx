@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { formatCost } from "../lib/utils";
 
 export type FileChangeAction = "created" | "modified" | "deleted" | "untracked";
 
@@ -38,7 +39,7 @@ export default function CompletionCard({
       ? `${(durationMs / 1000).toFixed(1)}s`
       : `${Math.floor(durationMs / 60000)}m ${Math.round((durationMs % 60000) / 1000)}s`;
 
-  const costStr = totalCost < 0.01 ? `$${totalCost.toFixed(4)}` : `$${totalCost.toFixed(2)}`;
+  const costStr = formatCost(totalCost);
 
   return (
     <div className="card completion-card">
@@ -52,7 +53,7 @@ export default function CompletionCard({
           <span className="completion-label-text">Complete</span>
         </div>
         <div className="completion-stats">
-          <span className="completion-stat" style={{ color: "var(--cost)" }}>{costStr}</span>
+          <span className="completion-stat completion-stat-cost">{costStr}</span>
           <span className="completion-stat-sep" />
           <span className="completion-stat">{durationStr}</span>
           <span className="completion-stat-sep" />
@@ -77,7 +78,9 @@ export default function CompletionCard({
                 return parts.length > 0 ? ` (${parts.join(", ")})` : "";
               })()}
             </span>
-            <span className={`files-changed-chevron ${showFiles ? "open" : ""}`}>&#9654;</span>
+            <span className={`files-changed-chevron ${showFiles ? "open" : ""}`}>
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="9 6 15 12 9 18" /></svg>
+            </span>
           </button>
           {showFiles && (
             <ul className="files-changed-list">
@@ -101,7 +104,9 @@ export default function CompletionCard({
             onClick={() => setShowTests(!showTests)}
           >
             <span className="test-results-label">Test results</span>
-            <span className={`files-changed-chevron ${showTests ? "open" : ""}`}>&#9654;</span>
+            <span className={`files-changed-chevron ${showTests ? "open" : ""}`}>
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="9 6 15 12 9 18" /></svg>
+            </span>
           </button>
           {showTests && (
             <pre className="test-results-output">{testResults}</pre>

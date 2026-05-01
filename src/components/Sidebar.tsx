@@ -150,7 +150,7 @@ export default function Sidebar({
 
       <div className="sidebar-footer">
         {showAdd ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <div className="sidebar-add-form">
             <input
               className="input"
               type="text"
@@ -168,8 +168,8 @@ export default function Sidebar({
               onChange={(e) => setAddName(e.target.value)}
               onKeyDown={handleKeyDown}
             />
-            <div style={{ display: "flex", gap: "6px" }}>
-              <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={handleAdd}>
+            <div className="sidebar-add-actions">
+              <button className="btn btn-primary btn-sm" onClick={handleAdd}>
                 Add
               </button>
               <button

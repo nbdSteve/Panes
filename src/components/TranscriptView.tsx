@@ -1,6 +1,7 @@
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentEvent } from "../App";
+import { formatCost } from "../lib/utils";
 
 interface TranscriptViewProps {
   events: AgentEvent[];
@@ -78,7 +79,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
                 <div className="transcript-body">
                   {event.summary}
                   {event.cost_usd != null && (
-                    <span className="transcript-cost"> (${event.cost_usd.toFixed(4)})</span>
+                    <span className="transcript-cost"> ({formatCost(event.cost_usd)})</span>
                   )}
                 </div>
               </div>
@@ -98,7 +99,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
                 <span className="transcript-role">Session complete</span>
                 <div className="transcript-body">
                   {event.summary}
-                  {event.total_cost_usd != null && ` — $${event.total_cost_usd.toFixed(4)}`}
+                  {event.total_cost_usd != null && ` — ${formatCost(event.total_cost_usd)}`}
                   {event.turns != null && ` — ${event.turns} turns`}
                 </div>
               </div>

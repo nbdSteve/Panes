@@ -42,7 +42,7 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
 
   return (
     <div className="settings-panel">
-      <h2 style={{ fontSize: "18px", fontWeight: 600, margin: "0 0 24px", color: "var(--text-primary)" }}>
+      <h2 className="settings-title">
         Settings
       </h2>
 
@@ -95,11 +95,11 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
           {workspaces.map((ws) => (
             <div key={ws.id} className="settings-row">
               <span className="settings-label">{ws.name}</span>
-              <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-                <span className="settings-value" style={{ fontSize: "12px" }}>
+              <div className="settings-ws-details">
+                <span className="settings-value">
                   {ws.defaultAgent ?? "claude-code"}
                 </span>
-                <span className={`settings-value ${ws.budgetCap ? "" : "muted"}`} style={{ fontSize: "12px" }}>
+                <span className={`settings-value ${ws.budgetCap ? "" : "muted"}`}>
                   {ws.budgetCap ? `Cap: ${formatCost(ws.budgetCap)}` : "No cap"}
                 </span>
               </div>

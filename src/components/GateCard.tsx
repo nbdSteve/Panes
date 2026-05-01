@@ -102,7 +102,7 @@ export default function GateCard({
 
       <div className="gate-description">
         {toolName && (
-          <span style={{ fontFamily: "'SF Mono', 'Fira Code', monospace", fontSize: 12, color: "var(--warning)", marginRight: 6 }}>
+          <span className="tool-name-inline">
             {toolName}
           </span>
         )}

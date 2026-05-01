@@ -40,6 +40,7 @@
   --transition-fast: 0.12s ease;
   --transition-base: 0.2s ease;
   --transition-slow: 0.3s ease;
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
 
 * {
@@ -1205,7 +1206,7 @@ body {
   color: var(--warning);
   font-weight: 500;
   font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
 }
 
 .step-card .step-description .tool-detail {
@@ -1224,7 +1225,7 @@ body {
   color: var(--text-muted);
   font-size: 12px;
   margin-top: 2px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 60px;
@@ -1299,7 +1300,7 @@ body {
   color: var(--warning);
   font-weight: 500;
   font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   flex-shrink: 0;
 }
 
@@ -1327,7 +1328,7 @@ body {
 }
 
 .tool-group-command {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   white-space: pre-wrap;
@@ -1340,7 +1341,7 @@ body {
 }
 
 .tool-group-output {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
   white-space: pre-wrap;
@@ -1516,7 +1517,7 @@ body {
 }
 
 .gate-resolved-tool {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
   margin-right: 6px;
@@ -1727,7 +1728,7 @@ body {
 }
 
 .files-changed-chevron {
-  font-size: 8px;
+  display: inline-flex;
   transition: transform var(--transition-fast);
   margin-left: auto;
 }
@@ -1810,7 +1811,7 @@ body {
 }
 
 .test-results-output {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-secondary);
   white-space: pre-wrap;
@@ -1997,7 +1998,7 @@ body {
 }
 
 .transcript-system code {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   background: var(--bg);
   padding: 2px 4px;
@@ -2005,7 +2006,7 @@ body {
 }
 
 .transcript-code {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
   white-space: pre-wrap;
@@ -2074,7 +2075,7 @@ body {
 }
 
 .sub-agent-cost {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--cost);
 }
@@ -2118,7 +2119,7 @@ body {
 /* ─── Context usage badge ─── */
 
 .context-usage {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   padding: 2px 6px;
@@ -2159,7 +2160,7 @@ body {
 }
 
 .auth-guidance-cmd {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   background: var(--bg-hover);
   padding: 2px 8px;
   border-radius: 4px;
@@ -2181,7 +2182,7 @@ body {
   color: var(--cost);
   font-size: 12px;
   font-weight: 600;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   letter-spacing: -0.02em;
 }
 
@@ -2216,7 +2217,7 @@ body {
   padding: 4px 8px;
   font-size: 12px;
   width: 80px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   outline: none;
 }
 
@@ -2273,7 +2274,7 @@ body {
   background: rgba(255, 255, 255, 0.06);
   padding: 2px 6px;
   border-radius: 4px;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--accent-hover);
 }
@@ -2693,5 +2694,90 @@ body {
 .backend-toggle {
   display: flex;
   gap: 4px;
+}
+
+/* ─── Extracted utility classes ─── */
+
+.settings-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 24px;
+  color: var(--text-primary);
+}
+
+.settings-ws-details {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.settings-ws-details .settings-value {
+  font-size: 12px;
+}
+
+.sidebar-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-add-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.sidebar-add-actions .btn {
+  flex: 1;
+}
+
+.completion-stat-cost {
+  color: var(--cost);
+}
+
+.tool-name-inline {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--warning);
+  margin-right: 6px;
+}
+
+.panel-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+  color: var(--text-muted);
+}
+
+.panel-loading .spinner {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+
+.inline-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  background: var(--error-bg);
+  border: 1px solid rgba(248, 113, 113, 0.15);
+  border-radius: var(--radius-sm);
+  color: var(--error);
+  font-size: 13px;
+}
+
+.inline-error-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(248, 113, 113, 0.15);
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
 }
 

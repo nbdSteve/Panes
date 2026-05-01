@@ -1,3 +1,5 @@
+import { formatCost } from "../lib/utils";
+
 interface CostBadgeProps {
   cost: number;
   label?: string;
@@ -5,12 +7,9 @@ interface CostBadgeProps {
 }
 
 export default function CostBadge({ cost, label, budgetCap }: CostBadgeProps) {
-  const formatted =
-    cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
+  const formatted = formatCost(cost);
 
-  const capFormatted = budgetCap
-    ? budgetCap < 0.01 ? `$${budgetCap.toFixed(4)}` : `$${budgetCap.toFixed(2)}`
-    : null;
+  const capFormatted = budgetCap ? formatCost(budgetCap) : null;
 
   const ratio = budgetCap ? cost / budgetCap : 0;
   const warningClass = budgetCap
