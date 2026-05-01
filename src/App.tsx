@@ -225,7 +225,7 @@ function App() {
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          agent: agent ?? workspace.defaultAgent ?? null,
+          agent: agent || workspace.defaultAgent || null,
           model: model ?? null,
         });
 
@@ -272,7 +272,7 @@ function App() {
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          agent: workspace.defaultAgent ?? null,
+          agent: workspace.defaultAgent || null,
         });
       } catch (e) {
         setThreads((prev) =>

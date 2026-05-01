@@ -15,6 +15,10 @@ type SessionState = Arc<Mutex<SessionManager>>;
 type DbState = Arc<std::sync::Mutex<Connection>>;
 pub(crate) type MemoryManagerState = Arc<MemoryManager>;
 
+fn resolve_agent_name(agent: Option<String>) -> String {
+    agent.filter(|s| !s.is_empty()).unwrap_or_else(|| "claude-code".to_string())
+}
+
 pub(crate) fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") || path == "~" {
         if let Ok(home) = std::env::var("HOME") {
@@ -304,7 +308,7 @@ pub async fn start_thread(
         budget_cap: None,
     };
 
-    let agent_name = agent.unwrap_or_else(|| "claude-code".to_string());
+    let agent_name = resolve_agent_name(agent);
 
     let mgr = session_manager.lock().await;
     mgr.start_thread(&workspace, &prompt, &agent_name, context, model.as_deref())
@@ -341,7 +345,7 @@ pub async fn resume_thread(
         budget_cap,
     };
 
-    let agent_name = agent.unwrap_or_else(|| "claude-code".to_string());
+    let agent_name = resolve_agent_name(agent);
 
     let mgr = session_manager.lock().await;
     mgr.resume_thread(&thread_id, &workspace, &prompt, &agent_name, model.as_deref())
@@ -1527,5 +1531,25 @@ Body text here
         ).unwrap();
         assert!((cost - 0.05).abs() < f64::EPSILON);
         assert_eq!(duration, Some(5000));
+    }
+
+    #[test]
+    fn test_resolve_agent_name_none_returns_default() {
+        assert_eq!(resolve_agent_name(None), "claude-code");
+    }
+
+    #[test]
+    fn test_resolve_agent_name_empty_string_returns_default() {
+        assert_eq!(resolve_agent_name(Some("".to_string())), "claude-code");
+    }
+
+    #[test]
+    fn test_resolve_agent_name_explicit_value_preserved() {
+        assert_eq!(resolve_agent_name(Some("custom-agent".to_string())), "custom-agent");
+    }
+
+    #[test]
+    fn test_resolve_agent_name_claude_code_preserved() {
+        assert_eq!(resolve_agent_name(Some("claude-code".to_string())), "claude-code");
     }
 }

@@ -582,6 +582,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_start_thread_empty_agent_name_rejected() {
+        let (mgr, _rx) = setup_session_manager();
+        let ws = make_workspace();
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = mgr.start_thread(&ws, "hello", "", ctx, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown agent"));
+    }
+
+    #[tokio::test]
+    async fn test_resume_thread_empty_agent_name_rejected() {
+        let (mgr, _rx) = setup_session_manager();
+        let ws = make_workspace();
+        let result = mgr.resume_thread("t1", &ws, "hello", "", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown agent"));
+    }
+
+    #[tokio::test]
     async fn test_approve_nonexistent_thread() {
         let (mgr, _rx) = setup_session_manager();
         let result = mgr.approve("no-such-thread", "tool1").await;

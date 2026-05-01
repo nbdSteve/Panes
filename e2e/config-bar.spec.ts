@@ -155,6 +155,45 @@ test.describe("Config Bar — Model Selector", () => {
   });
 });
 
+test.describe("Config Bar — Agent Selection Sends Correctly", () => {
+  test("prompt with Default agent completes without error", async ({ page }) => {
+    await setupWorkspace(page);
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    // Ensure agent is "Default" (the initial state)
+    await expect(triggers.nth(1)).toContainText("Default");
+
+    // Send a prompt — should succeed, not error with "unknown agent"
+    await page.fill("textarea", "hello world");
+    await page.press("textarea", "Enter");
+
+    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+    await expect(page.locator(".error-card")).not.toBeVisible();
+  });
+
+  test("prompt after selecting and deselecting an agent completes without error", async ({ page }) => {
+    await setupWorkspace(page);
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    // Select a named agent
+    await triggers.nth(1).click();
+    await page.click(".config-dropdown-item:has-text('karen')");
+    await expect(triggers.nth(1)).toContainText("karen");
+
+    // Switch back to Default
+    await triggers.nth(1).click();
+    await page.click(".config-dropdown-item:has-text('Default')");
+    await expect(triggers.nth(1)).toContainText("Default");
+
+    // Send a prompt — should succeed
+    await page.fill("textarea", "hello world");
+    await page.press("textarea", "Enter");
+
+    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+    await expect(page.locator(".error-card")).not.toBeVisible();
+  });
+});
+
 test.describe("Config Bar — Negative Cases", () => {
   test("dropdowns are disabled while thread is running", async ({ page }) => {
     await setupWorkspace(page);

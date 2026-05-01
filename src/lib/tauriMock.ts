@@ -340,6 +340,10 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
     case "start_thread": {
       const prompt = args?.prompt as string;
+      const agent = (args?.agent as string) || "claude-code";
+      if (agent !== "claude-code") {
+        throw new Error(`unknown agent: ${agent}`);
+      }
       const threadId = crypto.randomUUID();
       const events = buildEvents(prompt);
       activeThreadMeta.set(threadId, {
@@ -354,6 +358,10 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     case "resume_thread": {
       const threadId = args?.threadId as string;
       const prompt = args?.prompt as string;
+      const agent = (args?.agent as string) || "claude-code";
+      if (agent !== "claude-code") {
+        throw new Error(`unknown agent: ${agent}`);
+      }
       const events = buildEvents(prompt);
       activeThreadMeta.set(threadId, {
         workspaceId: args?.workspaceId as string,
