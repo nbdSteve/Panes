@@ -26,13 +26,17 @@ export interface ContextUsage {
 }
 
 export function calculateContextUsage(events: AgentEvent[]): ContextUsage | null {
-  let latestInput = 0;
+  let latestTotal = 0;
   let model: string | undefined;
 
   for (const e of events) {
     if (e.event_type === "cost_update") {
-      if (e.input_tokens != null && e.input_tokens > 0) {
-        latestInput = e.input_tokens;
+      const total =
+        (e.input_tokens ?? 0) +
+        (e.cache_read_tokens ?? 0) +
+        (e.cache_creation_tokens ?? 0);
+      if (total > 0) {
+        latestTotal = total;
       }
       if (e.model) {
         model = e.model;
@@ -40,11 +44,11 @@ export function calculateContextUsage(events: AgentEvent[]): ContextUsage | null
     }
   }
 
-  if (latestInput === 0) return null;
+  if (latestTotal === 0) return null;
 
   const limit = getContextLimit(model);
-  const percentage = (latestInput / limit) * 100;
+  const percentage = (latestTotal / limit) * 100;
   const level = percentage >= 80 ? "danger" : percentage >= 40 ? "warning" : "ok";
 
-  return { inputTokens: latestInput, percentage, level };
+  return { inputTokens: latestTotal, percentage, level };
 }
