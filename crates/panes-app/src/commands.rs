@@ -613,7 +613,7 @@ pub async fn get_aggregate_cost(
 ) -> Result<f64, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let total: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs",
+        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads",
         [],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
@@ -626,7 +626,12 @@ pub async fn get_workspace_cost(
     workspace_id: String,
 ) -> Result<f64, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    panes_cost::get_workspace_cost(&conn, &workspace_id).map_err(|e| e.to_string())
+    let total: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads WHERE workspace_id = ?1",
+        rusqlite::params![workspace_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    Ok(total)
 }
 
 #[derive(Serialize)]
@@ -1054,7 +1059,7 @@ mod tests {
     fn test_get_aggregate_cost_empty() {
         let conn = setup_test_db();
         let total: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs",
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -1066,16 +1071,17 @@ mod tests {
         let conn = setup_test_db();
         insert_test_workspace(&conn, "ws1", "/tmp/ws1");
         insert_test_thread(&conn, "t1", "ws1", None);
+        insert_test_thread(&conn, "t2", "ws1", None);
         conn.execute(
-            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.05, '2024-01-01')",
+            "UPDATE threads SET cost_usd = 0.05 WHERE id = 't1'",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.03, '2024-01-02')",
+            "UPDATE threads SET cost_usd = 0.03 WHERE id = 't2'",
             [],
         ).unwrap();
         let total: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(total_usd), 0.0) FROM costs",
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -1501,17 +1507,11 @@ Body text here
         insert_test_thread(&conn, "t1", "ws1", None);
         insert_test_thread(&conn, "t2", "ws1", None);
 
-        conn.execute(
-            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t1', 'ws1', 0.10, '2024-01-01')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES ('t2', 'ws1', 0.25, '2024-01-01')",
-            [],
-        ).unwrap();
+        conn.execute("UPDATE threads SET cost_usd = 0.10 WHERE id = 't1'", []).unwrap();
+        conn.execute("UPDATE threads SET cost_usd = 0.25 WHERE id = 't2'", []).unwrap();
 
         let total: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(total_usd), 0) FROM costs WHERE workspace_id = ?1",
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM threads WHERE workspace_id = ?1",
             rusqlite::params!["ws1"],
             |row| row.get(0),
         ).unwrap();

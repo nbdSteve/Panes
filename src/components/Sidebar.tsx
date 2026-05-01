@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState, useMemo } from "react";
 import type { WorkspaceInfo, ThreadInfo } from "../App";
 import { formatCost } from "../lib/utils";
+import { workspaceDisplayCost } from "../lib/cost";
 import appIcon from "../assets/icon.png";
 
 interface SidebarProps {
@@ -32,22 +32,13 @@ export default function Sidebar({
   const [showAdd, setShowAdd] = useState(false);
   const [addPath, setAddPath] = useState("");
   const [addName, setAddName] = useState("");
-  const [workspaceCosts, setWorkspaceCosts] = useState<Record<string, number>>({});
-
-  useEffect(() => {
-    const fetchCosts = async () => {
-      const costs: Record<string, number> = {};
-      for (const ws of workspaces) {
-        try {
-          const cost = await invoke<number>("get_workspace_cost", { workspaceId: ws.id });
-          costs[ws.id] = cost;
-        } catch {
-          costs[ws.id] = 0;
-        }
-      }
-      setWorkspaceCosts(costs);
-    };
-    fetchCosts();
+  const workspaceCosts = useMemo(() => {
+    const costs: Record<string, number> = {};
+    for (const ws of workspaces) {
+      const wsThreads = threads.filter((t) => t.workspaceId === ws.id);
+      costs[ws.id] = workspaceDisplayCost(wsThreads);
+    }
+    return costs;
   }, [workspaces, threads]);
 
   const handleAdd = () => {

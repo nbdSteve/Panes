@@ -268,6 +268,9 @@ impl SessionManager {
             }
         }
 
+        self.cost_tracker
+            .start_tracking(thread_id, &workspace.id);
+
         let gate_tx: GateSender = Arc::new(Mutex::new(None));
 
         let active_thread = ActiveThread {
@@ -445,7 +448,7 @@ impl SessionManager {
                     if let Ok(conn) = db.lock() {
                         let now = Utc::now().to_rfc3339();
                         let _ = conn.execute(
-                            "UPDATE threads SET status = 'completed', summary = ?1, cost_usd = ?2, duration_ms = ?3, completed_at = ?4 WHERE id = ?5",
+                            "UPDATE threads SET status = 'completed', summary = ?1, cost_usd = cost_usd + ?2, duration_ms = ?3, completed_at = ?4 WHERE id = ?5",
                             rusqlite::params![summary, total_cost_usd, *duration_ms as i64, now, thread_id],
                         );
                     }

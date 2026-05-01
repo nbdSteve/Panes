@@ -6,7 +6,7 @@ import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs } fr
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
 import CostBadge from "./CostBadge";
-import { calculateRunningCost } from "../lib/cost";
+import { threadDisplayCost } from "../lib/cost";
 import { calculateContextUsage } from "../lib/contextUsage";
 import { normalizeModelId } from "../lib/utils";
 import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
@@ -130,7 +130,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, defaul
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
 
-  const runningCost = calculateRunningCost(events);
+  const runningCost = thread ? threadDisplayCost(thread) : 0;
   const contextUsage = calculateContextUsage(events);
 
   const visibleEvents = events.filter(

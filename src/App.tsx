@@ -54,6 +54,7 @@ export interface ThreadInfo {
   workspaceId: string;
   prompt: string;
   status: "starting" | "running" | "gate" | "complete" | "error" | "interrupted";
+  costUsd?: number;
   completionAction?: "committed" | "reverted" | "kept";
   queuedFollowUp?: string;
   events: AgentEvent[];
@@ -112,6 +113,7 @@ function App() {
             workspaceId: p.workspaceId,
             prompt: p.prompt,
             status: (p.status === "completed" ? "complete" : p.status) as ThreadInfo["status"],
+            costUsd: p.costUsd,
             events: p.events,
             createdAt: new Date(p.createdAt).getTime(),
           }));
@@ -188,56 +190,11 @@ function App() {
       return { thread_id, mapped };
     };
 
-    // Listen for batched events (new format)
-    const p1 = listen<ThreadEvent[]>("panes://thread-events", (ev) => {
-      if (cancelled) return;
-      const batch = ev.payload;
-      const processed = batch.map(processEvent).filter(Boolean) as { thread_id: string; mapped: AgentEvent }[];
-      if (processed.length === 0) return;
-
-      setThreads((prev) => {
-        let updated = [...prev];
-        for (const { thread_id, mapped } of processed) {
-          updated = updated.map((t) => {
-            if (t.id !== thread_id) return t;
-            const newStatus =
-              mapped.event_type === "complete"
-                ? "complete" as const
-                : mapped.event_type === "error"
-                  ? "error" as const
-                  : mapped.event_type === "tool_request" && mapped.needs_approval
-                    ? "gate" as const
-                    : "running" as const;
-
-            if (newStatus === "complete" && mapped.event_type === "complete") {
-              extractMemoriesFromThread(t);
-            }
-
-            if ((newStatus === "complete" || newStatus === "error") && t.queuedFollowUp) {
-              pendingResumeRef.current = { threadId: t.id, prompt: t.queuedFollowUp };
-            }
-
-            return {
-              ...t,
-              status: newStatus,
-              events: [...t.events, mapped],
-              queuedFollowUp: (newStatus === "complete" || newStatus === "error") ? undefined : t.queuedFollowUp,
-            };
-          });
-        }
-        return updated;
-      });
-    });
-
-    // Also listen for single events (backwards compat with mock/tests)
-    const p2 = listen<ThreadEvent>("panes://thread-event", (ev) => {
-      if (cancelled) return;
-      const result = processEvent(ev.payload);
-      if (!result) return;
-      const { thread_id, mapped } = result;
-
-      setThreads((prev) =>
-        prev.map((t) => {
+    const applyEvents = (prev: ThreadInfo[], items: { thread_id: string; mapped: AgentEvent }[]): ThreadInfo[] => {
+      const toExtract: ThreadInfo[] = [];
+      let updated = [...prev];
+      for (const { thread_id, mapped } of items) {
+        updated = updated.map((t) => {
           if (t.id !== thread_id) return t;
           const newStatus =
             mapped.event_type === "complete"
@@ -249,21 +206,48 @@ function App() {
                   : "running" as const;
 
           if (newStatus === "complete" && mapped.event_type === "complete") {
-            extractMemoriesFromThread(t);
+            toExtract.push(t);
           }
 
           if ((newStatus === "complete" || newStatus === "error") && t.queuedFollowUp) {
             pendingResumeRef.current = { threadId: t.id, prompt: t.queuedFollowUp };
           }
 
+          const costUsd = (newStatus === "complete" && mapped.total_cost_usd != null)
+            ? (t.costUsd ?? 0) + mapped.total_cost_usd
+            : t.costUsd;
+
           return {
             ...t,
             status: newStatus,
+            costUsd,
             events: [...t.events, mapped],
             queuedFollowUp: (newStatus === "complete" || newStatus === "error") ? undefined : t.queuedFollowUp,
           };
-        })
-      );
+        });
+      }
+      // Fire side effects outside the pure updater via microtask
+      if (toExtract.length > 0) {
+        queueMicrotask(() => toExtract.forEach(extractMemoriesFromThread));
+      }
+      return updated;
+    };
+
+    // Listen for batched events (new format)
+    const p1 = listen<ThreadEvent[]>("panes://thread-events", (ev) => {
+      if (cancelled) return;
+      const batch = ev.payload;
+      const processed = batch.map(processEvent).filter(Boolean) as { thread_id: string; mapped: AgentEvent }[];
+      if (processed.length === 0) return;
+      setThreads((prev) => applyEvents(prev, processed));
+    });
+
+    // Also listen for single events (backwards compat with mock/tests)
+    const p2 = listen<ThreadEvent>("panes://thread-event", (ev) => {
+      if (cancelled) return;
+      const result = processEvent(ev.payload);
+      if (!result) return;
+      setThreads((prev) => applyEvents(prev, [result]));
     });
 
     Promise.all([p1, p2]).then(([u1, u2]) => {
@@ -429,7 +413,7 @@ function App() {
       workspaceId: thread.workspaceId,
       threadId: thread.id,
       transcript,
-    }).catch(() => {});
+    }).catch((e) => console.error("extract_memories failed:", e));
   }, []);
 
   const activeWs = workspaces.find((w) => w.id === activeWorkspace);
