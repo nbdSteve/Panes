@@ -1,5 +1,8 @@
 # Panes
 
+[![CI](https://github.com/nbdSteve/Panes/actions/workflows/ci.yml/badge.svg)](https://github.com/nbdSteve/Panes/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/nbdSteve/Panes/branch/main/graph/badge.svg)](https://codecov.io/gh/nbdSteve/Panes)
+
 A desktop app that wraps AI coding agents with safety gates, one-click rollback, persistent memory, and cost visibility.
 
 Built with [Tauri 2](https://v2.tauri.app/) (Rust backend, React frontend). macOS only for now.
@@ -61,11 +64,20 @@ PANES_TEST_MODE=1 npx tauri dev
 ## Tests
 
 ```bash
-# Rust unit + integration tests
-cargo test --workspace
+# Rust unit tests
+cargo test --workspace --exclude panes-app
 
-# E2E tests (requires app built)
+# TypeScript type check
+npx tsc --noEmit
+
+# Frontend unit + component tests (with coverage)
+npx vitest run --coverage
+
+# E2E tests (mock Tauri backend)
 npm run test:e2e
+
+# E2E tests (full-stack, real Rust backend)
+npm run test:e2e:fullstack
 ```
 
 ## Docs

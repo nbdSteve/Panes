@@ -46,7 +46,14 @@ jobs:
 
       - run: npm ci
       - run: npx tsc --noEmit
-      - run: npx vitest run
+      - run: npx vitest run --coverage
+
+      - uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          files: coverage/lcov.info
+          flags: frontend
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   e2e-mock:
     name: E2E (Mock)
