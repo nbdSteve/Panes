@@ -27,30 +27,45 @@ test.describe("Thread Lifecycle", () => {
     await expect(page.locator(".thread-list-item")).toHaveCount(1);
   });
 
-  test("step cards are collapsible", async ({ page }) => {
+  test("tool groups are collapsible", async ({ page }) => {
     await page.goto("/");
 
     await page.click("text=Add workspace");
     await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
     await page.click("text=Add");
 
-    // Multi-step generates multiple tool cards
+    // Multi-step generates multiple tool group cards
     await page.fill("textarea", "do something complex");
     await page.press("textarea", "Enter");
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
 
-    // Step cards should be visible
-    const steps = page.locator(".step-card");
-    const count = await steps.count();
+    // Tool groups should be visible (collapsed by default)
+    const groups = page.locator(".tool-group");
+    const count = await groups.count();
     expect(count).toBeGreaterThan(2);
 
-    // Click a step card to collapse it
-    await steps.first().click();
-    await expect(steps.first().locator(".step-detail")).not.toBeVisible();
+    // Click header to expand
+    await groups.first().locator(".tool-group-header").click();
+    await expect(groups.first().locator(".tool-group-body")).toBeVisible();
+
+    // Click again to collapse
+    await groups.first().locator(".tool-group-header").click();
+    await expect(groups.first().locator(".tool-group-body")).not.toBeVisible();
   });
 
-  test.skip("thread shows elapsed time per step", async ({ page }) => {
-    // Not yet implemented: .step-elapsed UI element on tool result cards
+  test("tool groups show elapsed time", async ({ page }) => {
+    await page.goto("/");
+
+    await page.click("text=Add workspace");
+    await page.fill('input[placeholder="/path/to/project"]', "/tmp/test-ws");
+    await page.click("text=Add");
+
+    await page.fill("textarea", "do something complex");
+    await page.press("textarea", "Enter");
+    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
+
+    // At least one tool group should show elapsed time
+    await expect(page.locator(".step-elapsed").first()).toBeVisible();
   });
 
   test("thread view scrolls to bottom as new events arrive", async ({ page }) => {
