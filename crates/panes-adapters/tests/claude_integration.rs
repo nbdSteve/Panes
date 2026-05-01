@@ -6,6 +6,10 @@ use panes_events::{AgentEvent, SessionContext};
 #[tokio::test]
 async fn test_claude_adapter_end_to_end() {
     let cli_path = std::env::var("PANES_CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
+    if std::process::Command::new(&cli_path).arg("--version").output().is_err() {
+        eprintln!("skipping: claude CLI not found at '{cli_path}'");
+        return;
+    }
     let mut adapter = ClaudeAdapter::with_cli_path(cli_path);
     for key in ["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE", "PATH", "HOME"] {
         if let Ok(val) = std::env::var(key) {
@@ -64,6 +68,10 @@ async fn test_claude_adapter_end_to_end() {
 #[tokio::test]
 async fn test_claude_adapter_tool_use() {
     let cli_path = std::env::var("PANES_CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
+    if std::process::Command::new(&cli_path).arg("--version").output().is_err() {
+        eprintln!("skipping: claude CLI not found at '{cli_path}'");
+        return;
+    }
     let mut adapter = ClaudeAdapter::with_cli_path(cli_path);
     for key in ["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE", "PATH", "HOME"] {
         if let Ok(val) = std::env::var(key) {
