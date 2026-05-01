@@ -797,6 +797,9 @@ body {
 /* ─── Config bar ─── */
 
 .config-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 8px 24px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);

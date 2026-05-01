@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
-import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo } from "../App";
+import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs } from "../App";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
 import CostBadge from "./CostBadge";
@@ -20,6 +20,8 @@ interface ThreadViewProps {
   thread: ThreadInfo | null;
   adapters: string[];
   agents: AgentInfo[];
+  defaultConfig: ConfigPrefs;
+  onConfigChange: (config: ConfigPrefs) => void;
   onStartThread: (prompt: string, agent?: string, model?: string) => void;
   onCompletionAction: (threadId: string, action: "committed" | "reverted" | "kept") => void;
   onCancel: (threadId: string) => void;
@@ -27,11 +29,11 @@ interface ThreadViewProps {
   onSetBudgetCap: (workspaceId: string, budgetCap: number | null) => void;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
-  const [selectedAdapter, setSelectedAdapter] = useState(adapters[0] ?? "");
-  const [selectedAgent, setSelectedAgent] = useState("");
-  const [selectedModel, setSelectedModel] = useState("sonnet");
+  const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
+  const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
+  const [selectedModel, setSelectedModel] = useState(defaultConfig.model || "sonnet");
   const [adapterOpen, setAdapterOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
@@ -49,6 +51,10 @@ export default function ThreadView({ workspace, thread, adapters, agents, onStar
   const isRunning = thread?.status === "starting" || thread?.status === "running";
   const isActive = isRunning || thread?.status === "gate";
   const events = thread?.events ?? [];
+
+  useEffect(() => {
+    onConfigChange({ adapter: selectedAdapter, agent: selectedAgent, model: selectedModel });
+  }, [selectedAdapter, selectedAgent, selectedModel, onConfigChange]);
 
   useEffect(() => {
     if (contentRef.current) {

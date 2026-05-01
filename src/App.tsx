@@ -52,6 +52,14 @@ export interface ThreadInfo {
   createdAt: number;
 }
 
+export interface ConfigPrefs {
+  adapter: string;
+  agent: string;
+  model: string;
+}
+
+const DEFAULT_CONFIG: ConfigPrefs = { adapter: "claude-code", agent: "", model: "sonnet" };
+
 interface ThreadEvent {
   thread_id: string;
   timestamp: string;
@@ -68,6 +76,8 @@ function App() {
   const [adapters, setAdapters] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  const wsConfigRef = useRef<Map<string, ConfigPrefs>>(new Map());
+  const globalConfigRef = useRef<ConfigPrefs>(DEFAULT_CONFIG);
 
   const loadThreadsForWorkspace = useCallback(async (workspaceId: string) => {
     try {
@@ -431,11 +441,16 @@ function App() {
 
         {activeView === "workspace" && activeWs && (
           <ThreadView
-            key={activeThread ?? "new"}
+            key={activeThread ?? `new-${activeWs.id}`}
             workspace={activeWs}
             thread={currentThread ?? null}
             adapters={adapters}
             agents={agents}
+            defaultConfig={wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current}
+            onConfigChange={(config) => {
+              wsConfigRef.current.set(activeWs.id, config);
+              globalConfigRef.current = config;
+            }}
             onStartThread={(prompt, agent, model) => handleSendPrompt(activeWs, prompt, agent, model)}
             onCompletionAction={handleCompletionAction}
             onCancel={handleCancelThread}

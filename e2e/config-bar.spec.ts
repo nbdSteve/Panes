@@ -259,3 +259,91 @@ test.describe("Config Bar — Negative Cases", () => {
     await expect(triggers.nth(2)).toContainText("Opus");
   });
 });
+
+test.describe("Config Bar — Config Persistence", () => {
+  async function addWorkspace(page: any, path: string, name: string) {
+    await page.click("text=Add workspace");
+    await page.fill('input[placeholder="/path/to/project"]', path);
+    await page.fill('input[placeholder="Display name (optional)"]', name);
+    await page.click("text=Add");
+    await page.waitForSelector(".thread-list", { timeout: 5000 });
+  }
+
+  test("config persists when switching between workspaces", async ({ page }) => {
+    await page.goto("/");
+    await addWorkspace(page, "/tmp/ws-persist-a", "Alpha");
+
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    // Set Alpha to karen / Opus
+    await triggers.nth(1).click();
+    await page.click('.config-dropdown-item:has-text("karen")');
+    await triggers.nth(2).click();
+    await page.click('.config-dropdown-item:has-text("Opus")');
+
+    // Add second workspace
+    await addWorkspace(page, "/tmp/ws-persist-b", "Beta");
+
+    // Change Beta to Default / Haiku
+    await triggers.nth(1).click();
+    await page.click('.config-dropdown-item:has-text("Default")');
+    await triggers.nth(2).click();
+    await page.click('.config-dropdown-item:has-text("Haiku")');
+
+    // Switch back to Alpha — should restore karen / Opus
+    await page.click('.sidebar-item:has-text("Alpha")');
+    await expect(triggers.nth(1)).toContainText("karen");
+    await expect(triggers.nth(2)).toContainText("Opus");
+
+    // Switch back to Beta — should restore Default / Haiku
+    await page.click('.sidebar-item:has-text("Beta")');
+    await expect(triggers.nth(1)).toContainText("Default");
+    await expect(triggers.nth(2)).toContainText("Haiku");
+  });
+
+  test("new workspace inherits most recently used config", async ({ page }) => {
+    await page.goto("/");
+    await addWorkspace(page, "/tmp/ws-inherit-a", "First");
+
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    // Change config to karen / Opus
+    await triggers.nth(1).click();
+    await page.click('.config-dropdown-item:has-text("karen")');
+    await triggers.nth(2).click();
+    await page.click('.config-dropdown-item:has-text("Opus")');
+
+    // Add new workspace — should inherit karen / Opus
+    await addWorkspace(page, "/tmp/ws-inherit-b", "Second");
+    await expect(triggers.nth(1)).toContainText("karen");
+    await expect(triggers.nth(2)).toContainText("Opus");
+  });
+
+  test("config persists across new threads in same workspace", async ({ page }) => {
+    await page.goto("/");
+    await addWorkspace(page, "/tmp/ws-thread-persist", "Persist");
+
+    const triggers = page.locator(".config-dropdown-trigger");
+
+    // Set to karen / Opus then switch to Default so prompt succeeds
+    await triggers.nth(2).click();
+    await page.click('.config-dropdown-item:has-text("Opus")');
+
+    // Send a prompt to create a thread
+    await page.fill("textarea", "hello world");
+    await page.press("textarea", "Enter");
+    await page.locator(".completion-card").waitFor({ timeout: 5000 });
+
+    // Set agent to karen after completion
+    await triggers.nth(1).click();
+    await page.click('.config-dropdown-item:has-text("karen")');
+
+    // Start new thread
+    await page.click(".thread-list-new");
+    await page.waitForTimeout(300);
+
+    // Config should persist
+    await expect(triggers.nth(1)).toContainText("karen");
+    await expect(triggers.nth(2)).toContainText("Opus");
+  });
+});
