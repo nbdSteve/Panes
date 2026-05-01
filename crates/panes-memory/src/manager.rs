@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,15 +20,19 @@ const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct MemoryConfig {
     pub memory_db_path: String,
-    pub mem0_binary: Option<String>,
+    pub mem0_python: Option<String>,
+    pub mem0_server_script: String,
     pub mem0_port: u16,
-    pub mem0_data_dir: PathBuf,
     pub mem0_pin_db_path: String,
 }
 
 impl MemoryConfig {
     pub fn from_env(data_dir: &Path) -> Self {
-        let mem0_binary = std::env::var("PANES_MEM0_BINARY").ok();
+        let mem0_python = std::env::var("PANES_MEM0_PYTHON").ok();
+        let mem0_server_script = std::env::var("PANES_MEM0_SERVER_SCRIPT")
+            .unwrap_or_else(|_| {
+                concat!(env!("CARGO_MANIFEST_DIR"), "/mem0_server.py").to_string()
+            });
         let mem0_port = std::env::var("PANES_MEM0_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -36,9 +40,9 @@ impl MemoryConfig {
 
         Self {
             memory_db_path: data_dir.join("memory.db").to_string_lossy().to_string(),
-            mem0_binary,
+            mem0_python,
+            mem0_server_script,
             mem0_port,
-            mem0_data_dir: data_dir.join("mem0"),
             mem0_pin_db_path: data_dir.join("mem0_pins.db").to_string_lossy().to_string(),
         }
     }
@@ -46,9 +50,9 @@ impl MemoryConfig {
     pub fn for_test() -> Self {
         Self {
             memory_db_path: ":memory:".to_string(),
-            mem0_binary: None,
+            mem0_python: None,
+            mem0_server_script: String::new(),
             mem0_port: 0,
-            mem0_data_dir: PathBuf::new(),
             mem0_pin_db_path: ":memory:".to_string(),
         }
     }
@@ -65,8 +69,8 @@ impl MemoryManager {
     pub fn new(config: &MemoryConfig) -> Result<Self> {
         let sqlite = Arc::new(SqliteMemoryStore::new(&config.memory_db_path)?);
 
-        let (mem0, sidecar) = if let Some(ref binary) = config.mem0_binary {
-            let sidecar = SidecarManager::new(binary, &config.mem0_data_dir, config.mem0_port);
+        let (mem0, sidecar) = if let Some(ref python) = config.mem0_python {
+            let sidecar = SidecarManager::new(python, &config.mem0_server_script, config.mem0_port);
             let base_url = sidecar.base_url();
             let store = Arc::new(Mem0Store::with_pin_db(&base_url, &config.mem0_pin_db_path));
             (Some(store), Some(sidecar))
@@ -313,6 +317,7 @@ impl BriefingStore for MemoryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn sqlite_config() -> MemoryConfig {
         MemoryConfig::for_test()
@@ -403,7 +408,6 @@ mod tests {
         let dir = PathBuf::from("/tmp/panes-test");
         let config = MemoryConfig::from_env(&dir);
         assert_eq!(config.memory_db_path, "/tmp/panes-test/memory.db");
-        assert_eq!(config.mem0_data_dir, PathBuf::from("/tmp/panes-test/mem0"));
         assert_eq!(config.mem0_pin_db_path, "/tmp/panes-test/mem0_pins.db");
         assert_eq!(config.mem0_port, 8019);
     }
@@ -412,7 +416,7 @@ mod tests {
     fn test_config_for_test() {
         let config = MemoryConfig::for_test();
         assert_eq!(config.memory_db_path, ":memory:");
-        assert!(config.mem0_binary.is_none());
+        assert!(config.mem0_python.is_none());
     }
 
     #[test]
@@ -426,9 +430,9 @@ mod tests {
     async fn test_fallback_on_mem0_failure() {
         let config = MemoryConfig {
             memory_db_path: ":memory:".to_string(),
-            mem0_binary: Some("/nonexistent".to_string()),
+            mem0_python: Some("/nonexistent".to_string()),
+            mem0_server_script: String::new(),
             mem0_port: 19999,
-            mem0_data_dir: PathBuf::from("/tmp/panes-test-mem0"),
             mem0_pin_db_path: ":memory:".to_string(),
         };
         let mgr = MemoryManager::new(&config).unwrap();
@@ -450,9 +454,9 @@ mod tests {
     async fn test_fallback_preserves_briefing() {
         let config = MemoryConfig {
             memory_db_path: ":memory:".to_string(),
-            mem0_binary: Some("/nonexistent".to_string()),
+            mem0_python: Some("/nonexistent".to_string()),
+            mem0_server_script: String::new(),
             mem0_port: 19998,
-            mem0_data_dir: PathBuf::from("/tmp/panes-test-mem0-b"),
             mem0_pin_db_path: ":memory:".to_string(),
         };
         let mgr = MemoryManager::new(&config).unwrap();
@@ -484,12 +488,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_mem0_configured_true_with_binary() {
+    fn test_is_mem0_configured_true_with_python() {
         let config = MemoryConfig {
             memory_db_path: ":memory:".to_string(),
-            mem0_binary: Some("/nonexistent".to_string()),
+            mem0_python: Some("/nonexistent".to_string()),
+            mem0_server_script: String::new(),
             mem0_port: 19997,
-            mem0_data_dir: PathBuf::from("/tmp/panes-test-configured"),
             mem0_pin_db_path: ":memory:".to_string(),
         };
         let mgr = MemoryManager::new(&config).unwrap();
@@ -515,9 +519,9 @@ mod tests {
     fn test_set_active_backend_to_mem0_when_configured() {
         let config = MemoryConfig {
             memory_db_path: ":memory:".to_string(),
-            mem0_binary: Some("/nonexistent".to_string()),
+            mem0_python: Some("/nonexistent".to_string()),
+            mem0_server_script: String::new(),
             mem0_port: 19996,
-            mem0_data_dir: PathBuf::from("/tmp/panes-test-toggle"),
             mem0_pin_db_path: ":memory:".to_string(),
         };
         let mgr = MemoryManager::new(&config).unwrap();

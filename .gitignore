@@ -3,7 +3,9 @@ target/
 dist/
 *.pyc
 __pycache__/
+.venv/
 .DS_Store
+.env
 test-results/
 crates/panes-app/icons/Square*.png
 crates/panes-app/icons/StoreLogo.png

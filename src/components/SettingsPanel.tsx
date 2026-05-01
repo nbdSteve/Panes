@@ -77,7 +77,7 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
             ) : (
               <div className="settings-row">
                 <span className="settings-label settings-value muted">
-                  Mem0 not configured. Set PANES_MEM0_BINARY to enable.
+                  Mem0 not configured. Set PANES_MEM0_PYTHON to enable.
                 </span>
               </div>
             )}

@@ -64,18 +64,25 @@ impl Mem0Store {
 
 #[derive(Serialize)]
 struct AddRequest {
-    transcript: String,
+    messages: Vec<Message>,
     user_id: String,
-    thread_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
+    run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct Message {
+    role: String,
+    content: String,
 }
 
 #[derive(Serialize)]
 struct SearchRequest {
     query: String,
     user_id: String,
-    limit: usize,
+    top_k: usize,
 }
 
 #[derive(Deserialize)]
@@ -92,7 +99,7 @@ struct Mem0Memory {
 
 #[derive(Serialize)]
 struct UpdateRequest {
-    data: String,
+    text: String,
 }
 
 fn to_user_id(workspace_id: Option<&str>) -> String {
@@ -147,25 +154,41 @@ impl MemoryStore for Mem0Store {
     ) -> Result<Vec<Memory>> {
         let user_id = to_user_id(workspace_id);
 
+        let messages: Vec<Message> = transcript
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("User:") {
+                    Some(Message { role: "user".to_string(), content: rest.trim().to_string() })
+                } else if let Some(rest) = line.strip_prefix("Assistant:") {
+                    Some(Message { role: "assistant".to_string(), content: rest.trim().to_string() })
+                } else if !line.is_empty() {
+                    Some(Message { role: "user".to_string(), content: line.to_string() })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let req = AddRequest {
-            transcript: transcript.to_string(),
+            messages,
             user_id: user_id.clone(),
-            thread_id: thread_id.to_string(),
-            workspace_id: workspace_id.map(String::from),
+            run_id: Some(thread_id.to_string()),
+            metadata: workspace_id.map(|w| serde_json::json!({"workspace_id": w})),
         };
 
         let resp = self
             .client
-            .post(format!("{}/v1/memories/", self.base_url))
+            .post(format!("{}/memories", self.base_url))
             .json(&req)
             .send()
             .await
-            .context("failed to call Mem0 /add")?;
+            .context("failed to call mem0 POST /memories")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Mem0 /add failed with {status}: {body}");
+            anyhow::bail!("mem0 POST /memories failed with {status}: {body}");
         }
 
         let result: serde_json::Value = resp.json().await?;
@@ -196,21 +219,21 @@ impl MemoryStore for Mem0Store {
         let req = SearchRequest {
             query: query.to_string(),
             user_id,
-            limit,
+            top_k: limit,
         };
 
         let resp = self
             .client
-            .post(format!("{}/v1/memories/search/", self.base_url))
+            .post(format!("{}/search", self.base_url))
             .json(&req)
             .send()
             .await
-            .context("failed to call Mem0 /search")?;
+            .context("failed to call mem0 POST /search")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Mem0 /search failed with {status}: {body}");
+            anyhow::bail!("mem0 POST /search failed with {status}: {body}");
         }
 
         let result: serde_json::Value = resp.json().await?;
@@ -234,16 +257,16 @@ impl MemoryStore for Mem0Store {
 
         let resp = self
             .client
-            .get(format!("{}/v1/memories/", self.base_url))
+            .get(format!("{}/memories", self.base_url))
             .query(&[("user_id", user_id.as_str())])
             .send()
             .await
-            .context("failed to call Mem0 /memories")?;
+            .context("failed to call mem0 GET /memories")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Mem0 /memories failed with {status}: {body}");
+            anyhow::bail!("mem0 GET /memories failed with {status}: {body}");
         }
 
         let result: serde_json::Value = resp.json().await?;
@@ -264,21 +287,21 @@ impl MemoryStore for Mem0Store {
 
     async fn update(&self, id: &str, content: &str) -> Result<()> {
         let req = UpdateRequest {
-            data: content.to_string(),
+            text: content.to_string(),
         };
 
         let resp = self
             .client
-            .put(format!("{}/v1/memories/{id}/", self.base_url))
+            .put(format!("{}/memories/{id}", self.base_url))
             .json(&req)
             .send()
             .await
-            .context("failed to call Mem0 update")?;
+            .context("failed to call mem0 PUT /memories")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Mem0 update failed with {status}: {body}");
+            anyhow::bail!("mem0 PUT /memories/{id} failed with {status}: {body}");
         }
 
         Ok(())
@@ -287,15 +310,15 @@ impl MemoryStore for Mem0Store {
     async fn delete(&self, id: &str) -> Result<()> {
         let resp = self
             .client
-            .delete(format!("{}/v1/memories/{id}/", self.base_url))
+            .delete(format!("{}/memories/{id}", self.base_url))
             .send()
             .await
-            .context("failed to call Mem0 delete")?;
+            .context("failed to call mem0 DELETE /memories")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Mem0 delete failed with {status}: {body}");
+            anyhow::bail!("mem0 DELETE /memories/{id} failed with {status}: {body}");
         }
 
         let conn = self.pin_db.lock().unwrap();
@@ -484,7 +507,7 @@ mod tests {
     async fn test_add_memory_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/v1/memories/")
+            .mock("POST", "/memories")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(SINGLE_MEMORY_RESPONSE)
@@ -492,12 +515,11 @@ mod tests {
             .await;
 
         let store = Mem0Store::new(&server.url());
-        let memories = store.add("transcript", Some("ws1"), "t1").await.unwrap();
+        let memories = store.add("User: I prefer tabs", Some("ws1"), "t1").await.unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].id, "m1");
         assert_eq!(memories[0].content, "User prefers tabs");
         assert_eq!(memories[0].workspace_id.as_deref(), Some("ws1"));
-        assert_eq!(memories[0].source_thread_id, "t1");
         assert_eq!(memories[0].memory_type, MemoryType::Preference);
         assert!(!memories[0].pinned);
         mock.assert_async().await;
@@ -507,14 +529,14 @@ mod tests {
     async fn test_add_memory_api_error() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/v1/memories/")
+            .mock("POST", "/memories")
             .with_status(500)
             .with_body("internal server error")
             .create_async()
             .await;
 
         let store = Mem0Store::new(&server.url());
-        let result = store.add("transcript", Some("ws1"), "t1").await;
+        let result = store.add("User: test", Some("ws1"), "t1").await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("500"), "error should mention status code: {err_msg}");
@@ -525,7 +547,7 @@ mod tests {
     async fn test_search_returns_results() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/v1/memories/search/")
+            .mock("POST", "/search")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(SINGLE_MEMORY_RESPONSE)
@@ -544,7 +566,7 @@ mod tests {
     async fn test_search_empty_results() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/v1/memories/search/")
+            .mock("POST", "/search")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"results": []}"#)
@@ -561,7 +583,7 @@ mod tests {
     async fn test_get_all_memories() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/v1/memories/")
+            .mock("GET", "/memories")
             .match_query(mockito::Matcher::UrlEncoded("user_id".into(), "ws:ws1".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -580,7 +602,7 @@ mod tests {
     async fn test_update_memory_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("PUT", "/v1/memories/m1/")
+            .mock("PUT", "/memories/m1")
             .with_status(200)
             .with_body("{}")
             .create_async()
@@ -596,7 +618,7 @@ mod tests {
     async fn test_update_memory_failure() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("PUT", "/v1/memories/m1/")
+            .mock("PUT", "/memories/m1")
             .with_status(404)
             .with_body("not found")
             .create_async()
@@ -614,7 +636,7 @@ mod tests {
     async fn test_delete_memory_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("DELETE", "/v1/memories/m1/")
+            .mock("DELETE", "/memories/m1")
             .with_status(200)
             .with_body("{}")
             .create_async()
@@ -635,7 +657,7 @@ mod tests {
     async fn test_delete_memory_failure() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("DELETE", "/v1/memories/m1/")
+            .mock("DELETE", "/memories/m1")
             .with_status(500)
             .with_body("internal server error")
             .create_async()
@@ -653,7 +675,7 @@ mod tests {
     async fn test_get_all_applies_pin_state() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/v1/memories/")
+            .mock("GET", "/memories")
             .match_query(mockito::Matcher::UrlEncoded("user_id".into(), "ws:ws1".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -684,7 +706,7 @@ mod tests {
         let mock = server
             .mock("GET", "/health")
             .with_status(200)
-            .with_body("ok")
+            .with_body(r#"{"status": "ok"}"#)
             .create_async()
             .await;
 

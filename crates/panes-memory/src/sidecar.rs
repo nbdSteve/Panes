@@ -6,23 +6,22 @@ use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 use tracing::{error, info, warn};
 
-const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESTART_ATTEMPTS: u32 = 3;
 
 pub struct SidecarManager {
-    binary_path: PathBuf,
-    data_dir: PathBuf,
+    python_path: PathBuf,
+    server_script: PathBuf,
     port: u16,
     child: Option<Child>,
     restart_count: u32,
 }
 
 impl SidecarManager {
-    pub fn new(binary_path: impl Into<PathBuf>, data_dir: impl Into<PathBuf>, port: u16) -> Self {
+    pub fn new(python_path: impl Into<PathBuf>, server_script: impl Into<PathBuf>, port: u16) -> Self {
         Self {
-            binary_path: binary_path.into(),
-            data_dir: data_dir.into(),
+            python_path: python_path.into(),
+            server_script: server_script.into(),
             port,
             child: None,
             restart_count: 0,
@@ -34,16 +33,12 @@ impl SidecarManager {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        info!(binary = %self.binary_path.display(), port = self.port, "starting mem0 sidecar");
+        info!(python = %self.python_path.display(), port = self.port, "starting mem0 server");
 
-        std::fs::create_dir_all(&self.data_dir)
-            .context("failed to create mem0 data directory")?;
-
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("--port")
+        let mut cmd = Command::new(&self.python_path);
+        cmd.arg(&self.server_script)
+            .arg("--port")
             .arg(self.port.to_string())
-            .arg("--data-dir")
-            .arg(&self.data_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -55,28 +50,27 @@ impl SidecarManager {
             });
         }
 
-        let child = cmd.spawn().context("failed to spawn mem0 sidecar")?;
+        let child = cmd.spawn().context("failed to spawn mem0 server — is mem0ai installed?")?;
         self.child = Some(child);
 
-        // Wait for health check to pass
         let client = reqwest::Client::new();
-        let health_url = format!("{}/health", self.base_url());
+        let probe_url = format!("{}/health", self.base_url());
         let start = std::time::Instant::now();
 
         loop {
             if start.elapsed() > STARTUP_TIMEOUT {
                 self.stop().await;
-                anyhow::bail!("mem0 sidecar failed to start within {:?}", STARTUP_TIMEOUT);
+                anyhow::bail!("mem0 server failed to start within {:?}", STARTUP_TIMEOUT);
             }
 
             match client
-                .get(&health_url)
+                .get(&probe_url)
                 .timeout(Duration::from_secs(2))
                 .send()
                 .await
             {
-                Ok(resp) if resp.status().is_success() => {
-                    info!("mem0 sidecar healthy on port {}", self.port);
+                Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 422 => {
+                    info!("mem0 server ready on port {}", self.port);
                     self.restart_count = 0;
                     return Ok(());
                 }
@@ -92,7 +86,7 @@ impl SidecarManager {
             #[cfg(unix)]
             {
                 if let Some(pid) = child.id() {
-                    info!(pid, "sending SIGTERM to mem0 sidecar");
+                    info!(pid, "sending SIGTERM to mem0 server");
                     unsafe {
                         libc::kill(-(pid as i32), libc::SIGTERM);
                     }
@@ -108,18 +102,18 @@ impl SidecarManager {
 
     pub async fn restart(&mut self) -> Result<bool> {
         if self.restart_count >= MAX_RESTART_ATTEMPTS {
-            warn!("mem0 sidecar exceeded max restart attempts");
+            warn!("mem0 server exceeded max restart attempts");
             return Ok(false);
         }
 
         self.restart_count += 1;
-        warn!(attempt = self.restart_count, "restarting mem0 sidecar");
+        warn!(attempt = self.restart_count, "restarting mem0 server");
 
         self.stop().await;
         match self.start().await {
             Ok(()) => Ok(true),
             Err(e) => {
-                error!(error = %e, "failed to restart mem0 sidecar");
+                error!(error = %e, "failed to restart mem0 server");
                 Ok(false)
             }
         }
@@ -127,37 +121,6 @@ impl SidecarManager {
 
     pub fn is_running(&self) -> bool {
         self.child.is_some()
-    }
-
-    /// Spawn a background task that monitors sidecar health.
-    /// Returns a watch receiver that signals when sidecar becomes unavailable.
-    pub fn spawn_health_monitor(
-        base_url: String,
-    ) -> tokio::sync::watch::Receiver<bool> {
-        let (tx, rx) = tokio::sync::watch::channel(true);
-
-        tokio::spawn(async move {
-            let client = reqwest::Client::new();
-            let health_url = format!("{base_url}/health");
-
-            loop {
-                tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
-
-                let healthy = match client
-                    .get(&health_url)
-                    .timeout(Duration::from_secs(5))
-                    .send()
-                    .await
-                {
-                    Ok(resp) => resp.status().is_success(),
-                    Err(_) => false,
-                };
-
-                let _ = tx.send(healthy);
-            }
-        });
-
-        rx
     }
 }
 
@@ -182,44 +145,43 @@ mod tests {
 
     #[test]
     fn test_new_creates_manager() {
-        let mgr = SidecarManager::new("/usr/bin/fake", "/tmp/data", 9999);
+        let mgr = SidecarManager::new("/usr/bin/python3", "mem0_server.py", 9999);
         assert_eq!(mgr.port, 9999);
-        assert_eq!(mgr.binary_path, PathBuf::from("/usr/bin/fake"));
-        assert_eq!(mgr.data_dir, PathBuf::from("/tmp/data"));
+        assert_eq!(mgr.python_path, PathBuf::from("/usr/bin/python3"));
         assert!(mgr.child.is_none());
         assert_eq!(mgr.restart_count, 0);
     }
 
     #[test]
     fn test_base_url() {
-        let mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        let mgr = SidecarManager::new("/usr/bin/python3", "mem0_server.py", 8080);
         assert_eq!(mgr.base_url(), "http://127.0.0.1:8080");
     }
 
     #[test]
     fn test_base_url_different_port() {
-        let mgr = SidecarManager::new("/bin/x", "/tmp", 3000);
+        let mgr = SidecarManager::new("/usr/bin/python3", "mem0_server.py", 3000);
         assert_eq!(mgr.base_url(), "http://127.0.0.1:3000");
     }
 
     #[test]
     fn test_is_running_false_initially() {
-        let mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        let mgr = SidecarManager::new("/usr/bin/python3", "mem0_server.py", 8080);
         assert!(!mgr.is_running());
     }
 
     #[tokio::test]
     async fn test_stop_when_not_running() {
-        let mut mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        let mut mgr = SidecarManager::new("/usr/bin/python3", "mem0_server.py", 8080);
         mgr.stop().await;
         assert!(!mgr.is_running());
     }
 
     #[tokio::test]
-    async fn test_start_nonexistent_binary() {
+    async fn test_start_nonexistent_python() {
         let mut mgr = SidecarManager::new(
-            "/nonexistent/binary/that/does/not/exist",
-            "/tmp/panes-test-sidecar",
+            "/nonexistent/python/that/does/not/exist",
+            "mem0_server.py",
             19876,
         );
         let result = mgr.start().await;
@@ -229,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_restart_exceeds_max_attempts() {
-        let mut mgr = SidecarManager::new("/nonexistent", "/tmp", 19877);
+        let mut mgr = SidecarManager::new("/nonexistent", "mem0_server.py", 19877);
         mgr.restart_count = MAX_RESTART_ATTEMPTS;
         let result = mgr.restart().await.unwrap();
         assert!(!result);
@@ -237,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_restart_increments_count() {
-        let mut mgr = SidecarManager::new("/nonexistent", "/tmp/panes-test-sc2", 19878);
+        let mut mgr = SidecarManager::new("/nonexistent", "mem0_server.py", 19878);
         assert_eq!(mgr.restart_count, 0);
         let _ = mgr.restart().await;
         assert_eq!(mgr.restart_count, 1);
@@ -245,20 +207,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_restart_with_failed_start_returns_false() {
-        let mut mgr = SidecarManager::new("/nonexistent", "/tmp/panes-test-sc3", 19879);
+        let mut mgr = SidecarManager::new("/nonexistent", "mem0_server.py", 19879);
         let result = mgr.restart().await.unwrap();
         assert!(!result);
     }
 
     #[test]
     fn test_drop_no_panic_when_no_child() {
-        let mgr = SidecarManager::new("/bin/x", "/tmp", 8080);
+        let mgr = SidecarManager::new("/usr/bin/python3", "mem0_server.py", 8080);
         drop(mgr);
-    }
-
-    #[tokio::test]
-    async fn test_health_monitor_returns_receiver() {
-        let rx = SidecarManager::spawn_health_monitor("http://127.0.0.1:19999".to_string());
-        assert!(*rx.borrow());
     }
 }
