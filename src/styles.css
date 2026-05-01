@@ -95,6 +95,19 @@ body {
   gap: 8px;
 }
 
+.sidebar-header-action {
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+  color: var(--text-muted);
+  opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s;
+}
+.sidebar-header-action:hover,
+.sidebar-header-action.active {
+  opacity: 1;
+  color: var(--text-primary);
+}
+
 .sidebar-icon {
   width: 22px;
   height: 22px;
@@ -2174,7 +2187,3 @@ body {
   gap: 4px;
 }
 
-.sidebar-section-bottom {
-  margin-top: auto;
-  padding-bottom: 0;
-}
