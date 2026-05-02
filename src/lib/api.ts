@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parsePanesError, type PanesError } from "../types/errors";
+import type { FeatureInfo, RoutineInfo, RoutineExecution } from "../types";
 
 export interface StartThreadParams {
   workspaceId: string;
@@ -138,6 +139,39 @@ export const api = {
   getMemoryBackendStatus: () => call<MemoryBackendStatus>("get_memory_backend_status"),
   setMemoryBackend: (backend: string) =>
     call<void>("set_memory_backend", { backend }),
+
+  // Features
+  getFeatures: () => call<FeatureInfo[]>("get_features"),
+  setFeatureEnabled: (featureId: string, enabled: boolean) =>
+    call<void>("set_feature_enabled", { featureId, enabled }),
+
+  // Routines
+  createRoutine: (params: {
+    workspaceId: string;
+    prompt: string;
+    cronExpr: string;
+    budgetCap?: number | null;
+    onComplete?: string;
+    onFailure?: string;
+  }) => call<RoutineInfo>("create_routine", params as unknown as Record<string, unknown>),
+  updateRoutine: (params: {
+    routineId: string;
+    prompt?: string;
+    cronExpr?: string;
+    budgetCap?: number;
+    onComplete?: string;
+    onFailure?: string;
+  }) => call<void>("update_routine", params as unknown as Record<string, unknown>),
+  deleteRoutine: (routineId: string) =>
+    call<void>("delete_routine", { routineId }),
+  listRoutines: (workspaceId?: string) =>
+    call<RoutineInfo[]>("list_routines", { workspaceId }),
+  toggleRoutine: (routineId: string, enabled: boolean) =>
+    call<void>("toggle_routine", { routineId, enabled }),
+  listRoutineExecutions: (routineId: string, limit?: number) =>
+    call<RoutineExecution[]>("list_routine_executions", { routineId, limit }),
+  getRoutineCost: (routineId: string) =>
+    call<number>("get_routine_cost", { routineId }),
 };
 
 export type { PanesError };

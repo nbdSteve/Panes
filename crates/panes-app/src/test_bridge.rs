@@ -150,13 +150,14 @@ async fn dispatch_command(
         }
         "list_workspaces" => {
             state.db.execute(|conn| {
-                let mut stmt = conn.prepare("SELECT id, path, name, default_agent FROM workspaces ORDER BY created_at")?;
+                let mut stmt = conn.prepare("SELECT id, path, name, default_agent, budget_cap FROM workspaces ORDER BY created_at")?;
                 let rows: Vec<Value> = stmt.query_map([], |row| {
                     Ok(serde_json::json!({
                         "id": row.get::<_, String>(0)?,
                         "path": row.get::<_, String>(1)?,
                         "name": row.get::<_, String>(2)?,
                         "defaultAgent": row.get::<_, Option<String>>(3)?,
+                        "budgetCap": row.get::<_, Option<f64>>(4).unwrap_or(None),
                     }))
                 })?
                 .filter_map(|r| r.ok())
@@ -276,7 +277,7 @@ async fn dispatch_command(
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
             state.db.execute(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, workspace_id, prompt, status, cost_usd, created_at FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
+                    "SELECT id, workspace_id, prompt, status, cost_usd, created_at, is_routine, routine_id FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
                 )?;
                 let rows: Vec<Value> = stmt.query_map(rusqlite::params![workspace_id], |row| {
                     Ok(serde_json::json!({
@@ -286,6 +287,8 @@ async fn dispatch_command(
                         "status": row.get::<_, String>(3)?,
                         "costUsd": row.get::<_, f64>(4).unwrap_or(0.0),
                         "createdAt": row.get::<_, String>(5)?,
+                        "isRoutine": row.get::<_, i32>(6).unwrap_or(0) != 0,
+                        "routineId": row.get::<_, Option<String>>(7).unwrap_or(None),
                         "events": [],
                     }))
                 })?
@@ -297,7 +300,7 @@ async fn dispatch_command(
         "list_all_threads" => {
             state.db.execute(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, workspace_id, prompt, status, cost_usd, summary, duration_ms, created_at FROM threads ORDER BY created_at DESC LIMIT 100"
+                    "SELECT id, workspace_id, prompt, status, cost_usd, summary, duration_ms, created_at, is_routine, routine_id FROM threads ORDER BY created_at DESC LIMIT 100"
                 )?;
                 let rows: Vec<Value> = stmt.query_map([], |row| {
                     Ok(serde_json::json!({
@@ -309,6 +312,8 @@ async fn dispatch_command(
                         "summary": row.get::<_, Option<String>>(5).unwrap_or(None),
                         "durationMs": row.get::<_, Option<i64>>(6).unwrap_or(None),
                         "createdAt": row.get::<_, String>(7)?,
+                        "isRoutine": row.get::<_, i32>(8).unwrap_or(0) != 0,
+                        "routineId": row.get::<_, Option<String>>(9).unwrap_or(None),
                         "events": [],
                     }))
                 })?
@@ -333,6 +338,10 @@ async fn dispatch_command(
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
             state.db.execute(move |conn| {
                 let tx = conn.unchecked_transaction()?;
+                if panes_core::db::routine_tables_exist(conn) {
+                    tx.execute("DELETE FROM routine_executions WHERE routine_id IN (SELECT id FROM routines WHERE workspace_id = ?1)", rusqlite::params![workspace_id])?;
+                    tx.execute("DELETE FROM routines WHERE workspace_id = ?1", rusqlite::params![workspace_id])?;
+                }
                 tx.execute("DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)", rusqlite::params![workspace_id])?;
                 tx.execute("DELETE FROM costs WHERE workspace_id = ?1", rusqlite::params![workspace_id])?;
                 tx.execute("DELETE FROM threads WHERE workspace_id = ?1", rusqlite::params![workspace_id])?;
@@ -513,6 +522,185 @@ async fn dispatch_command(
         "set_memory_backend" => {
             let backend = args["backend"].as_str().ok_or("missing backend")?;
             state.memory_manager.set_active_backend(backend).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "get_features" => {
+            let features: Vec<Value> = state.db.execute(|conn| {
+                let features = panes_core::features::list_features(conn)?;
+                Ok(features.into_iter().map(|f| serde_json::json!({
+                    "id": f.id,
+                    "enabled": f.enabled,
+                    "label": f.label,
+                    "description": f.description,
+                })).collect())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Array(features))
+        }
+        "set_feature_enabled" => {
+            let feature_id = args["featureId"].as_str().ok_or("missing featureId")?.to_string();
+            let enabled = args["enabled"].as_bool().ok_or("missing enabled")?;
+            let fid = feature_id.clone();
+            state.db.execute(move |conn| {
+                panes_core::features::set_feature_enabled(conn, &fid, enabled)?;
+                if fid == panes_core::features::FEATURE_ROUTINES && enabled {
+                    panes_core::db::create_routine_tables(conn)?;
+                }
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "create_routine" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            let prompt = args["prompt"].as_str().ok_or("missing prompt")?.to_string();
+            let cron_expr = args["cronExpr"].as_str().ok_or("missing cronExpr")?.to_string();
+            let budget_cap = args["budgetCap"].as_f64();
+            let on_complete = args["onComplete"].as_str().unwrap_or(r#"{"action":"notify"}"#).to_string();
+            let on_failure = args["onFailure"].as_str().unwrap_or(r#"{"action":"notify"}"#).to_string();
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let rid = id.clone();
+            let ts = now.clone();
+            state.db.execute(move |conn| {
+                conn.execute(
+                    "INSERT INTO routines (id, workspace_id, prompt, cron_expr, budget_cap, on_complete, on_failure, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![rid, workspace_id, prompt, cron_expr, budget_cap, on_complete, on_failure, ts],
+                )?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({
+                "id": id,
+                "workspaceId": args["workspaceId"],
+                "prompt": args["prompt"],
+                "cronExpr": args["cronExpr"],
+                "budgetCap": args["budgetCap"],
+                "onComplete": serde_json::from_str::<Value>(&args["onComplete"].as_str().unwrap_or(r#"{"action":"notify"}"#)).unwrap_or(Value::Null),
+                "onFailure": serde_json::from_str::<Value>(&args["onFailure"].as_str().unwrap_or(r#"{"action":"notify"}"#)).unwrap_or(Value::Null),
+                "enabled": true,
+                "lastRunAt": null,
+                "createdAt": now,
+            }))
+        }
+        "list_routines" => {
+            let workspace_id = args["workspaceId"].as_str().map(|s| s.to_string());
+            let routines: Vec<Value> = state.db.execute(move |conn| {
+                let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &workspace_id {
+                    Some(wid) => (
+                        "SELECT id, workspace_id, prompt, cron_expr, budget_cap, on_complete, on_failure, enabled, last_run_at, created_at FROM routines WHERE workspace_id = ?1 ORDER BY created_at DESC",
+                        vec![Box::new(wid.clone())],
+                    ),
+                    None => (
+                        "SELECT id, workspace_id, prompt, cron_expr, budget_cap, on_complete, on_failure, enabled, last_run_at, created_at FROM routines ORDER BY created_at DESC",
+                        vec![],
+                    ),
+                };
+                let mut stmt = conn.prepare(sql)?;
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+                let rows = stmt.query_map(params_refs.as_slice(), |row| {
+                    let oc: String = row.get(5)?;
+                    let of: String = row.get(6)?;
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "workspaceId": row.get::<_, String>(1)?,
+                        "prompt": row.get::<_, String>(2)?,
+                        "cronExpr": row.get::<_, String>(3)?,
+                        "budgetCap": row.get::<_, Option<f64>>(4)?,
+                        "onComplete": serde_json::from_str::<Value>(&oc).unwrap_or(Value::Null),
+                        "onFailure": serde_json::from_str::<Value>(&of).unwrap_or(Value::Null),
+                        "enabled": row.get::<_, bool>(7)?,
+                        "lastRunAt": row.get::<_, Option<String>>(8)?,
+                        "createdAt": row.get::<_, String>(9)?,
+                    }))
+                })?;
+                let mut result = Vec::new();
+                for row in rows { result.push(row?); }
+                Ok(result)
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Array(routines))
+        }
+        "toggle_routine" => {
+            let routine_id = args["routineId"].as_str().ok_or("missing routineId")?.to_string();
+            let enabled = args["enabled"].as_bool().ok_or("missing enabled")?;
+            state.db.execute(move |conn| {
+                conn.execute("UPDATE routines SET enabled = ?1 WHERE id = ?2", rusqlite::params![enabled, routine_id])?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_routine" => {
+            let routine_id = args["routineId"].as_str().ok_or("missing routineId")?.to_string();
+            state.db.execute(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                tx.execute("DELETE FROM routine_executions WHERE routine_id = ?1", rusqlite::params![routine_id])?;
+                tx.execute("DELETE FROM routines WHERE id = ?1", rusqlite::params![routine_id])?;
+                tx.commit()?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "update_routine" => {
+            let routine_id = args["routineId"].as_str().ok_or("missing routineId")?.to_string();
+            let prompt = args["prompt"].as_str().map(|s| s.to_string());
+            let cron_expr = args["cronExpr"].as_str().map(|s| s.to_string());
+            let budget_cap = args["budgetCap"].as_f64();
+            let on_complete = args["onComplete"].as_str().map(|s| s.to_string());
+            let on_failure = args["onFailure"].as_str().map(|s| s.to_string());
+            state.db.execute(move |conn| {
+                if let Some(p) = prompt { conn.execute("UPDATE routines SET prompt = ?1 WHERE id = ?2", rusqlite::params![p, routine_id])?; }
+                if let Some(ce) = cron_expr { conn.execute("UPDATE routines SET cron_expr = ?1 WHERE id = ?2", rusqlite::params![ce, routine_id])?; }
+                if let Some(bc) = budget_cap { conn.execute("UPDATE routines SET budget_cap = ?1 WHERE id = ?2", rusqlite::params![bc, routine_id])?; }
+                if let Some(oc) = on_complete { conn.execute("UPDATE routines SET on_complete = ?1 WHERE id = ?2", rusqlite::params![oc, routine_id])?; }
+                if let Some(of) = on_failure { conn.execute("UPDATE routines SET on_failure = ?1 WHERE id = ?2", rusqlite::params![of, routine_id])?; }
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "list_routine_executions" => {
+            let routine_id = args["routineId"].as_str().ok_or("missing routineId")?.to_string();
+            let limit = args["limit"].as_u64().unwrap_or(50) as u32;
+            let execs: Vec<Value> = state.db.execute(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, routine_id, thread_id, status, cost_usd, started_at, completed_at, error_message
+                     FROM routine_executions WHERE routine_id = ?1 ORDER BY started_at DESC LIMIT ?2"
+                )?;
+                let rows = stmt.query_map(rusqlite::params![routine_id, limit], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "routineId": row.get::<_, String>(1)?,
+                        "threadId": row.get::<_, Option<String>>(2)?,
+                        "status": row.get::<_, String>(3)?,
+                        "costUsd": row.get::<_, f64>(4)?,
+                        "startedAt": row.get::<_, String>(5)?,
+                        "completedAt": row.get::<_, Option<String>>(6)?,
+                        "errorMessage": row.get::<_, Option<String>>(7)?,
+                    }))
+                })?;
+                let mut result = Vec::new();
+                for row in rows { result.push(row?); }
+                Ok(result)
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Array(execs))
+        }
+        "get_routine_cost" => {
+            let routine_id = args["routineId"].as_str().ok_or("missing routineId")?.to_string();
+            let total: f64 = state.db.execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM routine_executions WHERE routine_id = ?1",
+                    rusqlite::params![routine_id], |row| row.get(0),
+                )?)
+            }).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(total))
+        }
+        "set_workspace_default_agent" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            let agent = args["agent"].as_str().ok_or("missing agent")?.to_string();
+            state.db.execute(move |conn| {
+                conn.execute(
+                    "UPDATE workspaces SET default_agent = ?1 WHERE id = ?2",
+                    rusqlite::params![agent, workspace_id],
+                )?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         _ => Err(format!("unknown command: {cmd}")),

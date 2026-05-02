@@ -6,6 +6,7 @@ members = [
     "crates/panes-memory",
     "crates/panes-cost",
     "crates/panes-core",
+    "crates/panes-scheduler",
     "crates/panes-app",
 ]
 
@@ -29,3 +30,4 @@ panes-adapters = { path = "crates/panes-adapters" }
 panes-memory = { path = "crates/panes-memory" }
 panes-cost = { path = "crates/panes-cost" }
 panes-core = { path = "crates/panes-core" }
+panes-scheduler = { path = "crates/panes-scheduler" }

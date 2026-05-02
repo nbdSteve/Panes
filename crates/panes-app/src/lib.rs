@@ -10,6 +10,7 @@ use panes_core::session::SessionManager;
 use panes_cost::CostTracker;
 use panes_events::{RiskLevel, ThreadEvent};
 use panes_memory::manager::{MemoryConfig, MemoryManager};
+use panes_scheduler::Scheduler;
 use tauri::Emitter;
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
@@ -63,12 +64,7 @@ pub fn run() {
         SessionManager::new(cost_tracker.clone(), event_tx, db.clone()),
     );
 
-    let bridge_tx: Option<broadcast::Sender<ThreadEvent>> = if test_mode {
-        let (tx, _) = broadcast::channel(256);
-        Some(tx)
-    } else {
-        None
-    };
+    let (broadcast_tx, _) = broadcast::channel::<ThreadEvent>(256);
 
     if test_mode {
         register_fake_adapters(&mut session_manager);
@@ -86,27 +82,37 @@ pub fn run() {
 
     let session_arc = Arc::new(tokio::sync::Mutex::new(session_manager));
 
+    let scheduler = Arc::new(Scheduler::new(
+        db.clone(),
+        session_arc.clone(),
+        memory_manager.clone(),
+        broadcast_tx.clone(),
+    ));
+
     let bridge_session = session_arc.clone();
     let bridge_cost = cost_tracker.clone();
     let bridge_db = db.clone();
     let bridge_memory = memory_manager.clone();
+    let startup_scheduler = scheduler.clone();
+    let startup_db = db.clone();
 
     tauri::Builder::default()
         .manage(session_arc)
         .manage(cost_tracker)
         .manage(db)
         .manage(memory_manager.clone())
+        .manage(scheduler)
         .setup(move |app| {
             let handle = app.handle().clone();
             let event_rx = Arc::new(tokio::sync::Mutex::new(event_rx));
 
-            if let Some(ref tx) = bridge_tx {
+            if test_mode {
                 test_bridge::start_test_bridge(
                     bridge_session,
                     bridge_cost,
                     bridge_db,
                     bridge_memory,
-                    tx.clone(),
+                    broadcast_tx.clone(),
                 );
             }
 
@@ -116,7 +122,23 @@ pub fn run() {
                 init_mgr.spawn_health_monitor();
             });
 
-            tauri::async_runtime::spawn(forward_events(handle, event_rx, bridge_tx));
+            tauri::async_runtime::spawn(async move {
+                let enabled = startup_db
+                    .execute(|conn| {
+                        Ok(panes_core::features::is_feature_enabled(
+                            conn,
+                            panes_core::features::FEATURE_ROUTINES,
+                        )
+                        .unwrap_or(false))
+                    })
+                    .await
+                    .unwrap_or(false);
+                if enabled {
+                    startup_scheduler.start();
+                }
+            });
+
+            tauri::async_runtime::spawn(forward_events(handle, event_rx, broadcast_tx));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -152,6 +174,15 @@ pub fn run() {
             commands::get_workspace_cost,
             commands::get_memory_backend_status,
             commands::set_memory_backend,
+            commands::get_features,
+            commands::set_feature_enabled,
+            commands::create_routine,
+            commands::update_routine,
+            commands::delete_routine,
+            commands::list_routines,
+            commands::toggle_routine,
+            commands::list_routine_executions,
+            commands::get_routine_cost,
         ])
         .run(tauri::generate_context!())
         .expect("error running panes");
@@ -330,7 +361,7 @@ fn route_prompt(prompt: &str) -> FakeScenario {
 async fn forward_events(
     handle: tauri::AppHandle,
     event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ThreadEvent>>>,
-    bridge_tx: Option<broadcast::Sender<ThreadEvent>>,
+    broadcast_tx: broadcast::Sender<ThreadEvent>,
 ) {
     let mut rx = event_rx.lock().await;
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -347,10 +378,8 @@ async fn forward_events(
                     info!(thread_id = %event.thread_id, event = ?event.event, "forwarding event to frontend");
                 }
                 let _ = handle.emit("panes://thread-events", &batch);
-                if let Some(ref tx) = bridge_tx {
-                    for event in batch {
-                        let _ = tx.send(event);
-                    }
+                for event in batch {
+                    let _ = broadcast_tx.send(event);
                 }
             }
             _ = interval.tick() => {
@@ -363,10 +392,8 @@ async fn forward_events(
                         info!(thread_id = %event.thread_id, event = ?event.event, "forwarding event to frontend");
                     }
                     let _ = handle.emit("panes://thread-events", &batch);
-                    if let Some(ref tx) = bridge_tx {
-                        for event in batch {
-                            let _ = tx.send(event);
-                        }
+                    for event in batch {
+                        let _ = broadcast_tx.send(event);
                     }
                 }
             }

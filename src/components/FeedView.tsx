@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import type { WorkspaceInfo } from "../App";
 import { timeAgo, formatCost, truncatePrompt } from "../lib/utils";
 import FluidBackground from "./FluidBackground";
+import RoutineBadge from "./RoutineBadge";
 
 interface BackendThread {
   id: string;
@@ -14,6 +15,8 @@ interface BackendThread {
   durationMs: number | null;
   createdAt: string;
   events: unknown[];
+  isRoutine?: boolean;
+  routineId?: string;
 }
 
 interface FeedViewProps {
@@ -92,7 +95,10 @@ export default function FeedView({
           >
             <span className={`feed-item-outcome ${outcomeClass(thread.status)}`} />
             <div className="feed-item-body">
-              <div className="feed-item-workspace">{workspaceName(thread.workspaceId)}</div>
+              <div className="feed-item-workspace">
+                {workspaceName(thread.workspaceId)}
+                {thread.isRoutine && <RoutineBadge />}
+              </div>
               <div className="feed-item-prompt">{truncatePrompt(thread.prompt)}</div>
             </div>
             <div className="feed-item-meta">

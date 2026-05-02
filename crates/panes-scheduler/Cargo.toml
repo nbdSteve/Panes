@@ -1,0 +1,23 @@
+[package]
+name = "panes-scheduler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+panes-events = { workspace = true }
+panes-core = { workspace = true }
+panes-memory = { workspace = true }
+panes-cost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+rusqlite = { workspace = true }
+cron = "0.15"
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+tempfile = "3"

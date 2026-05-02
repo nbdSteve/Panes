@@ -12,7 +12,9 @@ panes-adapters = { workspace = true }
 panes-memory = { workspace = true }
 panes-cost = { workspace = true }
 panes-core = { workspace = true }
+panes-scheduler = { workspace = true }
 serde = { workspace = true }
+cron = "0.15"
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

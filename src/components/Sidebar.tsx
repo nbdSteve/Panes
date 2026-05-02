@@ -8,10 +8,13 @@ interface SidebarProps {
   workspaces: WorkspaceInfo[];
   threads: ThreadInfo[];
   activeWorkspace: string | null;
-  activeView: "workspace" | "feed" | "memory" | "settings";
+  activeView: "workspace" | "feed" | "memory" | "settings" | "routines";
+  routinesEnabled: boolean;
+  routineCount: number;
   onSelectWorkspace: (id: string) => void;
   onSelectFeed: () => void;
   onSelectMemory: (workspaceId: string) => void;
+  onSelectRoutines: (workspaceId: string) => void;
   onSelectSettings: () => void;
   onAddWorkspace: (ws: WorkspaceInfo) => void;
   onRemoveWorkspace: (id: string) => void;
@@ -22,9 +25,12 @@ export default function Sidebar({
   threads,
   activeWorkspace,
   activeView,
+  routinesEnabled,
+  routineCount,
   onSelectWorkspace,
   onSelectFeed,
   onSelectMemory,
+  onSelectRoutines,
   onSelectSettings,
   onAddWorkspace,
   onRemoveWorkspace,
@@ -170,6 +176,21 @@ export default function Sidebar({
             </svg>
             Memory
           </div>
+          {routinesEnabled && (
+            <div
+              className={`sidebar-item ${activeView === "routines" ? "active" : ""}`}
+              onClick={() => onSelectRoutines(activeWorkspace)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+              Routines
+              {routineCount > 0 && (
+                <span className="thread-count">{routineCount}</span>
+              )}
+            </div>
+          )}
         </div>
       )}
 

@@ -8,6 +8,7 @@ use panes_core::session::{SessionManager, Workspace};
 use panes_events::SessionContext;
 use panes_memory::manager::MemoryManager;
 use panes_memory::{BriefingStore, MemoryStore};
+use panes_scheduler::Scheduler;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -15,6 +16,7 @@ use uuid::Uuid;
 type SessionState = Arc<Mutex<SessionManager>>;
 pub(crate) type DbState = DbHandle;
 pub(crate) type MemoryManagerState = Arc<MemoryManager>;
+pub(crate) type SchedulerState = Arc<Scheduler>;
 
 fn resolve_agent_name(agent: Option<String>) -> String {
     agent.filter(|s| !s.is_empty()).unwrap_or_else(|| "claude-code".to_string())
@@ -107,6 +109,16 @@ pub async fn remove_workspace(
 ) -> Result<(), PanesError> {
     db.execute(move |conn| {
         let tx = conn.unchecked_transaction()?;
+        if panes_core::db::routine_tables_exist(conn) {
+            tx.execute(
+                "DELETE FROM routine_executions WHERE routine_id IN (SELECT id FROM routines WHERE workspace_id = ?1)",
+                rusqlite::params![workspace_id],
+            )?;
+            tx.execute(
+                "DELETE FROM routines WHERE workspace_id = ?1",
+                rusqlite::params![workspace_id],
+            )?;
+        }
         tx.execute(
             "DELETE FROM events WHERE thread_id IN (SELECT id FROM threads WHERE workspace_id = ?1)",
             rusqlite::params![workspace_id],
@@ -140,6 +152,8 @@ pub struct ThreadInfo {
     pub duration_ms: Option<i64>,
     pub created_at: String,
     pub events: Vec<serde_json::Value>,
+    pub is_routine: bool,
+    pub routine_id: Option<String>,
 }
 
 #[tauri::command]
@@ -149,7 +163,7 @@ pub async fn list_threads(
 ) -> Result<Vec<ThreadInfo>, PanesError> {
     db.execute(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
+            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id
              FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
         )?;
 
@@ -164,6 +178,8 @@ pub async fn list_threads(
                 duration_ms: row.get(6)?,
                 created_at: row.get(7)?,
                 events: vec![],
+                is_routine: row.get::<_, i32>(8).unwrap_or(0) != 0,
+                routine_id: row.get(9)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -201,7 +217,7 @@ pub async fn list_all_threads(
     let limit = limit.unwrap_or(100);
     db.execute(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at
+            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id
              FROM threads ORDER BY created_at DESC LIMIT ?1"
         )?;
 
@@ -216,6 +232,8 @@ pub async fn list_all_threads(
                 duration_ms: row.get(6)?,
                 created_at: row.get(7)?,
                 events: vec![],
+                is_routine: row.get::<_, i32>(8).unwrap_or(0) != 0,
+                routine_id: row.get(9)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -790,6 +808,326 @@ pub async fn set_workspace_budget_cap(
     }).await.map_err(PanesError::from)
 }
 
+// --- Feature toggle commands ---
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureInfo {
+    pub id: String,
+    pub enabled: bool,
+    pub label: String,
+    pub description: String,
+}
+
+#[tauri::command]
+pub async fn get_features(
+    db: tauri::State<'_, DbState>,
+) -> Result<Vec<FeatureInfo>, PanesError> {
+    db.execute(|conn| {
+        let features = panes_core::features::list_features(conn)?;
+        Ok(features.into_iter().map(|f| FeatureInfo {
+            id: f.id,
+            enabled: f.enabled,
+            label: f.label,
+            description: f.description,
+        }).collect())
+    }).await.map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn set_feature_enabled(
+    db: tauri::State<'_, DbState>,
+    scheduler: tauri::State<'_, SchedulerState>,
+    feature_id: String,
+    enabled: bool,
+) -> Result<(), PanesError> {
+    let fid = feature_id.clone();
+    db.execute(move |conn| {
+        panes_core::features::set_feature_enabled(conn, &fid, enabled)?;
+        if fid == panes_core::features::FEATURE_ROUTINES && enabled {
+            panes_core::db::create_routine_tables(conn)?;
+        }
+        Ok(())
+    }).await.map_err(PanesError::from)?;
+
+    if feature_id == panes_core::features::FEATURE_ROUTINES {
+        if enabled {
+            scheduler.start();
+        } else {
+            scheduler.stop().await;
+        }
+    }
+    Ok(())
+}
+
+// --- Routine CRUD commands ---
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineInfo {
+    pub id: String,
+    pub workspace_id: String,
+    pub prompt: String,
+    pub cron_expr: String,
+    pub budget_cap: Option<f64>,
+    pub on_complete: serde_json::Value,
+    pub on_failure: serde_json::Value,
+    pub enabled: bool,
+    pub last_run_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineExecutionInfo {
+    pub id: String,
+    pub routine_id: String,
+    pub thread_id: Option<String>,
+    pub status: String,
+    pub cost_usd: f64,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub error_message: Option<String>,
+}
+
+fn require_routines_enabled(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    if !panes_core::features::is_feature_enabled(conn, panes_core::features::FEATURE_ROUTINES)? {
+        anyhow::bail!("Routines feature is not enabled");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn create_routine(
+    db: tauri::State<'_, DbState>,
+    workspace_id: String,
+    prompt: String,
+    cron_expr: String,
+    budget_cap: Option<f64>,
+    on_complete: Option<String>,
+    on_failure: Option<String>,
+) -> Result<RoutineInfo, PanesError> {
+    // Normalize 5-field cron (standard) to 6-field (cron crate requires seconds)
+    let cron_expr = if cron_expr.split_whitespace().count() == 5 {
+        format!("0 {cron_expr}")
+    } else {
+        cron_expr
+    };
+
+    use std::str::FromStr;
+    cron::Schedule::from_str(&cron_expr).map_err(|e| PanesError::ValidationError {
+        message: format!("Invalid cron expression: {e}"),
+    })?;
+
+    // Validate action JSON if provided
+    let on_complete_json = on_complete.unwrap_or_else(|| r#"{"action":"notify"}"#.to_string());
+    let on_failure_json = on_failure.unwrap_or_else(|| r#"{"action":"notify"}"#.to_string());
+    serde_json::from_str::<panes_scheduler::ScheduleAction>(&on_complete_json)
+        .map_err(|e| PanesError::ValidationError { message: format!("Invalid on_complete action: {e}") })?;
+    serde_json::from_str::<panes_scheduler::ScheduleAction>(&on_failure_json)
+        .map_err(|e| PanesError::ValidationError { message: format!("Invalid on_failure action: {e}") })?;
+
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let rid = id.clone();
+    let wid = workspace_id.clone();
+    let p = prompt.clone();
+    let ce = cron_expr.clone();
+    let bc = budget_cap;
+    let oc = on_complete_json.clone();
+    let of = on_failure_json.clone();
+    let ts = now.clone();
+
+    db.execute(move |conn| {
+        require_routines_enabled(conn)?;
+        conn.execute(
+            "INSERT INTO routines (id, workspace_id, prompt, cron_expr, budget_cap, on_complete, on_failure, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![rid, wid, p, ce, bc, oc, of, ts],
+        )?;
+        Ok(())
+    }).await.map_err(PanesError::from)?;
+
+    Ok(RoutineInfo {
+        id,
+        workspace_id,
+        prompt,
+        cron_expr,
+        budget_cap,
+        on_complete: serde_json::from_str(&on_complete_json).unwrap_or(serde_json::Value::Null),
+        on_failure: serde_json::from_str(&on_failure_json).unwrap_or(serde_json::Value::Null),
+        enabled: true,
+        last_run_at: None,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn update_routine(
+    db: tauri::State<'_, DbState>,
+    routine_id: String,
+    prompt: Option<String>,
+    cron_expr: Option<String>,
+    budget_cap: Option<Option<f64>>,
+    on_complete: Option<String>,
+    on_failure: Option<String>,
+) -> Result<(), PanesError> {
+    let cron_expr = cron_expr.map(|ce| {
+        if ce.split_whitespace().count() == 5 { format!("0 {ce}") } else { ce }
+    });
+    if let Some(ref ce) = cron_expr {
+        use std::str::FromStr;
+        cron::Schedule::from_str(ce).map_err(|e| PanesError::ValidationError {
+            message: format!("Invalid cron expression: {e}"),
+        })?;
+    }
+
+    db.execute(move |conn| {
+        require_routines_enabled(conn)?;
+        if let Some(p) = prompt {
+            conn.execute("UPDATE routines SET prompt = ?1 WHERE id = ?2", rusqlite::params![p, routine_id])?;
+        }
+        if let Some(ce) = cron_expr {
+            conn.execute("UPDATE routines SET cron_expr = ?1 WHERE id = ?2", rusqlite::params![ce, routine_id])?;
+        }
+        if let Some(bc) = budget_cap {
+            conn.execute("UPDATE routines SET budget_cap = ?1 WHERE id = ?2", rusqlite::params![bc, routine_id])?;
+        }
+        if let Some(oc) = on_complete {
+            conn.execute("UPDATE routines SET on_complete = ?1 WHERE id = ?2", rusqlite::params![oc, routine_id])?;
+        }
+        if let Some(of) = on_failure {
+            conn.execute("UPDATE routines SET on_failure = ?1 WHERE id = ?2", rusqlite::params![of, routine_id])?;
+        }
+        Ok(())
+    }).await.map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn delete_routine(
+    db: tauri::State<'_, DbState>,
+    routine_id: String,
+) -> Result<(), PanesError> {
+    db.execute(move |conn| {
+        require_routines_enabled(conn)?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM routine_executions WHERE routine_id = ?1", rusqlite::params![routine_id])?;
+        tx.execute("DELETE FROM routines WHERE id = ?1", rusqlite::params![routine_id])?;
+        tx.commit()?;
+        Ok(())
+    }).await.map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn list_routines(
+    db: tauri::State<'_, DbState>,
+    workspace_id: Option<String>,
+) -> Result<Vec<RoutineInfo>, PanesError> {
+    db.execute(move |conn| {
+        require_routines_enabled(conn)?;
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &workspace_id {
+            Some(wid) => (
+                "SELECT id, workspace_id, prompt, cron_expr, budget_cap, on_complete, on_failure, enabled, last_run_at, created_at
+                 FROM routines WHERE workspace_id = ?1 ORDER BY created_at DESC",
+                vec![Box::new(wid.clone())],
+            ),
+            None => (
+                "SELECT id, workspace_id, prompt, cron_expr, budget_cap, on_complete, on_failure, enabled, last_run_at, created_at
+                 FROM routines ORDER BY created_at DESC",
+                vec![],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let on_complete_str: String = row.get(5)?;
+            let on_failure_str: String = row.get(6)?;
+            Ok(RoutineInfo {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                prompt: row.get(2)?,
+                cron_expr: row.get(3)?,
+                budget_cap: row.get(4)?,
+                on_complete: serde_json::from_str(&on_complete_str).unwrap_or(serde_json::Value::Null),
+                on_failure: serde_json::from_str(&on_failure_str).unwrap_or(serde_json::Value::Null),
+                enabled: row.get(7)?,
+                last_run_at: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        let mut routines = Vec::new();
+        for row in rows {
+            routines.push(row?);
+        }
+        Ok(routines)
+    }).await.map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn toggle_routine(
+    db: tauri::State<'_, DbState>,
+    routine_id: String,
+    enabled: bool,
+) -> Result<(), PanesError> {
+    db.execute(move |conn| {
+        require_routines_enabled(conn)?;
+        conn.execute(
+            "UPDATE routines SET enabled = ?1 WHERE id = ?2",
+            rusqlite::params![enabled, routine_id],
+        )?;
+        Ok(())
+    }).await.map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn list_routine_executions(
+    db: tauri::State<'_, DbState>,
+    routine_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<RoutineExecutionInfo>, PanesError> {
+    let lim = limit.unwrap_or(50);
+    db.execute(move |conn| {
+        require_routines_enabled(conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, routine_id, thread_id, status, cost_usd, started_at, completed_at, error_message
+             FROM routine_executions WHERE routine_id = ?1 ORDER BY started_at DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![routine_id, lim], |row| {
+            Ok(RoutineExecutionInfo {
+                id: row.get(0)?,
+                routine_id: row.get(1)?,
+                thread_id: row.get(2)?,
+                status: row.get(3)?,
+                cost_usd: row.get(4)?,
+                started_at: row.get(5)?,
+                completed_at: row.get(6)?,
+                error_message: row.get(7)?,
+            })
+        })?;
+        let mut execs = Vec::new();
+        for row in rows {
+            execs.push(row?);
+        }
+        Ok(execs)
+    }).await.map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn get_routine_cost(
+    db: tauri::State<'_, DbState>,
+    routine_id: String,
+) -> Result<f64, PanesError> {
+    db.execute(move |conn| {
+        require_routines_enabled(conn)?;
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM routine_executions WHERE routine_id = ?1",
+            rusqlite::params![routine_id],
+            |row| row.get(0),
+        )?)
+    }).await.map_err(PanesError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,6 +1580,8 @@ Body text here
             duration_ms: Some(1000),
             created_at: "2024-01-01".to_string(),
             events: vec![],
+            is_routine: false,
+            routine_id: None,
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(json.contains("\"workspaceId\""));

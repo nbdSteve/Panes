@@ -12,6 +12,7 @@ import { normalizeModelId } from "../lib/utils";
 import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
 import { collectTestResults, parseGitStatus, collectFilesChanged, FILE_WRITE_TOOLS } from "../lib/threadHelpers";
 import TranscriptView from "./TranscriptView";
+import RoutineBadge from "./RoutineBadge";
 
 interface ThreadViewProps {
   workspace: WorkspaceInfo;
@@ -138,6 +139,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
       <div className="thread-header">
         <div className="thread-header-left">
           <span className="thread-header-title">{workspace.name}</span>
+          {thread?.isRoutine && <RoutineBadge />}
           {isRunning && (
             <span className="thread-header-status">
               <span className="dot" />

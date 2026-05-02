@@ -138,14 +138,67 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_costs_thread ON costs(thread_id);
         CREATE INDEX IF NOT EXISTS idx_costs_workspace ON costs(workspace_id);
+
+        CREATE TABLE IF NOT EXISTS features (
+            id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0
+        );
         ",
     )
     .context("failed to run database migrations")?;
 
     // Incremental migrations
     add_column_if_missing(conn, "threads", "session_id", "TEXT")?;
+    add_column_if_missing(conn, "threads", "routine_id", "TEXT")?;
 
     Ok(())
+}
+
+pub fn create_routine_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS routines (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+            prompt TEXT NOT NULL,
+            cron_expr TEXT NOT NULL,
+            budget_cap REAL,
+            on_complete TEXT NOT NULL DEFAULT '{\"action\":\"notify\"}',
+            on_failure TEXT NOT NULL DEFAULT '{\"action\":\"notify\"}',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_run_at TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_routines_workspace ON routines(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_routines_enabled ON routines(enabled);
+
+        CREATE TABLE IF NOT EXISTS routine_executions (
+            id TEXT PRIMARY KEY,
+            routine_id TEXT NOT NULL REFERENCES routines(id),
+            thread_id TEXT REFERENCES threads(id),
+            status TEXT NOT NULL,
+            cost_usd REAL DEFAULT 0,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_message TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rexec_routine ON routine_executions(routine_id);
+        ",
+    )
+    .context("failed to create routine tables")?;
+    Ok(())
+}
+
+pub fn routine_tables_exist(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='routines'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
 }
 
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, col_type: &str) -> Result<()> {

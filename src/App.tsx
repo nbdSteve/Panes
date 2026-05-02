@@ -6,11 +6,12 @@ import ThreadView from "./components/ThreadView";
 import MemoryPanel from "./components/MemoryPanel";
 import FeedView from "./components/FeedView";
 import SettingsPanel from "./components/SettingsPanel";
+import RoutinePanel from "./components/RoutinePanel";
 import { mapBackendEvent } from "./lib/eventMapper";
 import { api } from "./lib/api";
-import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs } from "./types";
+import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo } from "./types";
 
-export type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs };
+export type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo };
 
 const FALLBACK_MODELS: ModelInfo[] = [
   { id: "sonnet", label: "Sonnet", description: "Fast & capable" },
@@ -32,10 +33,12 @@ function App() {
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings">("feed");
+  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines">("feed");
   const [adapters, setAdapters] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [features, setFeatures] = useState<FeatureInfo[]>([]);
+  const [routines, setRoutines] = useState<RoutineInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const wsConfigRef = useRef<Map<string, ConfigPrefs>>(new Map());
   const globalConfigRef = useRef<ConfigPrefs>(DEFAULT_CONFIG);
@@ -52,6 +55,8 @@ function App() {
         durationMs: number | null;
         createdAt: string;
         events: AgentEvent[];
+        isRoutine?: boolean;
+        routineId?: string;
       }[];
 
       setThreads((prev) => {
@@ -65,6 +70,8 @@ function App() {
             status: (p.status === "completed" ? "complete" : p.status) as ThreadInfo["status"],
             costUsd: p.costUsd,
             events: p.events,
+            isRoutine: p.isRoutine,
+            routineId: p.routineId,
             createdAt: new Date(p.createdAt).getTime(),
           }));
         return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
@@ -88,6 +95,7 @@ function App() {
           .catch(() => setModels(FALLBACK_MODELS));
       }
     }).catch(() => {});
+    api.getFeatures().then(setFeatures).catch(() => {});
   }, [loadThreadsForWorkspace]);
 
   const handleCompletionAction = useCallback(
@@ -366,6 +374,28 @@ function App() {
       .catch((e) => console.error("extract_memories failed:", e));
   }, []);
 
+  const handleToggleFeature = useCallback(async (featureId: string, enabled: boolean) => {
+    try {
+      await api.setFeatureEnabled(featureId, enabled);
+      setFeatures((prev) =>
+        prev.map((f) => (f.id === featureId ? { ...f, enabled } : f))
+      );
+    } catch {}
+  }, []);
+
+  const routinesEnabled = features.some((f) => f.id === "routines" && f.enabled);
+  const routineCount = routines.filter((r) => r.enabled).length;
+
+  useEffect(() => {
+    if (!routinesEnabled || workspaces.length === 0) {
+      setRoutines([]);
+      return;
+    }
+    if (activeWorkspace) {
+      api.listRoutines(activeWorkspace).then(setRoutines).catch(() => {});
+    }
+  }, [routinesEnabled, activeWorkspace, workspaces.length]);
+
   const activeWs = workspaces.find((w) => w.id === activeWorkspace);
   const wsThreads = threads.filter((t) => t.workspaceId === activeWorkspace);
   const currentThread = threads.find((t) => t.id === activeThread);
@@ -377,10 +407,15 @@ function App() {
         threads={threads}
         activeWorkspace={activeWorkspace}
         activeView={activeView}
+        routinesEnabled={routinesEnabled}
+        routineCount={routineCount}
         onSelectWorkspace={(id) => {
           setActiveWorkspace(id);
           setActiveView("workspace");
           loadThreadsForWorkspace(id);
+          if (routinesEnabled) {
+            api.listRoutines(id).then(setRoutines).catch(() => {});
+          }
           const lastThread = threads
             .filter((t) => t.workspaceId === id)
             .sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -393,6 +428,10 @@ function App() {
         onSelectMemory={(wsId) => {
           setActiveWorkspace(wsId);
           setActiveView("memory");
+        }}
+        onSelectRoutines={(wsId) => {
+          setActiveWorkspace(wsId);
+          setActiveView("routines");
         }}
         onSelectSettings={() => {
           setActiveWorkspace(null);
@@ -461,8 +500,16 @@ function App() {
           <MemoryPanel workspaceId={activeWs.id} />
         )}
 
+        {activeView === "routines" && activeWs && (
+          <RoutinePanel workspaceId={activeWs.id} />
+        )}
+
         {activeView === "settings" && (
-          <SettingsPanel workspaces={workspaces} />
+          <SettingsPanel
+            workspaces={workspaces}
+            features={features}
+            onToggleFeature={handleToggleFeature}
+          />
         )}
       </main>
     </div>

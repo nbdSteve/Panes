@@ -34,6 +34,8 @@ export interface ThreadInfo {
   events: AgentEvent[];
   memoryCount?: number;
   hasBriefing?: boolean;
+  isRoutine?: boolean;
+  routineId?: string;
   createdAt: number;
 }
 
@@ -41,4 +43,40 @@ export interface ConfigPrefs {
   adapter: string;
   agent: string;
   model: string;
+}
+
+export interface FeatureInfo {
+  id: string;
+  enabled: boolean;
+  label: string;
+  description: string;
+}
+
+export type ScheduleAction =
+  | { action: "notify" }
+  | { action: "retry_once" }
+  | { action: "chain"; prompt: string; workspace_id?: string | null };
+
+export interface RoutineInfo {
+  id: string;
+  workspaceId: string;
+  prompt: string;
+  cronExpr: string;
+  budgetCap: number | null;
+  onComplete: ScheduleAction;
+  onFailure: ScheduleAction;
+  enabled: boolean;
+  lastRunAt: string | null;
+  createdAt: string;
+}
+
+export interface RoutineExecution {
+  id: string;
+  routineId: string;
+  threadId: string | null;
+  status: string;
+  costUsd: number;
+  startedAt: string;
+  completedAt: string | null;
+  errorMessage: string | null;
 }

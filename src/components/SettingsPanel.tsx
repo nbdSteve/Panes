@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback } from "react";
 import { api, type MemoryBackendStatus } from "../lib/api";
 import type { WorkspaceInfo } from "../App";
+import type { FeatureInfo } from "../types";
 import { formatCost } from "../lib/utils";
 
 interface SettingsPanelProps {
   workspaces: WorkspaceInfo[];
+  features: FeatureInfo[];
+  onToggleFeature: (featureId: string, enabled: boolean) => void;
 }
 
-export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
+export default function SettingsPanel({ workspaces, features, onToggleFeature }: SettingsPanelProps) {
   const [backendStatus, setBackendStatus] = useState<MemoryBackendStatus | null>(null);
   const [totalCost, setTotalCost] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -108,6 +111,28 @@ export default function SettingsPanel({ workspaces }: SettingsPanelProps) {
                   {ws.budgetCap ? `Cap: ${formatCost(ws.budgetCap)}` : "No cap"}
                 </span>
               </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {features.length > 0 && (
+        <div className="settings-section">
+          <h3>Features</h3>
+          {features.map((feature) => (
+            <div key={feature.id} className="settings-row">
+              <div className="settings-feature">
+                <span className="settings-label">{feature.label}</span>
+                <span className="settings-value muted">{feature.description}</span>
+              </div>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={feature.enabled}
+                  onChange={(e) => onToggleFeature(feature.id, e.target.checked)}
+                />
+                <span className="toggle-slider" />
+              </label>
             </div>
           ))}
         </div>
