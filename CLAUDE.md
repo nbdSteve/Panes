@@ -89,9 +89,15 @@ Fullstack E2E tests (`e2e-fullstack/`) use a different config: they build the re
 
 `MemoryManager` wraps two backends with automatic failover: Mem0 (vector + graph search via Python sidecar) and SQLite FTS5 (always-available fallback). A health monitor checks Mem0 every 30s and restarts the sidecar on failure. Briefings (user-authored workspace instructions) always go through SQLite regardless of active backend. Memory extraction happens post-thread via `extract_memories` IPC command called from the frontend.
 
-### One-thread-per-workspace invariant
+### One-thread-per-workspace invariant (Phase 1)
 
 `SessionManager` enforces that only one thread can be active per workspace at a time. This prevents concurrent agents from creating conflicting file changes in the same directory. The guard checks happen in both `start_thread` and `resume_thread`.
+
+Phase 2 lifts this constraint via git worktrees — each concurrent thread gets an isolated checkout. See `docs/ARCHITECTURE.md` "Phase 2: Git Worktrees" section.
+
+### Task DAG / Swarm execution (Phase 2, not yet implemented)
+
+Multi-agent swarms use `petgraph` for dependency-aware task scheduling (not beads_rust — see GAPS.md for rationale). The planner LLM produces an `ExecutionPlan` DAG, user refines it, `panes-scheduler` dispatches unblocked tasks into worktree-backed threads. Each task carries its own prompt, budget cap, gate policy, and verification config.
 
 ## Conventions
 

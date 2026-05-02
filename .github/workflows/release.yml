@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-macos-${{ matrix.arch }}-
+
+      - run: npm ci
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Panes ${{ github.ref_name }}"
+          releaseBody: |
+            See the [changelog](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            ## Install
+
+            **macOS (Apple Silicon):** Download `Panes_${{ github.ref_name }}_aarch64.dmg`
+            **macOS (Intel):** Download `Panes_${{ github.ref_name }}_x64.dmg`
+
+            ### Prerequisites
+            - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+  test-before-release:
+    name: Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-macos-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-macos-test-
+
+      - run: npm ci
+      - run: cargo test --workspace --exclude panes-app
+      - run: npx tsc --noEmit
+      - run: npx vitest run

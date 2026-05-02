@@ -115,6 +115,21 @@ Nobody has user-defined cross-workspace DAGs with pluggable verification. Zero o
 **Harness** — plan → execute → verify → decide loop for autonomous tasks. Pluggable verifiers. Escalate-first failure handling.
 **Playbooks** — reusable domain knowledge per workspace. Default execution steps for the harness.
 
+#### Task DAG approach (decided 2026-05-02)
+
+Initially considered beads_rust (a Rust CLI issue tracker with dependency tracking) as the task coordination layer. After evaluation, decided against it:
+- beads_rust is a CLI tool, not a library — no embeddable crate, would require shelling out or forking
+- Its schema is issue-tracker shaped (title, description, labels, assignee), not execution-shaped (prompt, budget_cap, gate_policy, verification, worktree_path)
+- The dependency DAG + "what's ready?" query is the easy part (~200 lines with `petgraph`); the hard parts are worktree lifecycle, concurrent gating UX, verification harness, and context passing between tasks
+
+Instead: native `petgraph`-based `ExecutionPlan` / `ExecutionTask` types in `panes-scheduler`, backed by SQLite. The planner LLM produces the DAG, user refines it, scheduler dispatches unblocked tasks into git worktrees.
+
+#### Git worktrees as concurrency primitive (decided 2026-05-02)
+
+The Phase 1 one-thread-per-workspace guard exists because concurrent agents in the same directory create conflicting file changes. Git worktrees solve this: each concurrent thread gets its own isolated checkout, works in isolation, and results merge back to the main branch on completion. This enables agent swarms within a single repository without the safety risk.
+
+Uses `git2` (libgit2 Rust bindings) rather than CLI for the worktree/merge path. Phase 1's CLI approach works for sequential operations but swarms need concurrent worktree creation (lock contention handling), structured merge conflict detection (`IndexConflict`, three-way merge), and in-process status queries across N worktrees. Existing Phase 1 CLI calls in `panes-core/src/git.rs` can migrate to git2 later but don't need to immediately.
+
 ---
 
 ## Supporting Capabilities (Table-Stakes, Ships with Phase 1)

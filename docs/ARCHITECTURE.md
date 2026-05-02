@@ -832,6 +832,93 @@ default_steps:
 
 The planner reads the playbook body as context when generating a dynamic plan. The `default_steps` serve as a fallback if dynamic planning fails.
 
+##### ExecutionTask Model (Planner → Scheduler Bridge)
+
+The planner LLM produces an `ExecutionPlan` — a DAG of typed `ExecutionTask` nodes. This is the contract between the planning phase (LLM with user steering) and the execution phase (scheduler + worktrees + harness).
+
+```rust
+pub struct ExecutionPlan {
+    pub id: String,
+    pub name: String,
+    pub tasks: Vec<ExecutionTask>,
+    pub created_at: DateTime<Utc>,
+    pub status: PlanStatus,
+    pub total_budget_cap: Option<f64>,
+}
+
+pub struct ExecutionTask {
+    pub id: String,
+    pub plan_id: String,
+    pub prompt: String,
+    pub workspace_id: String,
+    pub depends_on: Vec<String>,          // task IDs this blocks on
+    pub budget_cap: Option<f64>,
+    pub gate_policy: GatePolicy,
+    pub verification: Option<VerifierConfig>,
+    pub on_complete: TaskAction,
+    pub on_failure: TaskAction,
+    pub status: TaskStatus,
+    pub worktree_path: Option<PathBuf>,   // set when dispatched
+    pub thread_id: Option<String>,        // set when thread starts
+    pub output: Option<TaskOutput>,       // set on completion
+}
+
+pub struct TaskOutput {
+    pub summary: String,
+    pub changed_files: Vec<String>,
+    pub cost_usd: f64,
+    pub duration_ms: u64,
+}
+
+pub enum GatePolicy {
+    Normal,          // use workspace default gate rules
+    AutoApprove,     // skip gates (for trusted/verified steps)
+    AlwaysGate,      // force human review regardless of risk
+}
+
+pub enum TaskAction {
+    Continue,        // mark done, unblock dependents
+    Notify,          // notify user
+    Retry { max: u32 },
+    Escalate,        // pause plan, surface to user
+}
+
+pub enum TaskStatus {
+    Blocked,         // waiting on upstream deps
+    Ready,           // all deps satisfied, queued
+    Dispatched,      // worktree created, thread starting
+    Running,         // agent active
+    Gate,            // agent paused at gate
+    Verifying,       // verification running
+    Completed,
+    Failed { error: String },
+    Skipped,
+}
+
+pub enum PlanStatus {
+    Draft,           // planner proposed, user reviewing
+    Approved,        // user approved, ready to execute
+    Running,
+    Paused,          // user paused or escalation triggered
+    Completed,
+    Failed,
+}
+```
+
+**DAG execution flow:**
+1. Planner LLM produces `ExecutionPlan` with tasks and dependency edges
+2. User reviews/refines the plan (adjust prompts, reorder deps, set budgets)
+3. User approves → plan status becomes `Approved`
+4. Scheduler builds a `petgraph::DiGraph` from tasks + deps, validates no cycles
+5. Scheduler queries `ready()` — tasks with all deps in `Completed` status
+6. For each ready task: create worktree, spawn thread via `SessionManager`
+7. Completion monitor watches for thread completion → updates task status → recalculates `ready()` set
+8. Task output (summary, files) is injected as context into downstream task prompts
+9. On failure: execute `on_failure` action (default: `Escalate`)
+10. Plan completes when all tasks reach terminal status
+
+**Replanning:** If the user steers mid-execution (adds/removes/reorders tasks), the scheduler diffs the old and new DAG. Completed tasks are preserved. In-flight tasks continue. Only the frontier (ready + blocked) is recalculated.
+
 ##### Where the Harness Sits
 
 ```
@@ -1046,7 +1133,8 @@ panes/
 | Cron scheduling | `tokio-cron-scheduler` | Lightweight, async, runs in-process |
 | IPC | Tauri events + commands | Built-in, typed, bidirectional |
 | Memory extraction | Mem0 (primary), LLM prompt (fallback) | Mem0 handles extraction quality; LLM fallback ensures graceful degradation |
-| Task coordination | Beads (Dolt-backed, MCP wrapper) | Dependency-aware task graph for multi-agent coordination. Phase 2+. |
+| Task DAG | `petgraph` (native Rust) | Dependency-aware task graph for multi-agent coordination. Cycle detection, topological sort, ready-set queries. No external binary — integrates directly with panes-scheduler types. Phase 2+. |
+| Git worktrees | `git2` (libgit2 bindings) | Enables concurrent agent threads in the same repo via isolated working trees. git2 over CLI because swarms need: concurrent worktree creation with typed error handling, structured merge conflict detection (`IndexConflict` entries, three-way merge), and in-process status queries across N worktrees without per-worktree subprocess overhead. Phase 2+. |
 
 ---
 
@@ -1074,8 +1162,9 @@ Panes has three distinct persistence layers for agent context, each serving a di
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │  Tasks (structured, dependency-aware)        [Phase 2+] │ │
 │  │  What needs doing, what blocks what, what's done.       │ │
-│  │  Beads (Dolt-backed task graph, MCP access).            │ │
-│  │  "bd-a3f8: Add rate limiting — blocked by bd-a3f7"      │ │
+│  │  Native petgraph DAG in panes-scheduler. SQLite-backed. │ │
+│  │  LLM planner produces ExecutionTask DAGs; scheduler     │ │
+│  │  picks unblocked tasks and spawns worktree threads.     │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │                                                              │
 │  Each layer answers a different question:                    │
@@ -1194,11 +1283,46 @@ Thread completes
 └──────────────────────────────┘
 ```
 
+### Phase 2: Git Worktrees (Concurrent Threads)
+
+Phase 1 enforces one thread per workspace — safe but limits throughput. Phase 2 lifts this by giving each concurrent thread its own git worktree: an isolated checkout of the same repo at a separate filesystem path.
+
+```
+Workspace: ~/projects/backend    (main working tree)
+
+Thread A starts:
+  git worktree add /tmp/panes-wt-{thread_a_id} -b panes/{thread_a_id}
+  → Agent runs in /tmp/panes-wt-{thread_a_id}
+  → Isolated: changes don't affect main tree or other threads
+
+Thread B starts (concurrent, same repo):
+  git worktree add /tmp/panes-wt-{thread_b_id} -b panes/{thread_b_id}
+  → Agent runs in /tmp/panes-wt-{thread_b_id}
+
+Thread A completes:
+  → User reviews changes in worktree
+  → [Merge to main] or [Discard]
+  → git worktree remove /tmp/panes-wt-{thread_a_id}
+```
+
+**Worktree lifecycle (via git2):**
+1. `create_worktree(workspace_path, thread_id)` → `Repository::worktree()` creates worktree + branch, returns worktree path
+2. Thread runs in worktree path (agent cwd = worktree path)
+3. On completion: user chooses merge strategy (merge, rebase, cherry-pick, discard)
+4. `cleanup_worktree(worktree_path)` → removes worktree + optionally deletes branch
+
+**Why git2 over CLI for worktrees:** Phase 1 uses CLI for sequential git operations (snapshot, revert, commit) — adequate when one thread at a time. Swarm execution makes git operations concurrent and conflict-prone: multiple worktree creates racing on lock files, merge conflict detection across N completed threads, changed-file overlap queries before merging. git2 provides structured error types, `repo.merge_analysis()`, `IndexConflict` entries, and in-process queries without per-worktree subprocess overhead. Phase 1 CLI calls can migrate to git2 later but don't need to.
+
+**Merge conflicts:** When merging worktree results back to main, conflicts are possible if multiple threads touch overlapping files. git2's three-way merge primitives and `IndexConflict` entries let Panes detect and surface conflicts structurally. User is offered: resolve manually, keep one side, or discard the conflicting thread's changes.
+
+**Swarm execution model:** The planner LLM produces an `ExecutionPlan` (a DAG of `ExecutionTask` nodes). The scheduler picks tasks whose dependencies are satisfied, creates a worktree per task, spawns an agent thread in each worktree, and monitors completion. When a task completes, downstream tasks become unblocked and are dispatched. Each task's output (summary, changed files, cost) flows to dependent tasks as context.
+
 ### Constraints
 
-- **One active thread per workspace** (Phase 1). Prevents concurrent agents from creating conflicting file changes. Lifted in Phase 3 when the harness provides serialization for `modifies_files=true` steps.
+- **One active thread per workspace** (Phase 1). Prevents concurrent agents from creating conflicting file changes. Phase 2 lifts this via git worktrees — each concurrent thread gets its own isolated checkout.
 - **Rollback only works in git repos.** Non-git workspaces get a warning: "Changes cannot be reverted — this workspace is not a git repository."
 - **Rollback is all-or-nothing.** No partial revert (that's a git UI, which Panes is not). Either keep all changes or revert all.
+- **Worktree limit** (Phase 2). Max concurrent worktrees per workspace is configurable (default: 4). Prevents runaway swarms from exhausting disk space or git lock contention.
 
 ---
 

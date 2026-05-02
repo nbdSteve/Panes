@@ -94,4 +94,4 @@ Product documentation lives in [`docs/`](docs/):
 
 ## License
 
-Not yet decided.
+[FSL-1.1-ALv2](LICENSE.md) — Functional Source License, Version 1.1, with Apache License 2.0 future grant. Free to use, modify, and redistribute for any purpose except competing commercial use. Converts to Apache 2.0 after two years.
