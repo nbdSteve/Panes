@@ -3,7 +3,7 @@ pub mod executor;
 pub mod ticker;
 pub mod types;
 
-pub use types::{ExecutionStatus, Routine, RoutineExecution, ScheduleAction};
+pub use types::{ExecutionStatus, LogNotifier, Notifier, NotifierRef, Routine, RoutineExecution, ScheduleAction};
 
 use panes_core::db::DbHandle;
 use panes_core::session::SessionManager;
@@ -20,6 +20,7 @@ pub struct Scheduler {
     session_manager: Arc<Mutex<SessionManager>>,
     memory_manager: Arc<MemoryManager>,
     broadcast_tx: broadcast::Sender<ThreadEvent>,
+    notifier: NotifierRef,
     cancel_token: std::sync::Mutex<CancellationToken>,
     task_handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
 }
@@ -30,12 +31,14 @@ impl Scheduler {
         session_manager: Arc<Mutex<SessionManager>>,
         memory_manager: Arc<MemoryManager>,
         broadcast_tx: broadcast::Sender<ThreadEvent>,
+        notifier: NotifierRef,
     ) -> Self {
         Self {
             db,
             session_manager,
             memory_manager,
             broadcast_tx,
+            notifier,
             cancel_token: std::sync::Mutex::new(CancellationToken::new()),
             task_handles: std::sync::Mutex::new(Vec::new()),
         }
@@ -55,6 +58,7 @@ impl Scheduler {
         let db = self.db.clone();
         let sm = self.session_manager.clone();
         let mm = self.memory_manager.clone();
+        let notifier = self.notifier.clone();
 
         let ticker_handle = tokio::spawn(ticker::run_ticker(
             db.clone(),
@@ -68,6 +72,7 @@ impl Scheduler {
             db,
             sm,
             mm,
+            notifier,
             monitor_rx,
             token,
         ));

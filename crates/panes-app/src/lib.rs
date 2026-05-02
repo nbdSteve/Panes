@@ -11,10 +11,32 @@ use panes_cost::CostTracker;
 use panes_events::{RiskLevel, ThreadEvent};
 use panes_memory::manager::{MemoryConfig, MemoryManager};
 use panes_scheduler::Scheduler;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+struct TauriNotifier {
+    handle: tauri::AppHandle,
+}
+
+impl panes_scheduler::Notifier for TauriNotifier {
+    fn send(&self, title: &str, body: &str) {
+        if let Err(e) = self.handle.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+        {
+            tracing::warn!(error = %e, "failed to send OS notification");
+        }
+        let _ = self.handle.emit("panes://routine-notification", serde_json::json!({
+            "title": title,
+            "body": body,
+        }));
+    }
+}
 
 fn is_test_mode() -> bool {
     std::env::var("PANES_TEST_MODE").is_ok()
@@ -82,29 +104,38 @@ pub fn run() {
 
     let session_arc = Arc::new(tokio::sync::Mutex::new(session_manager));
 
-    let scheduler = Arc::new(Scheduler::new(
-        db.clone(),
-        session_arc.clone(),
-        memory_manager.clone(),
-        broadcast_tx.clone(),
-    ));
-
     let bridge_session = session_arc.clone();
     let bridge_cost = cost_tracker.clone();
     let bridge_db = db.clone();
     let bridge_memory = memory_manager.clone();
-    let startup_scheduler = scheduler.clone();
-    let startup_db = db.clone();
+    let setup_session = session_arc.clone();
+    let setup_db = db.clone();
+    let setup_memory = memory_manager.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(session_arc)
         .manage(cost_tracker)
         .manage(db)
         .manage(memory_manager.clone())
-        .manage(scheduler)
         .setup(move |app| {
             let handle = app.handle().clone();
             let event_rx = Arc::new(tokio::sync::Mutex::new(event_rx));
+
+            let notifier: panes_scheduler::NotifierRef = if test_mode {
+                Arc::new(panes_scheduler::LogNotifier)
+            } else {
+                Arc::new(TauriNotifier { handle: handle.clone() })
+            };
+
+            let scheduler = Arc::new(Scheduler::new(
+                setup_db.clone(),
+                setup_session,
+                setup_memory.clone(),
+                broadcast_tx.clone(),
+                notifier,
+            ));
+            app.manage(scheduler.clone());
 
             if test_mode {
                 test_bridge::start_test_bridge(
@@ -122,6 +153,8 @@ pub fn run() {
                 init_mgr.spawn_health_monitor();
             });
 
+            let startup_scheduler = scheduler;
+            let startup_db = setup_db;
             tauri::async_runtime::spawn(async move {
                 let enabled = startup_db
                     .execute(|conn| {

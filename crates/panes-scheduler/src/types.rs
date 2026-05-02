@@ -1,5 +1,20 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+pub trait Notifier: Send + Sync + 'static {
+    fn send(&self, title: &str, body: &str);
+}
+
+pub struct LogNotifier;
+
+impl Notifier for LogNotifier {
+    fn send(&self, title: &str, body: &str) {
+        tracing::info!(title = %title, body = %body, "notification (no OS backend)");
+    }
+}
+
+pub type NotifierRef = Arc<dyn Notifier>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]

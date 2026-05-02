@@ -1,6 +1,6 @@
 use crate::actions;
 use crate::executor;
-use crate::types::{Routine, ScheduleAction};
+use crate::types::{NotifierRef, Routine, ScheduleAction};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use panes_core::db::DbHandle;
@@ -145,6 +145,7 @@ pub async fn run_completion_monitor(
     db: DbHandle,
     session_manager: Arc<Mutex<SessionManager>>,
     memory_manager: Arc<MemoryManager>,
+    notifier: NotifierRef,
     mut rx: broadcast::Receiver<ThreadEvent>,
     cancel_token: CancellationToken,
 ) {
@@ -157,7 +158,7 @@ pub async fn run_completion_monitor(
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        handle_thread_event(&db, &session_manager, &memory_manager, &event).await;
+                        handle_thread_event(&db, &session_manager, &memory_manager, &notifier, &event).await;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "completion monitor lagged behind broadcast");
@@ -176,6 +177,7 @@ async fn handle_thread_event(
     db: &DbHandle,
     session_manager: &Arc<Mutex<SessionManager>>,
     memory_manager: &Arc<MemoryManager>,
+    notifier: &NotifierRef,
     event: &ThreadEvent,
 ) {
     let thread_id = event.thread_id.clone();
@@ -241,6 +243,7 @@ async fn handle_thread_event(
                 db,
                 session_manager,
                 memory_manager,
+                notifier,
             )
             .await
             {
@@ -284,6 +287,7 @@ async fn handle_thread_event(
                 db,
                 session_manager,
                 memory_manager,
+                notifier,
             )
             .await
             {

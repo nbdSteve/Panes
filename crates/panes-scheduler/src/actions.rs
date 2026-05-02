@@ -1,5 +1,5 @@
 use crate::executor;
-use crate::types::ScheduleAction;
+use crate::types::{NotifierRef, ScheduleAction};
 use panes_core::db::DbHandle;
 use panes_core::session::SessionManager;
 use panes_memory::manager::MemoryManager;
@@ -16,17 +16,18 @@ pub async fn dispatch_action(
     db: &DbHandle,
     session_manager: &Arc<Mutex<SessionManager>>,
     memory_manager: &Arc<MemoryManager>,
+    notifier: &NotifierRef,
 ) -> anyhow::Result<()> {
     match action {
         ScheduleAction::Notify => {
-            send_notification(routine_id, thread_id, error_message);
+            send_notification(notifier, routine_id, thread_id, error_message, db).await;
             Ok(())
         }
         ScheduleAction::RetryOnce => {
             let already_retried = check_has_retry(db, routine_id).await?;
             if already_retried {
                 info!(routine_id = %routine_id, "already retried once, sending notification instead");
-                send_notification(routine_id, thread_id, error_message);
+                send_notification(notifier, routine_id, thread_id, error_message, db).await;
                 Ok(())
             } else {
                 info!(routine_id = %routine_id, "retrying routine");
@@ -58,15 +59,39 @@ pub async fn dispatch_action(
     }
 }
 
-fn send_notification(routine_id: &str, thread_id: &str, error_message: Option<&str>) {
-    // OS notification will be wired in Phase E via tauri-plugin-notification.
-    // For now, log the notification event.
-    info!(
-        routine_id = %routine_id,
-        thread_id = %thread_id,
-        error = ?error_message,
-        "routine notification"
-    );
+async fn send_notification(
+    notifier: &NotifierRef,
+    routine_id: &str,
+    _thread_id: &str,
+    error_message: Option<&str>,
+    db: &DbHandle,
+) {
+    let workspace_name = lookup_workspace_name(db, routine_id).await;
+
+    let (title, body) = if let Some(err) = error_message {
+        (
+            format!("Panes: {} routine failed", workspace_name),
+            err.chars().take(200).collect::<String>(),
+        )
+    } else {
+        (
+            format!("Panes: {} routine finished", workspace_name),
+            String::new(),
+        )
+    };
+
+    notifier.send(&title, &body);
+}
+
+async fn lookup_workspace_name(db: &DbHandle, routine_id: &str) -> String {
+    let rid = routine_id.to_string();
+    db.execute(move |conn| {
+        Ok(conn.query_row(
+            "SELECT w.name FROM workspaces w JOIN routines r ON w.id = r.workspace_id WHERE r.id = ?1",
+            params![rid],
+            |row| row.get::<_, String>(0),
+        ).unwrap_or_else(|_| "Unknown".to_string()))
+    }).await.unwrap_or_else(|_| "Unknown".to_string())
 }
 
 async fn check_has_retry(db: &DbHandle, routine_id: &str) -> anyhow::Result<bool> {
