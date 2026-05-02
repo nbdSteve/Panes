@@ -552,7 +552,12 @@ async fn dispatch_command(
         "create_routine" => {
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
             let prompt = args["prompt"].as_str().ok_or("missing prompt")?.to_string();
-            let cron_expr = args["cronExpr"].as_str().ok_or("missing cronExpr")?.to_string();
+            let raw_cron = args["cronExpr"].as_str().ok_or("missing cronExpr")?.to_string();
+            let cron_expr = if raw_cron.split_whitespace().count() == 5 {
+                format!("0 {raw_cron}")
+            } else {
+                raw_cron
+            };
             let budget_cap = args["budgetCap"].as_f64();
             let on_complete = args["onComplete"].as_str().unwrap_or(r#"{"action":"notify"}"#).to_string();
             let on_failure = args["onFailure"].as_str().unwrap_or(r#"{"action":"notify"}"#).to_string();
@@ -641,7 +646,13 @@ async fn dispatch_command(
         "update_routine" => {
             let routine_id = args["routineId"].as_str().ok_or("missing routineId")?.to_string();
             let prompt = args["prompt"].as_str().map(|s| s.to_string());
-            let cron_expr = args["cronExpr"].as_str().map(|s| s.to_string());
+            let cron_expr = args["cronExpr"].as_str().map(|s| {
+                if s.split_whitespace().count() == 5 {
+                    format!("0 {s}")
+                } else {
+                    s.to_string()
+                }
+            });
             let budget_cap = args["budgetCap"].as_f64();
             let on_complete = args["onComplete"].as_str().map(|s| s.to_string());
             let on_failure = args["onFailure"].as_str().map(|s| s.to_string());

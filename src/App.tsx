@@ -396,6 +396,16 @@ function App() {
     }
   }, [routinesEnabled, activeWorkspace, workspaces.length]);
 
+  useEffect(() => {
+    const unlisten = listen<{ title: string; body: string }>("panes://routine-notification", (ev) => {
+      console.info("[routine notification]", ev.payload.title, ev.payload.body);
+      if (activeWorkspace && routinesEnabled) {
+        api.listRoutines(activeWorkspace).then(setRoutines).catch(() => {});
+      }
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [activeWorkspace, routinesEnabled]);
+
   const activeWs = workspaces.find((w) => w.id === activeWorkspace);
   const wsThreads = threads.filter((t) => t.workspaceId === activeWorkspace);
   const currentThread = threads.find((t) => t.id === activeThread);
@@ -501,7 +511,7 @@ function App() {
         )}
 
         {activeView === "routines" && activeWs && (
-          <RoutinePanel workspaceId={activeWs.id} />
+          <RoutinePanel workspaceId={activeWs.id} onRoutinesChanged={setRoutines} />
         )}
 
         {activeView === "settings" && (

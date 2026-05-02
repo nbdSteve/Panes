@@ -294,6 +294,15 @@ async fn handle_thread_event(
                 warn!(routine_id = %routine_id, error = %e, "on_failure action failed");
             }
         }
+        AgentEvent::ToolRequest {
+            needs_approval: true,
+            ..
+        } => {
+            notifier.send(
+                &format!("Panes: routine needs approval"),
+                &format!("Thread {} requires gate approval", thread_id),
+            );
+        }
         _ => {}
     }
 }

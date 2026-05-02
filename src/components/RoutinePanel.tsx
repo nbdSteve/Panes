@@ -6,12 +6,15 @@ import RoutineForm from "./RoutineForm";
 
 interface RoutinePanelProps {
   workspaceId: string;
+  onRoutinesChanged?: (routines: RoutineInfo[]) => void;
 }
 
 function cronToHuman(cron: string): string {
   const parts = cron.split(/\s+/);
-  if (parts.length < 5) return cron;
-  const [min, hour, , , dow] = parts;
+  // DB stores 6-field (with seconds); strip leading seconds field if present
+  const fields = parts.length === 6 ? parts.slice(1) : parts;
+  if (fields.length < 5) return cron;
+  const [min, hour, , , dow] = fields;
 
   const hourStr = hour === "*" ? "" : `${hour}:${min.padStart(2, "0")}`;
   if (dow === "1-5" && hourStr) return `Weekdays at ${hourStr}`;
@@ -32,7 +35,7 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
-export default function RoutinePanel({ workspaceId }: RoutinePanelProps) {
+export default function RoutinePanel({ workspaceId, onRoutinesChanged }: RoutinePanelProps) {
   const [routines, setRoutines] = useState<RoutineInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -51,12 +54,13 @@ export default function RoutinePanel({ workspaceId }: RoutinePanelProps) {
     try {
       const data = await api.listRoutines(workspaceId);
       setRoutines(data);
+      onRoutinesChanged?.(data);
     } catch {
       // routines feature may not be enabled yet
     } finally {
       setLoading(false);
     }
-  }, [workspaceId]);
+  }, [workspaceId, onRoutinesChanged]);
 
   useEffect(() => {
     loadRoutines();
@@ -88,9 +92,9 @@ export default function RoutinePanel({ workspaceId }: RoutinePanelProps) {
   const handleToggle = async (routineId: string, enabled: boolean) => {
     try {
       await api.toggleRoutine(routineId, enabled);
-      setRoutines((prev) =>
-        prev.map((r) => (r.id === routineId ? { ...r, enabled } : r))
-      );
+      const updated = routines.map((r) => (r.id === routineId ? { ...r, enabled } : r));
+      setRoutines(updated);
+      onRoutinesChanged?.(updated);
     } catch (err: unknown) {
       console.error("Failed to toggle routine:", err);
     }
@@ -104,7 +108,9 @@ export default function RoutinePanel({ workspaceId }: RoutinePanelProps) {
     setConfirmDeleteId(null);
     try {
       await api.deleteRoutine(routineId);
-      setRoutines((prev) => prev.filter((r) => r.id !== routineId));
+      const updated = routines.filter((r) => r.id !== routineId);
+      setRoutines(updated);
+      onRoutinesChanged?.(updated);
       if (expandedId === routineId) setExpandedId(null);
       setExecutions((prev) => { const next = { ...prev }; delete next[routineId]; return next; });
       setCosts((prev) => { const next = { ...prev }; delete next[routineId]; return next; });
