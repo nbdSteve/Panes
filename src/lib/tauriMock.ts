@@ -633,6 +633,43 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return null;
     }
 
+    case "get_features":
+      return [
+        { id: "routines", enabled: false, label: "Routines", description: "Scheduled agent tasks" },
+        { id: "cost_tracking", enabled: true, label: "Cost Tracking", description: "Track API costs" },
+      ];
+
+    case "set_feature_enabled":
+      return null;
+
+    case "create_routine":
+      return {
+        id: crypto.randomUUID(),
+        workspaceId: args?.workspaceId,
+        prompt: args?.prompt,
+        cronExpr: args?.cronExpr,
+        budgetCap: args?.budgetCap ?? null,
+        onComplete: { action: "notify" },
+        onFailure: { action: "notify" },
+        enabled: true,
+        lastRunAt: null,
+        createdAt: new Date().toISOString(),
+      };
+
+    case "list_routines":
+      return [];
+
+    case "toggle_routine":
+    case "delete_routine":
+    case "update_routine":
+      return null;
+
+    case "list_routine_executions":
+      return [];
+
+    case "get_routine_cost":
+      return 0;
+
     default:
       console.warn(`[tauriMock] unhandled invoke: ${cmd}`, args);
       return null;
