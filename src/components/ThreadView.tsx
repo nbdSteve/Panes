@@ -27,9 +27,10 @@ interface ThreadViewProps {
   onCancel: (threadId: string) => void;
   onQueueFollowUp: (threadId: string, prompt: string) => void;
   onSetBudgetCap: (workspaceId: string, budgetCap: number | null) => void;
+  showCost?: boolean;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, models, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, models, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap, showCost }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
@@ -164,7 +165,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               {Math.round(contextUsage.percentage)}%
             </span>
           )}
-          {runningCost > 0 && <CostBadge cost={runningCost} label="Cost" budgetCap={workspace.budgetCap ?? undefined} />}
+          {showCost !== false && runningCost > 0 && <CostBadge cost={runningCost} label="Cost" budgetCap={workspace.budgetCap ?? undefined} />}
         </div>
       </div>
 
@@ -182,7 +183,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
         )}
 
         {thread && showTranscript && (
-          <TranscriptView events={visibleEvents} prompt={thread.prompt} />
+          <TranscriptView events={visibleEvents} prompt={thread.prompt} showCost={showCost} />
         )}
 
         {thread && !showTranscript && (
@@ -219,7 +220,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
                 api.rejectGate(tid, toolUseId, `Steer: ${text}`).catch(console.error);
                 onQueueFollowUp(tid, text);
               },
-            })}
+            }, showCost)}
 
             {isRunning && visibleEvents.length > 0 && (
               <div className="step-card">
@@ -431,7 +432,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               </div>
             </div>
 
-            <div className="config-budget">
+            {showCost !== false && <div className="config-budget">
               {editingBudget ? (
                 <input
                   className="config-budget-input"
@@ -476,7 +477,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
                   </span>
                 </button>
               )}
-            </div>
+            </div>}
           </div>
         );
       })()}
@@ -534,7 +535,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
   );
 }
 
-function ToolGroupCard({ group }: { group: ToolGroup }) {
+function ToolGroupCard({ group, showCost }: { group: ToolGroup; showCost?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const { request, result } = group;
   const inProgress = result === null;
@@ -598,7 +599,7 @@ function ToolGroupCard({ group }: { group: ToolGroup }) {
               {group.subAgentComplete ? (
                 <div className="sub-agent-nested-result">
                   <span>{group.subAgentComplete.summary}</span>
-                  {group.subAgentComplete.cost_usd != null && (
+                  {showCost !== false && group.subAgentComplete.cost_usd != null && (
                     <span className="sub-agent-cost">${group.subAgentComplete.cost_usd.toFixed(4)}</span>
                   )}
                 </div>
@@ -628,6 +629,7 @@ function renderEvents(
   completionAction: "committed" | "reverted" | "kept" | undefined,
   gitFiles: string[] | null,
   callbacks: RenderCallbacks,
+  showCost?: boolean,
 ) {
   let segmentHasWrites = false;
   let segmentEvents: AgentEvent[] = [];
@@ -660,7 +662,7 @@ function renderEvents(
       }
       segmentEvents.push(request);
       if (item.result) segmentEvents.push(item.result);
-      return <ToolGroupCard key={`tg-${i}`} group={item} />;
+      return <ToolGroupCard key={`tg-${i}`} group={item} showCost={showCost} />;
     }
 
     const event = item.event;
@@ -744,6 +746,7 @@ function renderEvents(
               toolUseId={gateId}
               toolName={event.tool_name || ""}
               runningCost={runningCost}
+              showCost={showCost}
               resolved={resolved}
               onApprove={() => {
                 api.approveGate(threadId, gateId).catch(console.error);
@@ -774,6 +777,7 @@ function renderEvents(
             key={i}
             summary={event.summary || ""}
             totalCost={event.total_cost_usd || 0}
+            showCost={showCost}
             durationMs={event.duration_ms || 0}
             turns={event.turns || 0}
             hasFileChanges={hadWrites || (gitFiles != null && gitFiles.length > 0)}
@@ -853,7 +857,7 @@ function renderEvents(
                 <span className="sub-agent-label">Sub-agent</span>
                 {event.summary}
               </span>
-              {event.cost_usd != null && (
+              {showCost !== false && event.cost_usd != null && (
                 <span className="sub-agent-cost">${event.cost_usd.toFixed(4)}</span>
               )}
             </div>

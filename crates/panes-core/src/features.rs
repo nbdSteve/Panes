@@ -3,18 +3,29 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 pub const FEATURE_ROUTINES: &str = "routines";
+pub const FEATURE_COST_TRACKING: &str = "cost_tracking";
 
 struct FeatureDef {
     id: &'static str,
     label: &'static str,
     description: &'static str,
+    default_enabled: bool,
 }
 
-const FEATURE_REGISTRY: &[FeatureDef] = &[FeatureDef {
-    id: FEATURE_ROUTINES,
-    label: "Routines",
-    description: "Recurring scheduled prompts that run automatically on a cron schedule with budget caps and notifications.",
-}];
+const FEATURE_REGISTRY: &[FeatureDef] = &[
+    FeatureDef {
+        id: FEATURE_ROUTINES,
+        label: "Routines",
+        description: "Recurring scheduled prompts that run automatically on a cron schedule with budget caps and notifications.",
+        default_enabled: false,
+    },
+    FeatureDef {
+        id: FEATURE_COST_TRACKING,
+        label: "Cost Tracking",
+        description: "Show cost badges, per-thread costs, and aggregate spend across the UI.",
+        default_enabled: true,
+    },
+];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +44,13 @@ pub fn is_feature_enabled(conn: &Connection, feature: &str) -> Result<bool> {
     );
     match result {
         Ok(enabled) => Ok(enabled),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Ok(FEATURE_REGISTRY
+                .iter()
+                .find(|f| f.id == feature)
+                .map(|f| f.default_enabled)
+                .unwrap_or(false))
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -110,12 +127,27 @@ mod tests {
     }
 
     #[test]
+    fn test_cost_tracking_enabled_by_default() {
+        let conn = setup_db();
+        assert!(is_feature_enabled(&conn, FEATURE_COST_TRACKING).unwrap());
+    }
+
+    #[test]
+    fn test_disable_cost_tracking() {
+        let conn = setup_db();
+        set_feature_enabled(&conn, FEATURE_COST_TRACKING, false).unwrap();
+        assert!(!is_feature_enabled(&conn, FEATURE_COST_TRACKING).unwrap());
+    }
+
+    #[test]
     fn test_list_features() {
         let conn = setup_db();
         let features = list_features(&conn).unwrap();
-        assert_eq!(features.len(), 1);
-        assert_eq!(features[0].id, "routines");
-        assert!(!features[0].enabled);
+        assert_eq!(features.len(), 2);
+        let routines = features.iter().find(|f| f.id == "routines").unwrap();
+        assert!(!routines.enabled);
+        let cost = features.iter().find(|f| f.id == "cost_tracking").unwrap();
+        assert!(cost.enabled);
     }
 
     #[test]

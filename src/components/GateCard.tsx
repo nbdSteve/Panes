@@ -7,6 +7,7 @@ interface GateCardProps {
   toolUseId: string;
   toolName: string;
   runningCost: number;
+  showCost?: boolean;
   resolved?: "approved" | "rejected" | "steered";
   onApprove: () => void;
   onReject: () => void;
@@ -18,6 +19,7 @@ export default function GateCard({
   riskLevel,
   toolName,
   runningCost,
+  showCost,
   resolved,
   onApprove,
   onReject,
@@ -111,7 +113,7 @@ export default function GateCard({
 
       <div className="gate-meta">
         <span className={`risk-badge ${riskLevel}`}>{riskLevel}</span>
-        <CostBadge cost={runningCost} label="So far" />
+        {showCost !== false && <CostBadge cost={runningCost} label="So far" />}
       </div>
 
       <div className="gate-actions">

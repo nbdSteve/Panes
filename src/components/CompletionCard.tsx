@@ -8,6 +8,7 @@ export type FileChangeAction = "created" | "modified" | "deleted" | "untracked";
 export interface CompletionCardProps {
   summary: string;
   totalCost: number;
+  showCost?: boolean;
   durationMs: number;
   turns: number;
   hasFileChanges: boolean;
@@ -22,6 +23,7 @@ export interface CompletionCardProps {
 export default function CompletionCard({
   summary,
   totalCost,
+  showCost,
   durationMs,
   turns,
   hasFileChanges,
@@ -53,8 +55,8 @@ export default function CompletionCard({
           <span className="completion-label-text">Complete</span>
         </div>
         <div className="completion-stats">
-          <span className="completion-stat completion-stat-cost">{costStr}</span>
-          <span className="completion-stat-sep" />
+          {showCost !== false && <span className="completion-stat completion-stat-cost">{costStr}</span>}
+          {showCost !== false && <span className="completion-stat-sep" />}
           <span className="completion-stat">{durationStr}</span>
           <span className="completion-stat-sep" />
           <span className="completion-stat">{turns} {turns === 1 ? "turn" : "turns"}</span>

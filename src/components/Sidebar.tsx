@@ -11,6 +11,7 @@ interface SidebarProps {
   activeView: "workspace" | "feed" | "memory" | "settings" | "routines";
   routinesEnabled: boolean;
   routineCount: number;
+  showCost: boolean;
   onSelectWorkspace: (id: string) => void;
   onSelectFeed: () => void;
   onSelectMemory: (workspaceId: string) => void;
@@ -27,6 +28,7 @@ export default function Sidebar({
   activeView,
   routinesEnabled,
   routineCount,
+  showCost,
   onSelectWorkspace,
   onSelectFeed,
   onSelectMemory,
@@ -134,7 +136,7 @@ export default function Sidebar({
               >
                 <span className={`status-dot ${dotClass}`} />
                 <span>{ws.name}</span>
-                {cost > 0 && (
+                {showCost && cost > 0 && (
                   <span className="workspace-cost">{formatCost(cost)}</span>
                 )}
                 {wsThreads.length > 0 && (

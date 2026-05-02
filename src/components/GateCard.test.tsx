@@ -123,4 +123,16 @@ describe("GateCard", () => {
     expect(badge.className).toContain("risk-badge");
     expect(badge.className).toContain("critical");
   });
+
+  it("hides cost badge when showCost is false", () => {
+    render(<GateCard {...baseProps} showCost={false} />);
+
+    expect(screen.queryByText(/So far/)).not.toBeInTheDocument();
+  });
+
+  it("shows cost badge by default", () => {
+    render(<GateCard {...baseProps} />);
+
+    expect(screen.getByText(/So far/)).toBeInTheDocument();
+  });
 });

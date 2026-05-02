@@ -6,9 +6,10 @@ import { formatCost } from "../lib/utils";
 interface TranscriptViewProps {
   events: AgentEvent[];
   prompt: string;
+  showCost?: boolean;
 }
 
-export default function TranscriptView({ events, prompt }: TranscriptViewProps) {
+export default function TranscriptView({ events, prompt, showCost }: TranscriptViewProps) {
   return (
     <div className="transcript-view">
       <div className="transcript-message transcript-user">
@@ -78,7 +79,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
                 <span className="transcript-role">Sub-agent complete</span>
                 <div className="transcript-body">
                   {event.summary}
-                  {event.cost_usd != null && (
+                  {showCost !== false && event.cost_usd != null && (
                     <span className="transcript-cost"> ({formatCost(event.cost_usd)})</span>
                   )}
                 </div>
@@ -99,7 +100,7 @@ export default function TranscriptView({ events, prompt }: TranscriptViewProps) 
                 <span className="transcript-role">Session complete</span>
                 <div className="transcript-body">
                   {event.summary}
-                  {event.total_cost_usd != null && ` — ${formatCost(event.total_cost_usd)}`}
+                  {showCost !== false && event.total_cost_usd != null && ` — ${formatCost(event.total_cost_usd)}`}
                   {event.turns != null && ` — ${event.turns} turns`}
                 </div>
               </div>

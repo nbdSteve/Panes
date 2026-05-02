@@ -11,6 +11,7 @@ interface SettingsPanelProps {
 }
 
 export default function SettingsPanel({ workspaces, features, onToggleFeature }: SettingsPanelProps) {
+  const showCost = features.some((f) => f.id === "cost_tracking" && f.enabled);
   const [backendStatus, setBackendStatus] = useState<MemoryBackendStatus | null>(null);
   const [totalCost, setTotalCost] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -107,9 +108,11 @@ export default function SettingsPanel({ workspaces, features, onToggleFeature }:
                 <span className="settings-value">
                   {ws.defaultAgent ?? "claude-code"}
                 </span>
-                <span className={`settings-value ${ws.budgetCap ? "" : "muted"}`}>
-                  {ws.budgetCap ? `Cap: ${formatCost(ws.budgetCap)}` : "No cap"}
-                </span>
+                {showCost && (
+                  <span className={`settings-value ${ws.budgetCap ? "" : "muted"}`}>
+                    {ws.budgetCap ? `Cap: ${formatCost(ws.budgetCap)}` : "No cap"}
+                  </span>
+                )}
               </div>
             </div>
           ))}
@@ -140,10 +143,12 @@ export default function SettingsPanel({ workspaces, features, onToggleFeature }:
 
       <div className="settings-section">
         <h3>About</h3>
-        <div className="settings-row">
-          <span className="settings-label">Total spend</span>
-          <span className="settings-value">{formatCost(totalCost)}</span>
-        </div>
+        {showCost && (
+          <div className="settings-row">
+            <span className="settings-label">Total spend</span>
+            <span className="settings-value">{formatCost(totalCost)}</span>
+          </div>
+        )}
         <div className="settings-row">
           <span className="settings-label">Workspaces</span>
           <span className="settings-value">{workspaces.length}</span>

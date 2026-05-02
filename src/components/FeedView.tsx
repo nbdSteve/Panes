@@ -21,11 +21,13 @@ interface BackendThread {
 
 interface FeedViewProps {
   workspaces: WorkspaceInfo[];
+  showCost?: boolean;
   onNavigateToThread: (threadId: string, workspaceId: string) => void;
 }
 
 export default function FeedView({
   workspaces,
+  showCost,
   onNavigateToThread,
 }: FeedViewProps) {
   const [threads, setThreads] = useState<BackendThread[]>([]);
@@ -83,7 +85,7 @@ export default function FeedView({
     <div className="feed-view">
       <div className="feed-aggregate">
         <span>Activity across {workspaces.length} workspace{workspaces.length !== 1 ? "s" : ""}</span>
-        <span className="feed-aggregate-cost">Total spend: {formatCost(totalCost)}</span>
+        {showCost !== false && <span className="feed-aggregate-cost">Total spend: {formatCost(totalCost)}</span>}
       </div>
 
       <div className="feed-list">
@@ -102,7 +104,7 @@ export default function FeedView({
               <div className="feed-item-prompt">{truncatePrompt(thread.prompt)}</div>
             </div>
             <div className="feed-item-meta">
-              <span className="feed-item-cost">{formatCost(thread.costUsd)}</span>
+              {showCost !== false && <span className="feed-item-cost">{formatCost(thread.costUsd)}</span>}
               <span>{timeAgo(thread.createdAt)}</span>
             </div>
           </div>

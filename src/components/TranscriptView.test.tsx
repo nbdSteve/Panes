@@ -122,4 +122,18 @@ describe("TranscriptView", () => {
     expect(screen.getByText(/\$0\.04/)).toBeInTheDocument();
     expect(screen.getByText(/3 turns/)).toBeInTheDocument();
   });
+
+  it("hides cost when showCost is false", () => {
+    const events: AgentEvent[] = [
+      { event_type: "sub_agent_complete", parent_tool_use_id: "t1", summary: "found the answer", cost_usd: 0.012 },
+      { event_type: "complete", summary: "All done", total_cost_usd: 0.035, duration_ms: 1200, turns: 3 },
+    ];
+    render(<TranscriptView events={events} prompt="test" showCost={false} />);
+
+    expect(screen.getByText(/found the answer/)).toBeInTheDocument();
+    expect(screen.getByText(/All done/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$0\.01/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$0\.04/)).not.toBeInTheDocument();
+    expect(screen.getByText(/3 turns/)).toBeInTheDocument();
+  });
 });

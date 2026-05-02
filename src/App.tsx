@@ -384,6 +384,7 @@ function App() {
   }, []);
 
   const routinesEnabled = features.some((f) => f.id === "routines" && f.enabled);
+  const costTrackingEnabled = features.some((f) => f.id === "cost_tracking" && f.enabled);
   const routineCount = routines.filter((r) => r.enabled).length;
 
   useEffect(() => {
@@ -419,6 +420,7 @@ function App() {
         activeView={activeView}
         routinesEnabled={routinesEnabled}
         routineCount={routineCount}
+        showCost={costTrackingEnabled}
         onSelectWorkspace={(id) => {
           setActiveWorkspace(id);
           setActiveView("workspace");
@@ -476,6 +478,7 @@ function App() {
         {activeView === "feed" && (
           <FeedView
             workspaces={workspaces}
+            showCost={costTrackingEnabled}
             onNavigateToThread={(threadId, workspaceId) => {
               setActiveWorkspace(workspaceId);
               setActiveView("workspace");
@@ -503,6 +506,7 @@ function App() {
             onCancel={handleCancelThread}
             onQueueFollowUp={handleQueueFollowUp}
             onSetBudgetCap={handleSetBudgetCap}
+            showCost={costTrackingEnabled}
           />
         )}
 
