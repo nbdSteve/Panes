@@ -115,14 +115,15 @@ Nobody has user-defined cross-workspace DAGs with pluggable verification. Zero o
 **Harness** — plan → execute → verify → decide loop for autonomous tasks. Pluggable verifiers. Escalate-first failure handling.
 **Playbooks** — reusable domain knowledge per workspace. Default execution steps for the harness.
 
-#### Task DAG approach (decided 2026-05-02)
+#### Task DAG approach (decided 2026-05-02, revised same day)
 
-Initially considered beads_rust (a Rust CLI issue tracker with dependency tracking) as the task coordination layer. After evaluation, decided against it:
-- beads_rust is a CLI tool, not a library — no embeddable crate, would require shelling out or forking
-- Its schema is issue-tracker shaped (title, description, labels, assignee), not execution-shaped (prompt, budget_cap, gate_policy, verification, worktree_path)
-- The dependency DAG + "what's ready?" query is the easy part (~200 lines with `petgraph`); the hard parts are worktree lifecycle, concurrent gating UX, verification harness, and context passing between tasks
+Initially considered beads_rust (frozen Rust fork, SQLite + JSONL) and then rolling our own with petgraph. After deeper evaluation, chose the original beads (Go, Dolt-backed) as the task layer:
 
-Instead: native `petgraph`-based `ExecutionPlan` / `ExecutionTask` types in `panes-scheduler`, backed by SQLite. The planner LLM produces the DAG, user refines it, scheduler dispatches unblocked tasks into git worktrees.
+- **beads_rust rejected:** CLI-only (not a library), frozen architecture, issue-tracker schema doesn't carry execution fields
+- **petgraph rejected:** The DAG primitives are easy (~200 lines), but persistence, agent-writable interface, concurrent multi-agent access, atomic claiming, compaction, and cell-level merge add up to reimplementing most of what beads already ships
+- **beads (original) chosen:** Dolt gives cell-level merge (concurrent agents don't conflict), four dependency types with `blocks`-only ready queue, hash-based IDs (no merge collisions), atomic `--claim`, compaction for context efficiency, `discovered-from` links for mid-execution task creation
+
+**Integration approach:** Bundle `dolt` + `bd` as Tauri sidecars (single Go binaries, no runtime deps). Panes shells out to `bd --json` from Rust, same pattern as `git.rs`. Execution-specific config (budget, gate policy, verification) lives in Panes' SQLite keyed by beads task ID. Beads owns the *what* (task graph), Panes owns the *how* (worktrees, gates, cost, verification).
 
 #### Git worktrees as concurrency primitive (decided 2026-05-02)
 

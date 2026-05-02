@@ -832,92 +832,59 @@ default_steps:
 
 The planner reads the playbook body as context when generating a dynamic plan. The `default_steps` serve as a fallback if dynamic planning fails.
 
-##### ExecutionTask Model (Planner → Scheduler Bridge)
+##### Task Layer: Beads (Sidecar)
 
-The planner LLM produces an `ExecutionPlan` — a DAG of typed `ExecutionTask` nodes. This is the contract between the planning phase (LLM with user steering) and the execution phase (scheduler + worktrees + harness).
+Beads owns the task graph — what needs doing, what depends on what, what's done. Panes owns execution — how tasks get done (worktrees, gates, cost, verification). They communicate via `bd --json` CLI calls from Rust.
+
+**Sidecar architecture:**
+```
+Panes.app/
+├── Contents/MacOS/
+│   ├── Panes                          (main binary)
+│   ├── dolt-aarch64-apple-darwin      (Tauri sidecar — version-controlled DB)
+│   └── bd-aarch64-apple-darwin        (Tauri sidecar — task graph CLI)
+```
+
+On app start, Panes spawns `dolt sql-server` as a managed child process. `bd` commands connect to this Dolt instance. On app quit, Tauri kills the sidecar.
+
+**Beads provides:**
+- Dependency graph with four link types (`blocks`, `related`, `parent-child`, `discovered-from`) — only `blocks` affects the ready queue
+- `bd ready` → unblocked tasks ready for execution
+- `bd update <id> --claim` → atomic task claiming (prevents two agents grabbing the same task)
+- Hash-based IDs (`bd-a3f8`) → no merge collisions in multi-agent workflows
+- Dolt cell-level merge → concurrent agents can update different tasks without conflicts
+- Compaction → semantic summarization of closed tasks for context efficiency
+- `discovered-from` links → agents create new tasks mid-execution and link them to the parent
+
+**Panes-side execution config:**
+
+Beads tasks don't carry execution-specific fields (budget caps, gate policies, verification). These live in Panes' SQLite, keyed by beads task ID:
 
 ```rust
-pub struct ExecutionPlan {
-    pub id: String,
-    pub name: String,
-    pub tasks: Vec<ExecutionTask>,
-    pub created_at: DateTime<Utc>,
-    pub status: PlanStatus,
-    pub total_budget_cap: Option<f64>,
-}
-
-pub struct ExecutionTask {
-    pub id: String,
-    pub plan_id: String,
-    pub prompt: String,
+pub struct ExecutionConfig {
+    pub beads_task_id: String,          // bd-a3f8
     pub workspace_id: String,
-    pub depends_on: Vec<String>,          // task IDs this blocks on
     pub budget_cap: Option<f64>,
     pub gate_policy: GatePolicy,
     pub verification: Option<VerifierConfig>,
     pub on_complete: TaskAction,
     pub on_failure: TaskAction,
-    pub status: TaskStatus,
-    pub worktree_path: Option<PathBuf>,   // set when dispatched
-    pub thread_id: Option<String>,        // set when thread starts
-    pub output: Option<TaskOutput>,       // set on completion
-}
-
-pub struct TaskOutput {
-    pub summary: String,
-    pub changed_files: Vec<String>,
-    pub cost_usd: f64,
-    pub duration_ms: u64,
-}
-
-pub enum GatePolicy {
-    Normal,          // use workspace default gate rules
-    AutoApprove,     // skip gates (for trusted/verified steps)
-    AlwaysGate,      // force human review regardless of risk
-}
-
-pub enum TaskAction {
-    Continue,        // mark done, unblock dependents
-    Notify,          // notify user
-    Retry { max: u32 },
-    Escalate,        // pause plan, surface to user
-}
-
-pub enum TaskStatus {
-    Blocked,         // waiting on upstream deps
-    Ready,           // all deps satisfied, queued
-    Dispatched,      // worktree created, thread starting
-    Running,         // agent active
-    Gate,            // agent paused at gate
-    Verifying,       // verification running
-    Completed,
-    Failed { error: String },
-    Skipped,
-}
-
-pub enum PlanStatus {
-    Draft,           // planner proposed, user reviewing
-    Approved,        // user approved, ready to execute
-    Running,
-    Paused,          // user paused or escalation triggered
-    Completed,
-    Failed,
+    pub worktree_path: Option<PathBuf>, // set when dispatched
+    pub thread_id: Option<String>,      // set when thread starts
 }
 ```
 
-**DAG execution flow:**
-1. Planner LLM produces `ExecutionPlan` with tasks and dependency edges
-2. User reviews/refines the plan (adjust prompts, reorder deps, set budgets)
-3. User approves → plan status becomes `Approved`
-4. Scheduler builds a `petgraph::DiGraph` from tasks + deps, validates no cycles
-5. Scheduler queries `ready()` — tasks with all deps in `Completed` status
-6. For each ready task: create worktree, spawn thread via `SessionManager`
-7. Completion monitor watches for thread completion → updates task status → recalculates `ready()` set
-8. Task output (summary, files) is injected as context into downstream task prompts
-9. On failure: execute `on_failure` action (default: `Escalate`)
-10. Plan completes when all tasks reach terminal status
+**Execution flow:**
+1. Planner LLM creates beads task breakdown via `bd create` + `bd dep add`
+2. User reviews/refines in Panes UI (maps to `bd update` calls)
+3. User sets execution config per task (budget, gate policy, verification)
+4. Scheduler polls `bd ready --json` for unblocked tasks
+5. For each ready task: create worktree, spawn thread via `SessionManager`
+6. On completion: `bd close <id> --reason "summary"`, check for newly unblocked tasks
+7. Agents can create discovered tasks mid-execution via `bd create` + `bd dep add --type discovered-from`
+8. On failure: execute `on_failure` action (default: escalate to user)
 
-**Replanning:** If the user steers mid-execution (adds/removes/reorders tasks), the scheduler diffs the old and new DAG. Completed tasks are preserved. In-flight tasks continue. Only the frontier (ready + blocked) is recalculated.
+**Why beads over petgraph:** The dependency DAG with ready-queue queries is ~200 lines with petgraph. But persistence, agent-writable interface, concurrent multi-agent access, cell-level merge, compaction, and atomic claiming add up fast. Beads has all of this tested and shipped, with 23k stars and 89 releases. The Dolt foundation means concurrent agents writing to the task graph don't conflict at the database level — something SQLite can't do.
 
 ##### Where the Harness Sits
 
@@ -1133,7 +1100,7 @@ panes/
 | Cron scheduling | `tokio-cron-scheduler` | Lightweight, async, runs in-process |
 | IPC | Tauri events + commands | Built-in, typed, bidirectional |
 | Memory extraction | Mem0 (primary), LLM prompt (fallback) | Mem0 handles extraction quality; LLM fallback ensures graceful degradation |
-| Task DAG | `petgraph` (native Rust) | Dependency-aware task graph for multi-agent coordination. Cycle detection, topological sort, ready-set queries. No external binary — integrates directly with panes-scheduler types. Phase 2+. |
+| Task DAG | Beads (`bd` CLI, Dolt-backed) | Distributed graph issue tracker with dependency-aware ready queue, cell-level merge via Dolt, hash-based IDs (no merge conflicts), four link types (blocks, related, parent-child, discovered-from). Bundled as Tauri sidecar alongside Dolt. Panes shells out to `bd --json` from Rust. Phase 2+. |
 | Git worktrees | `git2` (libgit2 bindings) | Enables concurrent agent threads in the same repo via isolated working trees. git2 over CLI because swarms need: concurrent worktree creation with typed error handling, structured merge conflict detection (`IndexConflict` entries, three-way merge), and in-process status queries across N worktrees without per-worktree subprocess overhead. Phase 2+. |
 
 ---
@@ -1162,9 +1129,9 @@ Panes has three distinct persistence layers for agent context, each serving a di
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │  Tasks (structured, dependency-aware)        [Phase 2+] │ │
 │  │  What needs doing, what blocks what, what's done.       │ │
-│  │  Native petgraph DAG in panes-scheduler. SQLite-backed. │ │
-│  │  LLM planner produces ExecutionTask DAGs; scheduler     │ │
-│  │  picks unblocked tasks and spawns worktree threads.     │ │
+│  │  Beads (Dolt-backed graph tracker, bundled as sidecar). │ │
+│  │  LLM planner creates beads breakdown; scheduler reads   │ │
+│  │  `bd ready`, dispatches into worktree threads.          │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │                                                              │
 │  Each layer answers a different question:                    │
@@ -1315,7 +1282,103 @@ Thread A completes:
 
 **Merge conflicts:** When merging worktree results back to main, conflicts are possible if multiple threads touch overlapping files. git2's three-way merge primitives and `IndexConflict` entries let Panes detect and surface conflicts structurally. User is offered: resolve manually, keep one side, or discard the conflicting thread's changes.
 
-**Swarm execution model:** The planner LLM produces an `ExecutionPlan` (a DAG of `ExecutionTask` nodes). The scheduler picks tasks whose dependencies are satisfied, creates a worktree per task, spawns an agent thread in each worktree, and monitors completion. When a task completes, downstream tasks become unblocked and are dispatched. Each task's output (summary, changed files, cost) flows to dependent tasks as context.
+### Swarm Execution: Beads + Worktrees Integrated Flow
+
+Beads (task graph) and git worktrees (file isolation) are independent systems that Panes orchestrates together. Beads never touches git, git never touches Dolt. The separation is clean:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   Panes Swarm Architecture                       │
+│                                                                  │
+│  ┌────────────────────────────────┐                             │
+│  │  Dolt Server (sidecar process) │  ← single instance,        │
+│  │  ┌──────────────────────────┐  │    all agents share it     │
+│  │  │  Beads task graph        │  │                             │
+│  │  │                          │  │                             │
+│  │  │  bd-a3f8: Add endpoint   │  │                             │
+│  │  │  bd-b7c1: Add UI page   │──│── blocks ──→ bd-a3f8       │
+│  │  │  bd-c2d9: Security scan │──│── blocks ──→ bd-a3f8       │
+│  │  │  bd-d4e2: Perf test     │──│── blocks ──→ bd-b7c1       │
+│  │  └──────────────────────────┘  │                             │
+│  └──────────────┬─────────────────┘                             │
+│                 │ bd ready --json / bd close / bd create         │
+│                 │                                                │
+│  ┌──────────────▼─────────────────┐                             │
+│  │  Panes Scheduler               │                             │
+│  │                                │                             │
+│  │  1. Poll bd ready --json       │                             │
+│  │  2. Claim: bd update --claim   │                             │
+│  │  3. Look up ExecutionConfig    │                             │
+│  │  4. Create worktree (git2)     │                             │
+│  │  5. Spawn agent thread         │                             │
+│  │  6. On complete: bd close,     │                             │
+│  │     merge worktree, re-poll    │                             │
+│  └──────┬────────┬────────┬───────┘                             │
+│         │        │        │                                      │
+│  ┌──────▼──┐ ┌──▼─────┐ ┌▼────────┐                            │
+│  │Worktree │ │Worktree│ │Worktree │  ← isolated git checkouts  │
+│  │   A     │ │   B    │ │   C     │                             │
+│  │         │ │        │ │         │                             │
+│  │Agent 1  │ │Agent 2 │ │Agent 3  │                             │
+│  │bd-a3f8  │ │bd-c2d9 │ │(idle)   │                             │
+│  │         │ │        │ │         │                             │
+│  │cwd:     │ │cwd:    │ │cwd:     │                             │
+│  │/tmp/    │ │/tmp/   │ │/tmp/    │                             │
+│  │panes-wt-│ │panes-wt│ │panes-wt-│                             │
+│  │{a_id}   │ │{b_id}  │ │{c_id}   │                             │
+│  └─────────┘ └────────┘ └─────────┘                             │
+│                                                                  │
+│  Main working tree: ~/projects/backend (untouched during swarm) │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Full swarm cycle:**
+
+```
+Phase: PLAN
+  1. Planner agent creates beads breakdown:
+     bd create "Add /users/:id endpoint" -t task -p 1
+     bd create "Add profile UI page" -t task -p 2
+     bd dep add bd-b7c1 bd-a3f8 --type blocks
+     ...
+  2. User reviews tasks in Panes UI
+  3. User sets ExecutionConfig per task (budget, gate policy, verification)
+  4. User approves plan
+
+Phase: EXECUTE (scheduler loop)
+  5. Scheduler: bd ready --json → [bd-a3f8, bd-c2d9]  (no deps)
+  6. For each ready task:
+     a. bd update bd-a3f8 --claim           (atomic — prevents double-dispatch)
+     b. git2: create worktree + branch      (isolated checkout)
+     c. SessionManager: spawn agent thread  (cwd = worktree path)
+     d. Panes gates, cost tracking, budget caps apply normally
+
+Phase: COMPLETE (per task)
+  7. Agent finishes in worktree A
+  8. Panes runs verification (if configured)
+  9. bd close bd-a3f8 --reason "Added GET /users/:id with Zod validation"
+  10. Scheduler re-polls: bd ready --json → [bd-b7c1]  (newly unblocked)
+  11. User reviews worktree A changes:
+      [Merge to main] [Rebase] [Cherry-pick] [Discard]
+
+Phase: DISCOVERY (mid-execution)
+  12. Agent in worktree B discovers a missing migration while working:
+      bd create "Add users table migration" -t bug -p 1
+      bd dep add bd-e5f3 bd-c2d9 --type discovered-from
+  13. Scheduler sees bd-e5f3 on next poll, dispatches worktree D
+
+Phase: DONE
+  14. bd ready --json → []  (no more unblocked tasks)
+  15. All worktrees merged or discarded
+  16. Swarm complete — Panes shows aggregate cost, per-task results
+```
+
+**Why this separation works:**
+- Beads state lives in Dolt server (sidecar), not in `.beads/` on disk — worktrees don't copy or conflict on task data
+- `--claim` is atomic at the Dolt level — no double-dispatch even with concurrent scheduler polls
+- Dolt cell-level merge means two agents closing different tasks simultaneously don't conflict
+- Git worktrees isolate file changes per agent — no filesystem conflicts
+- Each layer is independently testable: beads with `bd` commands, worktrees with `git2`, execution with the existing `SessionManager` + `FakeAdapter`
 
 ### Constraints
 
@@ -1327,6 +1390,37 @@ Thread A completes:
 ---
 
 ## Process Lifecycle
+
+### Sidecar Management (Phase 2)
+
+```
+┌──────────────────────────────────────────────────────┐
+│  Sidecar Lifecycle                                    │
+│                                                       │
+│  App Start:                                           │
+│  1. Spawn dolt sql-server (Unix socket)               │
+│     - Managed by Tauri sidecar API                    │
+│     - Data dir: ~/Library/Application Support/         │
+│       dev.panes/dolt/                                 │
+│  2. Health-check: wait for socket ready               │
+│  3. bd commands connect via BEADS_DOLT_HOST env var   │
+│                                                       │
+│  Runtime:                                              │
+│  - Dolt server stays up for app lifetime              │
+│  - bd commands are short-lived (spawn, run, exit)     │
+│  - Panes wraps bd calls in a BeadsClient struct       │
+│    that handles JSON parsing and error mapping        │
+│                                                       │
+│  App Quit:                                             │
+│  1. Tauri kills sidecar process group                 │
+│  2. Dolt WAL is flushed on clean shutdown             │
+│                                                       │
+│  Crash Recovery:                                       │
+│  - Dolt uses WAL mode, recovers on next start         │
+│  - Orphaned worktrees cleaned up via                  │
+│    git worktree prune on app start                    │
+└──────────────────────────────────────────────────────┘
+```
 
 ### Agent Process Management
 

@@ -97,7 +97,7 @@ Phase 2 lifts this constraint via git worktrees — each concurrent thread gets 
 
 ### Task DAG / Swarm execution (Phase 2, not yet implemented)
 
-Multi-agent swarms use `petgraph` for dependency-aware task scheduling (not beads_rust — see GAPS.md for rationale). The planner LLM produces an `ExecutionPlan` DAG, user refines it, `panes-scheduler` dispatches unblocked tasks into worktree-backed threads. Each task carries its own prompt, budget cap, gate policy, and verification config.
+Multi-agent swarms use Beads (the original Go version, not beads_rust) for task management. `dolt` and `bd` are bundled as Tauri sidecars. Panes shells out to `bd --json` from Rust for task queries and updates. Beads owns the task graph (dependencies, ready queue, status); Panes owns execution (worktrees, gates, cost, verification). Execution-specific config lives in Panes' SQLite keyed by beads task ID. See GAPS.md for the full decision trail.
 
 ## Conventions
 
