@@ -2125,6 +2125,71 @@ body {
   resize: vertical;
   margin-bottom: 10px;
 }
+.commit-file-list {
+  margin-bottom: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+}
+.commit-file-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  padding: 0 2px;
+}
+.commit-file-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.commit-file-toggle:hover {
+  text-decoration: underline;
+}
+.commit-file-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 2px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.commit-file-item:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+}
+.commit-file-item input[type="checkbox"] {
+  margin: 0;
+  flex-shrink: 0;
+}
+.commit-file-status {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--warning);
+  width: 16px;
+  flex-shrink: 0;
+}
+.commit-file-path {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-dialog-error {
+  font-size: 12px;
+  color: var(--error);
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 59, 48, 0.1);
+  border-radius: 4px;
+}
 .commit-dialog-actions,
 .revert-confirm-actions {
   display: flex;

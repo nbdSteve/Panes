@@ -610,7 +610,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return null;
 
     case "get_changed_files":
-      return [];
+      return ["M  src/main.ts", "M  src/utils.ts", "?? src/new-file.ts"];
 
     case "get_workspace_cost":
       return 0;

@@ -248,9 +248,12 @@ async fn dispatch_command(
         "commit_changes" => {
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
             let message = args["message"].as_str().ok_or("missing message")?;
+            let files: Option<Vec<String>> = args.get("files")
+                .and_then(|f| f.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
             let expanded = crate::commands::expand_tilde(workspace_path);
             let path = std::path::PathBuf::from(&expanded);
-            let hash = panes_core::git::commit(&path, message)
+            let hash = panes_core::git::commit(&path, message, files.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(Value::String(hash))

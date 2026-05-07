@@ -45,6 +45,8 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
   const [budgetValue, setBudgetValue] = useState("");
   const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string } | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  const [commitError, setCommitError] = useState<string | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
   const [gitFiles, setGitFiles] = useState<string[] | null>(null);
@@ -213,6 +215,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               onCommit: (summary: string) => {
                 setCommitDialog({ threadId: thread.id, summary });
                 setCommitMessage(summary);
+                setSelectedFiles(new Set(gitFiles?.map(f => f.slice(3)) ?? []));
               },
               onRevert: () => setRevertConfirm(thread.id),
               onKeep: () => onCompletionAction(thread.id, "kept"),
@@ -250,25 +253,70 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
           <div className="commit-dialog-title">Commit changes</div>
           <textarea
             value={commitMessage}
-            onChange={(e) => setCommitMessage(e.target.value)}
+            onChange={(e) => { setCommitMessage(e.target.value); setCommitError(null); }}
             rows={3}
           />
+          {gitFiles && gitFiles.length > 0 && (
+            <div className="commit-file-list">
+              <div className="commit-file-list-header">
+                <span>Files ({selectedFiles.size}/{gitFiles.length})</span>
+                <button
+                  className="commit-file-toggle"
+                  onClick={() => {
+                    if (selectedFiles.size === gitFiles.length) {
+                      setSelectedFiles(new Set());
+                    } else {
+                      setSelectedFiles(new Set(gitFiles.map(f => f.slice(3))));
+                    }
+                  }}
+                >
+                  {selectedFiles.size === gitFiles.length ? "Deselect all" : "Select all"}
+                </button>
+              </div>
+              {gitFiles.map((f) => {
+                const filePath = f.slice(3);
+                const status = f.slice(0, 2).trim();
+                return (
+                  <label key={filePath} className="commit-file-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedFiles.has(filePath)}
+                      onChange={() => {
+                        const next = new Set(selectedFiles);
+                        if (next.has(filePath)) next.delete(filePath);
+                        else next.add(filePath);
+                        setSelectedFiles(next);
+                      }}
+                    />
+                    <span className="commit-file-status">{status}</span>
+                    <span className="commit-file-path">{filePath}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          {commitError && <div className="commit-dialog-error">{commitError}</div>}
           <div className="commit-dialog-actions">
             <button
               className="btn btn-success btn-sm"
+              disabled={gitFiles != null && gitFiles.length > 0 && selectedFiles.size === 0}
               onClick={async () => {
                 try {
-                  await api.commitChanges(workspace.path, commitMessage);
+                  const files = gitFiles && selectedFiles.size < gitFiles.length
+                    ? [...selectedFiles]
+                    : undefined;
+                  await api.commitChanges(workspace.path, commitMessage, files);
                   onCompletionAction(commitDialog.threadId, "committed");
+                  setCommitDialog(null);
                 } catch (e) {
-                  console.error("Commit failed:", e);
+                  const msg = e instanceof Error ? e.message : typeof e === "string" ? e : (e as { message?: string })?.message ?? JSON.stringify(e);
+                  setCommitError(msg);
                 }
-                setCommitDialog(null);
               }}
             >
               Confirm
             </button>
-            <button className="btn btn-secondary btn-sm" onClick={() => setCommitDialog(null)}>
+            <button className="btn btn-secondary btn-sm" onClick={() => { setCommitDialog(null); setCommitError(null); }}>
               Cancel
             </button>
           </div>

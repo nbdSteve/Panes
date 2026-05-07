@@ -43,10 +43,22 @@ pub async fn revert(workspace_path: &Path, snapshot: &SnapshotRef) -> Result<()>
     Ok(())
 }
 
-pub async fn commit(workspace_path: &Path, message: &str) -> Result<String> {
-    run_git(workspace_path, &["add", "-A"])
-        .await
-        .context("failed to stage changes")?;
+pub async fn commit(workspace_path: &Path, message: &str, files: Option<&[String]>) -> Result<String> {
+    match files {
+        Some(paths) if !paths.is_empty() => {
+            let mut args = vec!["add", "--"];
+            let owned: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+            args.extend(owned);
+            run_git(workspace_path, &args)
+                .await
+                .context("failed to stage selected files")?;
+        }
+        _ => {
+            run_git(workspace_path, &["add", "-A"])
+                .await
+                .context("failed to stage changes")?;
+        }
+    }
 
     run_git(workspace_path, &["commit", "-m", message])
         .await
@@ -115,7 +127,7 @@ mod tests {
 
         // Agent makes changes and commits
         fs::write(dir.path().join("new_file.txt"), "agent wrote this").unwrap();
-        commit(dir.path(), "agent commit").await.unwrap();
+        commit(dir.path(), "agent commit", None).await.unwrap();
 
         assert!(dir.path().join("new_file.txt").exists());
 
@@ -169,7 +181,7 @@ mod tests {
         let changed = get_changed_files(dir.path()).await.unwrap();
         assert!(!changed.is_empty());
 
-        let hash = commit(dir.path(), "add test file").await.unwrap();
+        let hash = commit(dir.path(), "add test file", None).await.unwrap();
         assert!(!hash.is_empty());
 
         let changed_after = get_changed_files(dir.path()).await.unwrap();

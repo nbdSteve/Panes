@@ -429,10 +429,11 @@ pub async fn cancel_thread(
 pub async fn commit_changes(
     workspace_path: String,
     message: String,
+    files: Option<Vec<String>>,
 ) -> Result<String, PanesError> {
     let expanded = expand_tilde(&workspace_path);
     let path = PathBuf::from(&expanded);
-    git::commit(&path, &message)
+    git::commit(&path, &message, files.as_deref())
         .await
         .map_err(PanesError::from)
 }

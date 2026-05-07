@@ -96,8 +96,8 @@ export const api = {
     call<void>("reject_gate", { threadId, toolUseId, reason }),
 
   // Git
-  commitChanges: (workspacePath: string, message: string) =>
-    call<string>("commit_changes", { workspacePath, message }),
+  commitChanges: (workspacePath: string, message: string, files?: string[]) =>
+    call<string>("commit_changes", { workspacePath, message, files: files ?? null }),
   revertChanges: (workspacePath: string, threadId: string) =>
     call<void>("revert_changes", { workspacePath, threadId }),
   getChangedFiles: (workspacePath: string) =>
