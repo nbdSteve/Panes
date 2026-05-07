@@ -380,6 +380,20 @@ async fn dispatch_command(
             }).await.map_err(|e| e.to_string())?;
             Ok(serde_json::json!(total))
         }
+        "get_cost_timeline" => {
+            let days = args.get("days").and_then(|d| d.as_u64()).unwrap_or(30) as u32;
+            let workspace_id = args.get("workspaceId").and_then(|w| w.as_str()).map(String::from);
+            let result = state.db.execute(move |conn| {
+                panes_core::db::query_cost_timeline(conn, days, workspace_id.as_deref())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(result).unwrap_or(Value::Array(vec![])))
+        }
+        "get_workspace_cost_breakdown" => {
+            let result = state.db.execute(|conn| {
+                panes_core::db::query_workspace_cost_breakdown(conn)
+            }).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(result).unwrap_or(Value::Array(vec![])))
+        }
         "get_changed_files" => {
             Ok(serde_json::json!([]))
         }

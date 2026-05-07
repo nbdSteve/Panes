@@ -49,12 +49,12 @@ test.describe("Full-Stack: Dashboard", () => {
 
     const card = page.locator(".dashboard-card", { hasText: "GateDash" });
     await expect(card).toBeVisible({ timeout: 10000 });
-    await expect(card.locator("text=gate")).toBeVisible({ timeout: 5000 });
+    await expect(card.locator(".dashboard-card-status", { hasText: "gate" })).toBeVisible({ timeout: 5000 });
 
     // Approve from dashboard
     await card.locator("button:has-text('Continue')").click();
 
     // Gate status should resolve
-    await expect(card.locator("text=gate")).not.toBeVisible({ timeout: 10000 });
+    await expect(card.locator(".dashboard-card-status", { hasText: "gate" })).not.toBeVisible({ timeout: 10000 });
   });
 });
