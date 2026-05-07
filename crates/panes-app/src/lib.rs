@@ -191,6 +191,7 @@ pub fn run() {
             commands::get_files_git_status,
             commands::list_git_repos,
             commands::commit_repos,
+            commands::generate_commit_message,
             commands::list_threads,
             commands::list_all_threads,
             commands::delete_thread,

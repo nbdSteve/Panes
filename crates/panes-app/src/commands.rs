@@ -525,6 +525,16 @@ pub async fn commit_repos(
         .map_err(PanesError::from)
 }
 
+#[tauri::command]
+pub async fn generate_commit_message(
+    workspace_path: String,
+    diff: String,
+) -> Result<String, PanesError> {
+    git::generate_commit_message(&workspace_path, &diff)
+        .await
+        .map_err(PanesError::from)
+}
+
 // --- Memory extraction ---
 
 #[tauri::command]

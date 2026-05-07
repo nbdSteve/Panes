@@ -48,11 +48,11 @@ test.describe("Panes App — Core Flows", () => {
     // Cost should be shown in completion stats
     await expect(page.locator(".completion-stat").first()).toBeVisible();
 
-    // No commit/revert buttons for text-only response
-    await expect(page.locator("text=Commit")).not.toBeVisible();
+    // No inspect/revert buttons for text-only response
+    await expect(page.locator("text=Inspect")).not.toBeVisible();
   });
 
-  test("file edit prompt shows commit/revert buttons", async ({ page }) => {
+  test("file edit prompt shows inspect/revert buttons", async ({ page }) => {
     await page.goto("/");
 
     await page.click("text=Add workspace");
@@ -65,8 +65,8 @@ test.describe("Panes App — Core Flows", () => {
 
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
 
-    // Should show commit/revert buttons
-    await expect(page.locator("button", { hasText: "Commit" })).toBeVisible();
+    // Should show inspect/revert buttons
+    await expect(page.locator("button", { hasText: "Inspect" })).toBeVisible();
     await expect(page.locator("button", { hasText: "Revert all" })).toBeVisible();
   });
 

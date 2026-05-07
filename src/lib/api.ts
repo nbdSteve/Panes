@@ -112,6 +112,8 @@ export const api = {
     call<string[]>("list_git_repos", { workspacePath }),
   commitRepos: (commits: RepoCommitParams[]) =>
     call<string[]>("commit_repos", { commits }),
+  generateCommitMessage: (workspacePath: string, diff: string) =>
+    call<string>("generate_commit_message", { workspacePath, diff }),
 
   // Memory
   extractMemories: (workspaceId: string, threadId: string, transcript: string) =>

@@ -1,12 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../lib/api";
 import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs, ModelInfo } from "../App";
-import type { RepoFileStatus, RepoCommitParams, CommentThread } from "../types/diff";
+import type { RepoFileStatus, CommentThread } from "../types/diff";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
-import CommitDialog from "./CommitDialog";
 import DiffView from "./DiffView";
 import CostBadge from "./CostBadge";
 import { threadDisplayCost } from "../lib/cost";
@@ -30,11 +29,15 @@ interface ThreadViewProps {
   onCompletionAction: (threadId: string, action: "committed" | "reverted" | "kept") => void;
   onCancel: (threadId: string) => void;
   onQueueFollowUp: (threadId: string, prompt: string) => void;
+  onResumeThread: (threadId: string, prompt: string) => void;
+  onAddDiffComment: (threadId: string, completionIdx: number, comment: CommentThread) => void;
+  onDiffViewChange: (threadId: string, view: { completionIdx: number; activeFile?: string } | null) => void;
+  onMarkFeedbackSent: (threadId: string, completionIdx: number, commentCount: number) => void;
   onSetBudgetCap: (workspaceId: string, budgetCap: number | null) => void;
   showCost?: boolean;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, models, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onSetBudgetCap, showCost }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, models, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
@@ -47,14 +50,24 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
   const modelRef = useRef<HTMLDivElement>(null);
   const [editingBudget, setEditingBudget] = useState(false);
   const [budgetValue, setBudgetValue] = useState("");
-  const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string; completionIdx: number } | null>(null);
   const [commitError, setCommitError] = useState<string | null>(null);
+  const [suggestedMessage, setSuggestedMessage] = useState<string>("");
+  const [generatingMessage, setGeneratingMessage] = useState(false);
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
   const [cardFiles, setCardFiles] = useState<Record<number, RepoFileStatus[]>>({});
-  const [diffView, setDiffView] = useState<{ filePath: string; completionIdx: number } | null>(null);
+  const [diffView, setDiffViewLocal] = useState<{ completionIdx: number; initialFile?: string } | null>(
+    thread?.activeDiffView ? { completionIdx: thread.activeDiffView.completionIdx, initialFile: thread.activeDiffView.activeFile } : null
+  );
   const [diffRaw, setDiffRaw] = useState<string | null>(null);
-  const [cardComments, setCardComments] = useState<Record<number, CommentThread[]>>({});
+
+  const setDiffView = useCallback((view: { completionIdx: number; initialFile?: string } | null) => {
+    setDiffViewLocal(view);
+    if (thread) {
+      onDiffViewChange(thread.id, view ? { completionIdx: view.completionIdx, activeFile: view.initialFile } : null);
+    }
+  }, [thread, onDiffViewChange]);
+  const cardComments = thread?.diffComments ?? {};
   const cardFilesFetched = useRef<Set<number>>(new Set());
   const contentRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -73,24 +86,35 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
 
     let segStart = 0;
     completeEvents.forEach((_, idx) => {
-      if (cardFilesFetched.current.has(idx)) return;
-
       const segEnd = events.indexOf(completeEvents[idx]);
+
+      if (cardFilesFetched.current.has(idx)) {
+        segStart = segEnd + 1;
+        return;
+      }
+
       const segmentEvents = events.slice(segStart, segEnd);
       const paths = extractFilePaths(segmentEvents);
       segStart = segEnd + 1;
 
-      if (paths.length === 0) {
-        cardFilesFetched.current.add(idx);
-        return;
-      }
-
       cardFilesFetched.current.add(idx);
+
+      if (paths.length === 0) return;
+
       api.getFilesGitStatus(paths).then((status) => {
         setCardFiles((prev) => ({ ...prev, [idx]: status }));
       }).catch(() => {});
     });
   }, [events]);
+
+  useEffect(() => {
+    if (diffView && diffRaw === null) {
+      const files = (cardFiles[diffView.completionIdx] ?? []).flatMap((r) => r.files.map((f) => f.absolutePath));
+      api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined)
+        .then(setDiffRaw)
+        .catch(() => setDiffRaw(""));
+    }
+  }, [diffView, diffRaw, cardFiles, workspace.path]);
 
   useEffect(() => {
     onConfigChange({ adapter: selectedAdapter, agent: selectedAgent, model: selectedModel });
@@ -230,10 +254,16 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               </div>
             )}
 
-            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionActions, cardFiles, cardComments, {
-              onCommit: (summary: string, completionIdx: number) => {
-                setCommitDialog({ threadId: thread.id, summary, completionIdx });
-                setCommitError(null);
+            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionActions, thread.feedbackSent, cardFiles, cardComments, {
+              onInspect: (completionIdx: number) => {
+                setDiffView({ completionIdx });
+                if (diffRaw === null || diffView?.completionIdx !== completionIdx) {
+                  setDiffRaw(null);
+                  const files = (cardFiles[completionIdx] ?? []).flatMap((r) => r.files.map((f) => f.absolutePath));
+                  api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined)
+                    .then(setDiffRaw)
+                    .catch(() => setDiffRaw(""));
+                }
               },
               onRevert: () => setRevertConfirm(thread.id),
               onKeep: () => onCompletionAction(thread.id, "kept"),
@@ -242,17 +272,21 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
                 onQueueFollowUp(tid, text);
               },
               onViewDiff: (filePath: string, completionIdx: number) => {
-                setDiffView({ filePath, completionIdx });
-                setDiffRaw(null);
-                api.getFileDiff(workspace.path, filePath)
-                  .then(setDiffRaw)
-                  .catch(() => setDiffRaw(""));
+                setDiffView({ completionIdx, initialFile: filePath });
+                if (diffRaw === null || diffView?.completionIdx !== completionIdx) {
+                  setDiffRaw(null);
+                  const files = (cardFiles[completionIdx] ?? []).flatMap((r) => r.files.map((f) => f.absolutePath));
+                  api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined)
+                    .then(setDiffRaw)
+                    .catch(() => setDiffRaw(""));
+                }
               },
               onSendFeedback: (completionIdx: number) => {
                 const comments = cardComments[completionIdx] ?? [];
                 if (comments.length === 0) return;
-                const prompt = formatCommentsAsPrompt(comments);
-                onQueueFollowUp(thread.id, prompt);
+                const feedbackPrompt = formatCommentsAsPrompt(comments);
+                onResumeThread(thread.id, feedbackPrompt);
+                onMarkFeedbackSent(thread.id, completionIdx, comments.length);
               },
             }, showCost)}
 
@@ -279,29 +313,10 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
         )}
       </div>
 
-      {commitDialog && (
-        <CommitDialog
-          repoFiles={cardFiles[commitDialog.completionIdx] ?? []}
-          defaultMessage={commitDialog.summary}
-          error={commitError}
-          onCommit={async (commits: RepoCommitParams[]) => {
-            try {
-              await api.commitRepos(commits);
-              onCompletionAction(commitDialog.threadId, "committed");
-              setCommitDialog(null);
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : typeof e === "string" ? e : (e as { message?: string })?.message ?? JSON.stringify(e);
-              setCommitError(msg);
-            }
-          }}
-          onCancel={() => { setCommitDialog(null); setCommitError(null); }}
-        />
-      )}
-
-      {diffView && diffRaw !== null && (
+      {diffView && diffRaw !== null && thread && (
         <DiffView
           diff={parseDiff(diffRaw)}
-          selectedFile={diffView.filePath}
+          selectedFile={diffView.initialFile}
           comments={cardComments[diffView.completionIdx] ?? []}
           onAddComment={(filePath, side, startLine, endLine, body) => {
             const comment: CommentThread = {
@@ -313,12 +328,43 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               body,
               createdAt: new Date().toISOString(),
             };
-            setCardComments((prev) => ({
-              ...prev,
-              [diffView.completionIdx]: [...(prev[diffView.completionIdx] ?? []), comment],
-            }));
+            onAddDiffComment(thread.id, diffView.completionIdx, comment);
+          }}
+          onActiveFileChange={(filePath) => {
+            if (thread) {
+              onDiffViewChange(thread.id, { completionIdx: diffView.completionIdx, activeFile: filePath });
+            }
           }}
           onClose={() => setDiffView(null)}
+          repoFiles={!thread.completionActions?.[diffView.completionIdx] ? cardFiles[diffView.completionIdx] : undefined}
+          commitError={commitError}
+          suggestedMessage={suggestedMessage}
+          generatingMessage={generatingMessage}
+          onGenerateMessage={() => {
+            setGeneratingMessage(true);
+            api.generateCommitMessage(workspace.path, diffRaw)
+              .then((msg) => { setSuggestedMessage(msg); setGeneratingMessage(false); })
+              .catch(() => setGeneratingMessage(false));
+          }}
+          onCommit={!thread.completionActions?.[diffView.completionIdx] ? async (commits) => {
+            try {
+              setCommitError(null);
+              await api.commitRepos(commits);
+              onCompletionAction(thread.id, "committed");
+              setDiffView(null);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : typeof e === "string" ? e : (e as { message?: string })?.message ?? JSON.stringify(e);
+              setCommitError(msg);
+            }
+          } : undefined}
+          onSendFeedback={(cardComments[diffView.completionIdx] ?? []).length > 0 ? () => {
+            const feedbackComments = cardComments[diffView.completionIdx] ?? [];
+            if (feedbackComments.length === 0) return;
+            const feedbackPrompt = formatCommentsAsPrompt(feedbackComments);
+            onResumeThread(thread.id, feedbackPrompt);
+            onMarkFeedbackSent(thread.id, diffView.completionIdx, feedbackComments.length);
+            setDiffView(null);
+          } : undefined}
         />
       )}
 
@@ -663,7 +709,7 @@ function ToolGroupCard({ group, showCost }: { group: ToolGroup; showCost?: boole
 
 
 interface RenderCallbacks {
-  onCommit: (summary: string, completionIdx: number) => void;
+  onInspect: (completionIdx: number) => void;
   onRevert: () => void;
   onKeep: () => void;
   onSteer: (threadId: string, toolUseId: string, text: string) => void;
@@ -676,6 +722,7 @@ function renderEvents(
   runningCost: number,
   threadId: string,
   completionActions: Record<number, "committed" | "reverted" | "kept"> | undefined,
+  feedbackSent: Record<number, number> | undefined,
   cardFiles: Record<number, RepoFileStatus[]>,
   cardComments: Record<number, CommentThread[]>,
   callbacks: RenderCallbacks,
@@ -829,6 +876,7 @@ function renderEvents(
         const filesChanged = repoStatus && repoStatus.length > 0
           ? repoStatus.flatMap((r) => r.files.map((f) => ({
               path: f.relativePath,
+              absolutePath: f.absolutePath,
               action: f.status === "??" ? "untracked" as const : f.status.includes("D") ? "deleted" as const : f.status.includes("A") ? "created" as const : "modified" as const,
             })))
           : heuristicFiles;
@@ -838,6 +886,7 @@ function renderEvents(
         const cardAction = completionActions?.[completionIdx];
         const hasChanges = hadWrites || (repoStatus != null && repoStatus.length > 0);
         const commentCount = (cardComments[completionIdx] ?? []).length;
+        const feedbackSentCount = feedbackSent?.[completionIdx];
         return (
           <CompletionCard
             key={i}
@@ -851,7 +900,8 @@ function renderEvents(
             testResults={testResults}
             completionAction={cardAction}
             commentCount={commentCount}
-            onCommit={() => callbacks.onCommit(event.summary || "", completionIdx)}
+            feedbackSentCount={feedbackSentCount}
+            onInspect={() => callbacks.onInspect(completionIdx)}
             onRevert={callbacks.onRevert}
             onKeep={callbacks.onKeep}
             onFileClick={(filePath) => callbacks.onViewDiff(filePath, completionIdx)}

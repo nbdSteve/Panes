@@ -4,12 +4,14 @@ import type { RepoFileStatus, RepoCommitParams } from "../types/diff";
 interface CommitDialogProps {
   repoFiles: RepoFileStatus[];
   defaultMessage: string;
+  loading?: boolean;
   onCommit: (commits: RepoCommitParams[]) => void;
   onCancel: () => void;
+  onViewDiff?: (absolutePath: string) => void;
   error: string | null;
 }
 
-export default function CommitDialog({ repoFiles, defaultMessage, onCommit, onCancel, error }: CommitDialogProps) {
+export default function CommitDialog({ repoFiles, defaultMessage, loading, onCommit, onCancel, onViewDiff, error }: CommitDialogProps) {
   const isMultiRepo = repoFiles.length > 1;
 
   const [repoMessages, setRepoMessages] = useState<Record<string, string>>(() => {
@@ -76,6 +78,10 @@ export default function CommitDialog({ repoFiles, defaultMessage, onCommit, onCa
         <button className="btn-icon" onClick={onCancel}>✕</button>
       </div>
 
+      {loading && repoFiles.length === 0 && (
+        <div className="commit-loading">Loading files...</div>
+      )}
+
       {repoFiles.map((repo) => {
         const allPaths = repo.files.map((f) => f.relativePath);
         const repoSelected = selectedFiles[repo.repoPath] ?? new Set();
@@ -117,7 +123,10 @@ export default function CommitDialog({ repoFiles, defaultMessage, onCommit, onCa
                     onChange={() => handleToggleFile(repo.repoPath, file.relativePath)}
                   />
                   <span className={`commit-file-status commit-status-${file.status}`}>{file.status}</span>
-                  <span className="commit-file-path">{file.relativePath}</span>
+                  <span
+                    className={`commit-file-path${onViewDiff ? " commit-file-path-clickable" : ""}`}
+                    onClick={onViewDiff ? (e) => { e.preventDefault(); e.stopPropagation(); onViewDiff(file.absolutePath); } : undefined}
+                  >{file.relativePath}</span>
                 </label>
               ))}
             </div>

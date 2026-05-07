@@ -32,6 +32,8 @@ export interface ThreadInfo {
   costUsd?: number;
   completionActions?: Record<number, "committed" | "reverted" | "kept">;
   diffComments?: Record<number, import("./diff").CommentThread[]>;
+  feedbackSent?: Record<number, number>;
+  activeDiffView?: { completionIdx: number; activeFile?: string };
   queuedFollowUp?: string;
   events: AgentEvent[];
   memoryCount?: number;

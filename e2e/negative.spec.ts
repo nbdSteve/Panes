@@ -72,13 +72,13 @@ test.describe("Error Recovery", () => {
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
   });
 
-  test("error does not show commit/revert buttons", async ({ page }) => {
+  test("error does not show inspect/revert buttons", async ({ page }) => {
     await addWorkspaceAndSend(page, "cause an error");
 
     await expect(page.locator(".error-card")).toBeVisible({ timeout: 2000 });
 
     // No completion actions should be visible
-    await expect(page.locator("button:has-text('Commit')")).not.toBeVisible();
+    await expect(page.locator("button:has-text('Inspect')")).not.toBeVisible();
     await expect(page.locator("button:has-text('Revert')")).not.toBeVisible();
     await expect(page.locator("button:has-text('Keep')")).not.toBeVisible();
   });
@@ -161,23 +161,23 @@ test.describe("Double-Click Safety", () => {
 });
 
 test.describe("Dialog Cancellation", () => {
-  test("cancelling commit dialog does not commit — buttons remain", async ({ page }) => {
+  test("closing inspect modal does not commit — buttons remain", async ({ page }) => {
     await addWorkspaceAndSend(page, "edit the files");
 
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
 
-    // Open commit dialog
-    await page.click("button:has-text('Commit')");
-    await expect(page.locator(".commit-dialog")).toBeVisible();
+    // Open inspect modal
+    await page.click("button:has-text('Inspect')");
+    await expect(page.locator(".diff-overlay")).toBeVisible();
 
-    // Cancel the dialog
-    await page.click(".commit-dialog button:has-text('Cancel')");
+    // Close the modal
+    await page.click(".diff-close-btn");
 
-    // Dialog should close
-    await expect(page.locator(".commit-dialog")).not.toBeVisible();
+    // Modal should close
+    await expect(page.locator(".diff-overlay")).not.toBeVisible();
 
-    // Commit/Revert/Keep buttons should still be present
-    await expect(page.locator("button:has-text('Commit')")).toBeVisible();
+    // Inspect/Revert/Keep buttons should still be present
+    await expect(page.locator("button:has-text('Inspect')")).toBeVisible();
     await expect(page.locator("button:has-text('Revert all')")).toBeVisible();
     await expect(page.locator("button:has-text('Keep')")).toBeVisible();
   });
@@ -198,7 +198,7 @@ test.describe("Dialog Cancellation", () => {
     await expect(page.locator(".revert-confirm")).not.toBeVisible();
 
     // Buttons should still be present
-    await expect(page.locator("button:has-text('Commit')")).toBeVisible();
+    await expect(page.locator("button:has-text('Inspect')")).toBeVisible();
     await expect(page.locator("button:has-text('Revert all')")).toBeVisible();
   });
 });

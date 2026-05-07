@@ -52,7 +52,7 @@ pub async fn commit(workspace_path: &Path, message: &str, files: Option<&[String
     );
 
     if is_git_repo(workspace_path).await {
-        commit_in_repo(workspace_path, message, files).await
+        commit_in_repo(workspace_path, message, files, false).await
     } else {
         let repos = find_git_repos(workspace_path).await;
         if repos.is_empty() {
@@ -70,7 +70,7 @@ pub async fn commit(workspace_path: &Path, message: &str, files: Option<&[String
                             .to_string_lossy()
                             .to_string()
                     }).collect();
-                    last_hash = commit_in_repo(&repo_path, message, Some(&relative_files)).await?;
+                    last_hash = commit_in_repo(&repo_path, message, Some(&relative_files), false).await?;
                 }
             }
             _ => {
@@ -79,7 +79,7 @@ pub async fn commit(workspace_path: &Path, message: &str, files: Option<&[String
                         .map(|o| !o.trim().is_empty())
                         .unwrap_or(false);
                     if has_changes {
-                        last_hash = commit_in_repo(repo, message, None).await?;
+                        last_hash = commit_in_repo(repo, message, None, false).await?;
                     }
                 }
             }
@@ -91,7 +91,7 @@ pub async fn commit(workspace_path: &Path, message: &str, files: Option<&[String
     }
 }
 
-async fn commit_in_repo(repo_path: &Path, message: &str, files: Option<&[String]>) -> Result<String> {
+async fn commit_in_repo(repo_path: &Path, message: &str, files: Option<&[String]>, amend: bool) -> Result<String> {
     match files {
         Some(paths) if !paths.is_empty() => {
             let mut args = vec!["add", "--"];
@@ -108,7 +108,12 @@ async fn commit_in_repo(repo_path: &Path, message: &str, files: Option<&[String]
         }
     }
 
-    run_git(repo_path, &["commit", "-m", message])
+    let commit_args = if amend {
+        vec!["commit", "--amend", "-m", message]
+    } else {
+        vec!["commit", "-m", message]
+    };
+    run_git(repo_path, &commit_args)
         .await
         .with_context(|| format!("failed to create commit in {}", repo_path.display()))?;
 
@@ -209,8 +214,25 @@ fn group_files_by_repo<'a>(
 }
 
 pub async fn get_file_diff(workspace_path: &Path, file_path: &str) -> Result<String> {
-    let ws_path = Path::new(file_path);
+    let path = Path::new(file_path);
 
+    // If absolute path, find its repo directly
+    if path.is_absolute() {
+        let dir = if path.is_file() || !path.exists() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        if let Some(repo_root) = find_repo_root(dir).await {
+            let relative = path.strip_prefix(&repo_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| file_path.to_string());
+            return get_diff_in_repo(&repo_root, &relative).await;
+        }
+        anyhow::bail!("file {} is not in a git repository", file_path);
+    }
+
+    // Relative path: resolve against workspace
     if is_git_repo(workspace_path).await {
         return get_diff_in_repo(workspace_path, file_path).await;
     }
@@ -218,8 +240,8 @@ pub async fn get_file_diff(workspace_path: &Path, file_path: &str) -> Result<Str
     let repos = find_git_repos(workspace_path).await;
     for repo in &repos {
         let rel_prefix = repo.strip_prefix(workspace_path).unwrap_or(Path::new(""));
-        if ws_path.starts_with(rel_prefix) {
-            let repo_relative = ws_path.strip_prefix(rel_prefix).unwrap_or(ws_path);
+        if path.starts_with(rel_prefix) {
+            let repo_relative = path.strip_prefix(rel_prefix).unwrap_or(path);
             return get_diff_in_repo(repo, repo_relative.to_str().unwrap_or(file_path)).await;
         }
     }
@@ -402,6 +424,8 @@ pub struct RepoCommitParams {
     pub repo_path: String,
     pub message: String,
     pub files: Vec<String>,
+    #[serde(default)]
+    pub amend: bool,
 }
 
 pub async fn commit_repos(commits: &[RepoCommitParams]) -> Result<Vec<String>> {
@@ -418,14 +442,38 @@ pub async fn commit_repos(commits: &[RepoCommitParams]) -> Result<Vec<String>> {
         let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
 
         let hash = if file_refs.is_empty() {
-            commit_in_repo(repo_path, &params.message, None).await?
+            commit_in_repo(repo_path, &params.message, None, params.amend).await?
         } else {
             let borrowed: Vec<String> = file_refs.iter().map(|s| s.to_string()).collect();
-            commit_in_repo(repo_path, &params.message, Some(&borrowed)).await?
+            commit_in_repo(repo_path, &params.message, Some(&borrowed), params.amend).await?
         };
         hashes.push(hash);
     }
     Ok(hashes)
+}
+
+pub async fn generate_commit_message(_workspace_path: &str, diff: &str) -> Result<String> {
+    let claude_path = std::env::var("PANES_CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
+    let prompt = format!(
+        "Generate a concise git commit message (subject line + optional body) for the following diff. \
+         Use conventional commit format (feat/fix/refactor/docs/chore). Subject line max 72 chars. \
+         Body should explain WHY, not WHAT. Output ONLY the commit message, nothing else.\n\n```diff\n{}\n```",
+        if diff.len() > 8000 { &diff[..8000] } else { diff }
+    );
+
+    let output = Command::new(&claude_path)
+        .args(["--model", "haiku", "-p", &prompt, "--output-format", "text"])
+        .output()
+        .await
+        .with_context(|| "failed to run claude for commit message generation")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("commit message generation failed: {}", stderr.trim());
+    }
+
+    let msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(msg)
 }
 
 async fn run_git(workspace_path: &Path, args: &[&str]) -> Result<String> {
@@ -709,11 +757,13 @@ mod tests {
                 repo_path: repo_a.to_string_lossy().to_string(),
                 message: "commit for repo-a".to_string(),
                 files: vec!["a.txt".to_string()],
+                amend: false,
             },
             RepoCommitParams {
                 repo_path: repo_b.to_string_lossy().to_string(),
                 message: "commit for repo-b".to_string(),
                 files: vec!["b.txt".to_string()],
+                amend: false,
             },
         ];
 

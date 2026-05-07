@@ -113,6 +113,41 @@ function App() {
     []
   );
 
+  const handleAddDiffComment = useCallback(
+    (threadId: string, completionIdx: number, comment: import("./types/diff").CommentThread) => {
+      setThreads((prev) =>
+        prev.map((t) => {
+          if (t.id !== threadId) return t;
+          const existing = t.diffComments?.[completionIdx] ?? [];
+          return { ...t, diffComments: { ...t.diffComments, [completionIdx]: [...existing, comment] } };
+        })
+      );
+    },
+    []
+  );
+
+  const handleDiffViewChange = useCallback(
+    (threadId: string, view: { completionIdx: number; activeFile?: string } | null) => {
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === threadId ? { ...t, activeDiffView: view ?? undefined } : t
+        )
+      );
+    },
+    []
+  );
+
+  const handleMarkFeedbackSent = useCallback(
+    (threadId: string, completionIdx: number, commentCount: number) => {
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === threadId ? { ...t, feedbackSent: { ...t.feedbackSent, [completionIdx]: commentCount } } : t
+        )
+      );
+    },
+    []
+  );
+
   const handleCancelThread = useCallback(
     async (threadId: string) => {
       try {
@@ -537,6 +572,10 @@ function App() {
             onCompletionAction={handleCompletionAction}
             onCancel={handleCancelThread}
             onQueueFollowUp={handleQueueFollowUp}
+            onResumeThread={(threadId, prompt) => handleResumeThread(activeWs, threadId, prompt)}
+            onAddDiffComment={handleAddDiffComment}
+            onDiffViewChange={handleDiffViewChange}
+            onMarkFeedbackSent={handleMarkFeedbackSent}
             onSetBudgetCap={handleSetBudgetCap}
             showCost={costTrackingEnabled}
           />

@@ -415,6 +415,9 @@ async fn dispatch_command(
         "commit_repos" => {
             Ok(serde_json::json!(["abc123"]))
         }
+        "generate_commit_message" => {
+            Ok(serde_json::json!("feat: update files with improvements\n\nApply requested changes to source files."))
+        }
         "extract_memories" => {
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?;

@@ -5,6 +5,12 @@ import { formatCost } from "../lib/utils";
 
 export type FileChangeAction = "created" | "modified" | "deleted" | "untracked";
 
+export interface FileChange {
+  path: string;
+  action: FileChangeAction;
+  absolutePath?: string;
+}
+
 export interface CompletionCardProps {
   summary: string;
   totalCost: number;
@@ -12,11 +18,12 @@ export interface CompletionCardProps {
   durationMs: number;
   turns: number;
   hasFileChanges: boolean;
-  filesChanged?: { path: string; action: FileChangeAction }[];
+  filesChanged?: FileChange[];
   testResults?: string;
   completionAction?: "committed" | "reverted" | "kept";
   commentCount?: number;
-  onCommit: () => void;
+  feedbackSentCount?: number;
+  onInspect: () => void;
   onRevert: () => void;
   onKeep: () => void;
   onFileClick?: (filePath: string) => void;
@@ -34,7 +41,8 @@ export default function CompletionCard({
   testResults,
   completionAction,
   commentCount,
-  onCommit,
+  feedbackSentCount,
+  onInspect,
   onRevert,
   onKeep,
   onFileClick,
@@ -96,7 +104,7 @@ export default function CompletionCard({
                 <li
                   key={i}
                   className={`files-changed-item${onFileClick ? " clickable" : ""}`}
-                  onClick={onFileClick ? () => onFileClick(f.path) : undefined}
+                  onClick={onFileClick ? () => onFileClick(f.absolutePath ?? f.path) : undefined}
                 >
                   <span className={`files-changed-icon ${f.action}`}>
                     {f.action === "created" || f.action === "untracked" ? "+" : f.action === "deleted" ? "-" : "~"}
@@ -149,11 +157,11 @@ export default function CompletionCard({
 
       {hasFileChanges && !completionAction && (
         <div className="completion-actions">
-          <button className="btn btn-success btn-sm" onClick={onCommit}>
+          <button className="btn btn-primary btn-sm" onClick={onInspect}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <circle cx="12" cy="12" r="4" /><line x1="1.05" y1="12" x2="7" y2="12" /><line x1="17.01" y1="12" x2="22.96" y2="12" />
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" />
             </svg>
-            Commit
+            Inspect
           </button>
           <button className="btn btn-danger btn-sm" onClick={onRevert}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -167,7 +175,15 @@ export default function CompletionCard({
         </div>
       )}
 
-      {onSendFeedback && commentCount != null && commentCount > 0 && (
+      {feedbackSentCount != null && feedbackSentCount > 0 && (
+        <div className="completion-actions">
+          <span className="completion-action-badge feedback-sent">
+            Feedback sent ({feedbackSentCount} comment{feedbackSentCount !== 1 ? "s" : ""})
+          </span>
+        </div>
+      )}
+
+      {!feedbackSentCount && onSendFeedback && commentCount != null && commentCount > 0 && (
         <div className="completion-actions">
           <button className="btn btn-primary btn-sm" onClick={onSendFeedback}>
             Send feedback ({commentCount} comment{commentCount !== 1 ? "s" : ""})

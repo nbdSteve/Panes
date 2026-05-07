@@ -640,7 +640,31 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
  }`;
 
     case "get_workspace_diff":
-      return "";
+      return `diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,5 +1,7 @@
+ use std::io;
++use std::fmt;
+
+ fn main() {
+-    println!("Hello, world!");
++    let name = "Panes";
++    println!("Hello, {}!", name);
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,8 @@
++pub mod utils;
++
+ pub fn add(a: i32, b: i32) -> i32 {
+     a + b
+ }
++
++pub fn subtract(a: i32, b: i32) -> i32 {
++    a - b
++}`;
 
     case "get_files_git_status": {
       const filePaths = (args?.filePaths as string[]) ?? [];
@@ -661,6 +685,9 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
     case "commit_repos":
       return ["mock-commit-hash-123"];
+
+    case "generate_commit_message":
+      return "feat: add formatting utilities and refactor main entry point\n\nIntroduce fmt import for display formatting, rename greeting target, and add subtract utility function to lib module.";
 
     case "get_workspace_cost":
       return 0;

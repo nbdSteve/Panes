@@ -11,41 +11,40 @@ function addWorkspaceAndSend(page: any, prompt: string) {
   })();
 }
 
-test.describe("Completion Actions — Commit, Revert, Keep", () => {
-  test("commit opens dialog with auto-generated message", async ({ page }) => {
+test.describe("Completion Actions — Inspect, Revert, Keep", () => {
+  test("inspect opens diff modal with commit button at bottom", async ({ page }) => {
     await addWorkspaceAndSend(page, "edit the files");
 
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
 
-    await page.click("button:has-text('Commit')");
+    await page.click("button:has-text('Inspect')");
 
-    // Should open a commit dialog
-    await expect(page.locator(".commit-dialog")).toBeVisible();
+    // Should open the diff modal
+    await expect(page.locator(".diff-overlay")).toBeVisible();
 
-    // Should pre-fill with thread summary as commit message
-    const messageInput = page.locator(".commit-message-input");
-    await expect(messageInput).toBeVisible();
-    const value = await messageInput.inputValue();
-    expect(value.length).toBeGreaterThan(0);
+    // Should have commit button in action bar
+    await expect(page.locator(".diff-action-bar .diff-commit-trigger")).toBeVisible();
   });
 
-  test("commit dialog allows editing message before confirming", async ({ page }) => {
+  test("commit from inspect modal shows committed badge", async ({ page }) => {
     await addWorkspaceAndSend(page, "edit the files");
 
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
 
-    await page.click("button:has-text('Commit')");
-    await expect(page.locator(".commit-dialog")).toBeVisible();
+    await page.click("button:has-text('Inspect')");
+    await expect(page.locator(".diff-overlay")).toBeVisible();
 
-    // Edit the message
-    await page.fill(".commit-message-input", "Custom commit message");
-    await page.click(".commit-dialog-footer button.btn-primary");
+    // Click commit button, enter message, confirm
+    await page.click(".diff-commit-trigger");
+    await expect(page.locator(".diff-commit-view")).toBeVisible();
+    await page.fill(".diff-commit-input", "Custom commit message");
+    await page.click(".diff-commit-btn");
 
     // Should show committed state
     await expect(page.locator("text=Committed")).toBeVisible({ timeout: 2000 });
 
-    // Commit/revert buttons should be replaced
-    await expect(page.locator("button:has-text('Commit')")).not.toBeVisible();
+    // Inspect/revert buttons should be replaced with badge
+    await expect(page.locator("button:has-text('Inspect')")).not.toBeVisible();
     await expect(page.locator("button:has-text('Revert')")).not.toBeVisible();
   });
 
@@ -65,8 +64,8 @@ test.describe("Completion Actions — Commit, Revert, Keep", () => {
     // Should show reverted state
     await expect(page.locator("text=Reverted")).toBeVisible({ timeout: 2000 });
 
-    // Commit/revert buttons should be gone
-    await expect(page.locator("button:has-text('Commit')")).not.toBeVisible();
+    // Inspect/revert buttons should be gone
+    await expect(page.locator("button:has-text('Inspect')")).not.toBeVisible();
   });
 
   test("keep dismisses action buttons", async ({ page }) => {
@@ -77,7 +76,7 @@ test.describe("Completion Actions — Commit, Revert, Keep", () => {
     await page.click("button:has-text('Keep')");
 
     // Buttons should be dismissed
-    await expect(page.locator("button:has-text('Commit')")).not.toBeVisible();
+    await expect(page.locator("button:has-text('Inspect')")).not.toBeVisible();
     await expect(page.locator("button:has-text('Revert')")).not.toBeVisible();
     await expect(page.locator("button:has-text('Keep')")).not.toBeVisible();
   });

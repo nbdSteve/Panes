@@ -66,4 +66,5 @@ export interface RepoCommitParams {
   repoPath: string;
   message: string;
   files: string[];
+  amend?: boolean;
 }
