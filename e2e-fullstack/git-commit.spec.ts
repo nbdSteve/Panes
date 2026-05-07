@@ -17,10 +17,17 @@ test.describe("Full-Stack: Git Commit", () => {
     await waitForCompletion(page);
     expect(isClean(wsPath)).toBe(false);
 
-    await page.click("button:has-text('Commit')");
-    const confirmBtn = page.locator("button:has-text('Confirm')");
-    await confirmBtn.waitFor({ timeout: 3000 });
-    await confirmBtn.click();
+    // Open the diff viewer via Inspect
+    await page.click("button:has-text('Inspect')");
+    await page.locator(".diff-modal").waitFor({ timeout: 5000 });
+
+    // Switch to commit view via action bar
+    await page.click(".diff-action-bar button:has-text('Commit')");
+    await page.locator("text=Commit Changes").waitFor({ timeout: 3000 });
+
+    // Fill commit message and submit
+    await page.fill('textarea[placeholder="Describe your changes..."]', "test: fullstack commit");
+    await page.click(".diff-commit-btn");
 
     await expect(page.locator("text=Committed")).toBeVisible({ timeout: 5000 });
     expect(isClean(wsPath)).toBe(true);
