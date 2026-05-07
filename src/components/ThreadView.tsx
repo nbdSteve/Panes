@@ -3,14 +3,18 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../lib/api";
 import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs, ModelInfo } from "../App";
+import type { RepoFileStatus, RepoCommitParams, CommentThread } from "../types/diff";
 import GateCard from "./GateCard";
 import CompletionCard from "./CompletionCard";
+import CommitDialog from "./CommitDialog";
+import DiffView from "./DiffView";
 import CostBadge from "./CostBadge";
 import { threadDisplayCost } from "../lib/cost";
 import { calculateContextUsage } from "../lib/contextUsage";
 import { normalizeModelId } from "../lib/utils";
+import { parseDiff } from "../lib/diffParser";
 import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
-import { collectTestResults, parseGitStatus, collectFilesChanged, FILE_WRITE_TOOLS } from "../lib/threadHelpers";
+import { collectTestResults, collectFilesChanged, extractFilePaths, FILE_WRITE_TOOLS } from "../lib/threadHelpers";
 import TranscriptView from "./TranscriptView";
 import RoutineBadge from "./RoutineBadge";
 
@@ -43,14 +47,15 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
   const modelRef = useRef<HTMLDivElement>(null);
   const [editingBudget, setEditingBudget] = useState(false);
   const [budgetValue, setBudgetValue] = useState("");
-  const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string } | null>(null);
-  const [commitMessage, setCommitMessage] = useState("");
+  const [commitDialog, setCommitDialog] = useState<{ threadId: string; summary: string; completionIdx: number } | null>(null);
   const [commitError, setCommitError] = useState<string | null>(null);
-  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
-  const [gitFiles, setGitFiles] = useState<string[] | null>(null);
-  const gitFilesFetched = useRef<string | null>(null);
+  const [cardFiles, setCardFiles] = useState<Record<number, RepoFileStatus[]>>({});
+  const [diffView, setDiffView] = useState<{ filePath: string; completionIdx: number } | null>(null);
+  const [diffRaw, setDiffRaw] = useState<string | null>(null);
+  const [cardComments, setCardComments] = useState<Record<number, CommentThread[]>>({});
+  const cardFilesFetched = useRef<Set<number>>(new Set());
   const contentRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -59,19 +64,33 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
   const events = thread?.events ?? [];
 
   useEffect(() => {
-    const hasComplete = events.some((e) => e.event_type === "complete");
-    const threadId = thread?.id;
-    if (hasComplete && threadId && gitFilesFetched.current !== threadId) {
-      gitFilesFetched.current = threadId;
-      api.getChangedFiles(workspace.path)
-        .then(setGitFiles)
-        .catch(() => setGitFiles(null));
+    const completeEvents = events.filter((e) => e.event_type === "complete");
+    if (completeEvents.length === 0) {
+      setCardFiles({});
+      cardFilesFetched.current = new Set();
+      return;
     }
-    if (!hasComplete) {
-      setGitFiles(null);
-      gitFilesFetched.current = null;
-    }
-  }, [events, thread?.id, workspace.path]);
+
+    let segStart = 0;
+    completeEvents.forEach((_, idx) => {
+      if (cardFilesFetched.current.has(idx)) return;
+
+      const segEnd = events.indexOf(completeEvents[idx]);
+      const segmentEvents = events.slice(segStart, segEnd);
+      const paths = extractFilePaths(segmentEvents);
+      segStart = segEnd + 1;
+
+      if (paths.length === 0) {
+        cardFilesFetched.current.add(idx);
+        return;
+      }
+
+      cardFilesFetched.current.add(idx);
+      api.getFilesGitStatus(paths).then((status) => {
+        setCardFiles((prev) => ({ ...prev, [idx]: status }));
+      }).catch(() => {});
+    });
+  }, [events]);
 
   useEffect(() => {
     onConfigChange({ adapter: selectedAdapter, agent: selectedAgent, model: selectedModel });
@@ -211,17 +230,29 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               </div>
             )}
 
-            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionActions, gitFiles, {
-              onCommit: (summary: string) => {
-                setCommitDialog({ threadId: thread.id, summary });
-                setCommitMessage(summary);
-                setSelectedFiles(new Set(gitFiles?.map(f => f.slice(3)) ?? []));
+            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionActions, cardFiles, cardComments, {
+              onCommit: (summary: string, completionIdx: number) => {
+                setCommitDialog({ threadId: thread.id, summary, completionIdx });
+                setCommitError(null);
               },
               onRevert: () => setRevertConfirm(thread.id),
               onKeep: () => onCompletionAction(thread.id, "kept"),
               onSteer: (tid, toolUseId, text) => {
                 api.rejectGate(tid, toolUseId, `Steer: ${text}`).catch(console.error);
                 onQueueFollowUp(tid, text);
+              },
+              onViewDiff: (filePath: string, completionIdx: number) => {
+                setDiffView({ filePath, completionIdx });
+                setDiffRaw(null);
+                api.getFileDiff(workspace.path, filePath)
+                  .then(setDiffRaw)
+                  .catch(() => setDiffRaw(""));
+              },
+              onSendFeedback: (completionIdx: number) => {
+                const comments = cardComments[completionIdx] ?? [];
+                if (comments.length === 0) return;
+                const prompt = formatCommentsAsPrompt(comments);
+                onQueueFollowUp(thread.id, prompt);
               },
             }, showCost)}
 
@@ -249,78 +280,46 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
       </div>
 
       {commitDialog && (
-        <div className="commit-dialog">
-          <div className="commit-dialog-title">Commit changes</div>
-          <textarea
-            value={commitMessage}
-            onChange={(e) => { setCommitMessage(e.target.value); setCommitError(null); }}
-            rows={3}
-          />
-          {gitFiles && gitFiles.length > 0 && (
-            <div className="commit-file-list">
-              <div className="commit-file-list-header">
-                <span>Files ({selectedFiles.size}/{gitFiles.length})</span>
-                <button
-                  className="commit-file-toggle"
-                  onClick={() => {
-                    if (selectedFiles.size === gitFiles.length) {
-                      setSelectedFiles(new Set());
-                    } else {
-                      setSelectedFiles(new Set(gitFiles.map(f => f.slice(3))));
-                    }
-                  }}
-                >
-                  {selectedFiles.size === gitFiles.length ? "Deselect all" : "Select all"}
-                </button>
-              </div>
-              {gitFiles.map((f) => {
-                const filePath = f.slice(3);
-                const status = f.slice(0, 2).trim();
-                return (
-                  <label key={filePath} className="commit-file-item">
-                    <input
-                      type="checkbox"
-                      checked={selectedFiles.has(filePath)}
-                      onChange={() => {
-                        const next = new Set(selectedFiles);
-                        if (next.has(filePath)) next.delete(filePath);
-                        else next.add(filePath);
-                        setSelectedFiles(next);
-                      }}
-                    />
-                    <span className="commit-file-status">{status}</span>
-                    <span className="commit-file-path">{filePath}</span>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-          {commitError && <div className="commit-dialog-error">{commitError}</div>}
-          <div className="commit-dialog-actions">
-            <button
-              className="btn btn-success btn-sm"
-              disabled={gitFiles != null && gitFiles.length > 0 && selectedFiles.size === 0}
-              onClick={async () => {
-                try {
-                  const files = gitFiles && selectedFiles.size < gitFiles.length
-                    ? [...selectedFiles]
-                    : undefined;
-                  await api.commitChanges(workspace.path, commitMessage, files);
-                  onCompletionAction(commitDialog.threadId, "committed");
-                  setCommitDialog(null);
-                } catch (e) {
-                  const msg = e instanceof Error ? e.message : typeof e === "string" ? e : (e as { message?: string })?.message ?? JSON.stringify(e);
-                  setCommitError(msg);
-                }
-              }}
-            >
-              Confirm
-            </button>
-            <button className="btn btn-secondary btn-sm" onClick={() => { setCommitDialog(null); setCommitError(null); }}>
-              Cancel
-            </button>
-          </div>
-        </div>
+        <CommitDialog
+          repoFiles={cardFiles[commitDialog.completionIdx] ?? []}
+          defaultMessage={commitDialog.summary}
+          error={commitError}
+          onCommit={async (commits: RepoCommitParams[]) => {
+            try {
+              await api.commitRepos(commits);
+              onCompletionAction(commitDialog.threadId, "committed");
+              setCommitDialog(null);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : typeof e === "string" ? e : (e as { message?: string })?.message ?? JSON.stringify(e);
+              setCommitError(msg);
+            }
+          }}
+          onCancel={() => { setCommitDialog(null); setCommitError(null); }}
+        />
+      )}
+
+      {diffView && diffRaw !== null && (
+        <DiffView
+          diff={parseDiff(diffRaw)}
+          selectedFile={diffView.filePath}
+          comments={cardComments[diffView.completionIdx] ?? []}
+          onAddComment={(filePath, side, startLine, endLine, body) => {
+            const comment: CommentThread = {
+              id: crypto.randomUUID(),
+              filePath,
+              side,
+              startLine,
+              endLine,
+              body,
+              createdAt: new Date().toISOString(),
+            };
+            setCardComments((prev) => ({
+              ...prev,
+              [diffView.completionIdx]: [...(prev[diffView.completionIdx] ?? []), comment],
+            }));
+          }}
+          onClose={() => setDiffView(null)}
+        />
       )}
 
       {revertConfirm && (
@@ -664,10 +663,12 @@ function ToolGroupCard({ group, showCost }: { group: ToolGroup; showCost?: boole
 
 
 interface RenderCallbacks {
-  onCommit: (summary: string) => void;
+  onCommit: (summary: string, completionIdx: number) => void;
   onRevert: () => void;
   onKeep: () => void;
   onSteer: (threadId: string, toolUseId: string, text: string) => void;
+  onViewDiff: (filePath: string, completionIdx: number) => void;
+  onSendFeedback: (completionIdx: number) => void;
 }
 
 function renderEvents(
@@ -675,7 +676,8 @@ function renderEvents(
   runningCost: number,
   threadId: string,
   completionActions: Record<number, "committed" | "reverted" | "kept"> | undefined,
-  gitFiles: string[] | null,
+  cardFiles: Record<number, RepoFileStatus[]>,
+  cardComments: Record<number, CommentThread[]>,
   callbacks: RenderCallbacks,
   showCost?: boolean,
 ) {
@@ -691,8 +693,6 @@ function renderEvents(
       itemToCompletionIdx.set(i, completionCounter++);
     }
   });
-  const lastCompletionIdx = completionCounter - 1;
-
   // Build a skip-text set: text events where the next non-cost event is complete with same content
   const skipTextIndices = new Set<number>();
   for (let i = 0; i < events.length; i++) {
@@ -824,16 +824,20 @@ function renderEvents(
       case "complete": {
         const hadWrites = segmentHasWrites;
         const completionIdx = itemToCompletionIdx.get(i)!;
-        const isLastCompletion = completionIdx === lastCompletionIdx;
+        const repoStatus = cardFiles[completionIdx];
         const heuristicFiles = collectFilesChanged(segmentEvents);
-        const filesChanged = isLastCompletion && gitFiles && gitFiles.length > 0
-          ? parseGitStatus(gitFiles)
+        const filesChanged = repoStatus && repoStatus.length > 0
+          ? repoStatus.flatMap((r) => r.files.map((f) => ({
+              path: f.relativePath,
+              action: f.status === "??" ? "untracked" as const : f.status.includes("D") ? "deleted" as const : f.status.includes("A") ? "created" as const : "modified" as const,
+            })))
           : heuristicFiles;
         const testResults = collectTestResults(segmentEvents);
         segmentHasWrites = false;
         segmentEvents = [];
         const cardAction = completionActions?.[completionIdx];
-        const hasChanges = hadWrites || (isLastCompletion && gitFiles != null && gitFiles.length > 0);
+        const hasChanges = hadWrites || (repoStatus != null && repoStatus.length > 0);
+        const commentCount = (cardComments[completionIdx] ?? []).length;
         return (
           <CompletionCard
             key={i}
@@ -846,9 +850,12 @@ function renderEvents(
             filesChanged={filesChanged}
             testResults={testResults}
             completionAction={cardAction}
-            onCommit={() => callbacks.onCommit(event.summary || "")}
+            commentCount={commentCount}
+            onCommit={() => callbacks.onCommit(event.summary || "", completionIdx)}
             onRevert={callbacks.onRevert}
             onKeep={callbacks.onKeep}
+            onFileClick={(filePath) => callbacks.onViewDiff(filePath, completionIdx)}
+            onSendFeedback={commentCount > 0 ? () => callbacks.onSendFeedback(completionIdx) : undefined}
           />
         );
       }
@@ -930,4 +937,20 @@ function renderEvents(
         return null;
     }
   });
+}
+
+function formatCommentsAsPrompt(comments: CommentThread[]): string {
+  const grouped: Record<string, CommentThread[]> = {};
+  for (const c of comments) {
+    (grouped[c.filePath] ??= []).push(c);
+  }
+  let prompt = "## Code Review Feedback\n\n";
+  for (const [file, threads] of Object.entries(grouped)) {
+    for (const t of threads) {
+      const lineRef = t.startLine === t.endLine ? `line ${t.startLine}` : `lines ${t.startLine}-${t.endLine}`;
+      prompt += `### ${file} (${lineRef}, ${t.side} side)\n`;
+      prompt += `${t.body}\n\n`;
+    }
+  }
+  return prompt;
 }

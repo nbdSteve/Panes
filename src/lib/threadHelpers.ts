@@ -38,6 +38,19 @@ export function parseGitStatus(lines: string[]): { path: string; action: "create
   });
 }
 
+export function extractFilePaths(events: AgentEvent[]): string[] {
+  const paths = new Set<string>();
+  for (const e of events) {
+    if (e.event_type !== "tool_request") continue;
+    if (!FILE_WRITE_TOOLS.has(e.tool_name ?? "")) continue;
+    const filePath = e.input?.file_path;
+    if (typeof filePath === "string") {
+      paths.add(filePath);
+    }
+  }
+  return [...paths];
+}
+
 export function collectFilesChanged(events: AgentEvent[]): { path: string; action: "created" | "modified" }[] {
   const files: { path: string; action: "created" | "modified" }[] = [];
   const seen = new Set<string>();

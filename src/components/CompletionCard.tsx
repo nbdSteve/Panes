@@ -15,9 +15,12 @@ export interface CompletionCardProps {
   filesChanged?: { path: string; action: FileChangeAction }[];
   testResults?: string;
   completionAction?: "committed" | "reverted" | "kept";
+  commentCount?: number;
   onCommit: () => void;
   onRevert: () => void;
   onKeep: () => void;
+  onFileClick?: (filePath: string) => void;
+  onSendFeedback?: () => void;
 }
 
 export default function CompletionCard({
@@ -30,9 +33,12 @@ export default function CompletionCard({
   filesChanged,
   testResults,
   completionAction,
+  commentCount,
   onCommit,
   onRevert,
   onKeep,
+  onFileClick,
+  onSendFeedback,
 }: CompletionCardProps) {
   const [showFiles, setShowFiles] = useState(false);
   const [showTests, setShowTests] = useState(false);
@@ -87,7 +93,11 @@ export default function CompletionCard({
           {showFiles && (
             <ul className="files-changed-list">
               {filesChanged.map((f, i) => (
-                <li key={i} className="files-changed-item">
+                <li
+                  key={i}
+                  className={`files-changed-item${onFileClick ? " clickable" : ""}`}
+                  onClick={onFileClick ? () => onFileClick(f.path) : undefined}
+                >
                   <span className={`files-changed-icon ${f.action}`}>
                     {f.action === "created" || f.action === "untracked" ? "+" : f.action === "deleted" ? "-" : "~"}
                   </span>
@@ -153,6 +163,14 @@ export default function CompletionCard({
           </button>
           <button className="btn btn-secondary btn-sm" onClick={onKeep}>
             Keep as-is
+          </button>
+        </div>
+      )}
+
+      {onSendFeedback && commentCount != null && commentCount > 0 && (
+        <div className="completion-actions">
+          <button className="btn btn-primary btn-sm" onClick={onSendFeedback}>
+            Send feedback ({commentCount} comment{commentCount !== 1 ? "s" : ""})
           </button>
         </div>
       )}

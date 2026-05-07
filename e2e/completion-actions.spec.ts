@@ -23,7 +23,7 @@ test.describe("Completion Actions — Commit, Revert, Keep", () => {
     await expect(page.locator(".commit-dialog")).toBeVisible();
 
     // Should pre-fill with thread summary as commit message
-    const messageInput = page.locator(".commit-dialog textarea");
+    const messageInput = page.locator(".commit-message-input");
     await expect(messageInput).toBeVisible();
     const value = await messageInput.inputValue();
     expect(value.length).toBeGreaterThan(0);
@@ -38,8 +38,8 @@ test.describe("Completion Actions — Commit, Revert, Keep", () => {
     await expect(page.locator(".commit-dialog")).toBeVisible();
 
     // Edit the message
-    await page.fill(".commit-dialog textarea", "Custom commit message");
-    await page.click(".commit-dialog button:has-text('Confirm')");
+    await page.fill(".commit-message-input", "Custom commit message");
+    await page.click(".commit-dialog-footer button.btn-primary");
 
     // Should show committed state
     await expect(page.locator("text=Committed")).toBeVisible({ timeout: 2000 });

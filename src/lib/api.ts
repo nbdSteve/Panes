@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parsePanesError, type PanesError } from "../types/errors";
-import type { FeatureInfo, RoutineInfo, RoutineExecution } from "../types";
+import type { FeatureInfo, RoutineInfo, RoutineExecution, RepoFileStatus, RepoCommitParams } from "../types";
 
 export interface StartThreadParams {
   workspaceId: string;
@@ -102,6 +102,16 @@ export const api = {
     call<void>("revert_changes", { workspacePath, threadId }),
   getChangedFiles: (workspacePath: string) =>
     call<string[]>("get_changed_files", { workspacePath }),
+  getFileDiff: (workspacePath: string, filePath: string) =>
+    call<string>("get_file_diff", { workspacePath, filePath }),
+  getWorkspaceDiff: (workspacePath: string, files?: string[]) =>
+    call<string>("get_workspace_diff", { workspacePath, files: files ?? null }),
+  getFilesGitStatus: (filePaths: string[]) =>
+    call<RepoFileStatus[]>("get_files_git_status", { filePaths }),
+  listGitRepos: (workspacePath: string) =>
+    call<string[]>("list_git_repos", { workspacePath }),
+  commitRepos: (commits: RepoCommitParams[]) =>
+    call<string[]>("commit_repos", { commits }),
 
   // Memory
   extractMemories: (workspaceId: string, threadId: string, transcript: string) =>

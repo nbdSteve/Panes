@@ -90,6 +90,7 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
         description: `Edit file: ${file}`,
         needs_approval: false,
         risk_level: "medium",
+        input: { file_path: `/tmp/test-ws/${file}`, old_string: "old", new_string: "new" },
       });
       events.push({
         event_type: "tool_result",
@@ -623,6 +624,43 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       }
       return [];
     }
+
+    case "get_file_diff":
+      return `diff --git a/src/main.ts b/src/main.ts
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -1,5 +1,6 @@
+ import { app } from './app';
++import { logger } from './logger';
+
+ function main() {
+-  app.start();
++  logger.info('starting');
++  app.start({ verbose: true });
+ }`;
+
+    case "get_workspace_diff":
+      return "";
+
+    case "get_files_git_status": {
+      const filePaths = (args?.filePaths as string[]) ?? [];
+      if (filePaths.length === 0) return [];
+      return [{
+        repoPath: "/mock/workspace",
+        repoName: "workspace",
+        files: filePaths.map((p: string) => ({
+          absolutePath: p,
+          relativePath: p.split("/").slice(-2).join("/"),
+          status: "M",
+        })),
+      }];
+    }
+
+    case "list_git_repos":
+      return [""];
+
+    case "commit_repos":
+      return ["mock-commit-hash-123"];
 
     case "get_workspace_cost":
       return 0;

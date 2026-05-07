@@ -208,6 +208,226 @@ fn group_files_by_repo<'a>(
     grouped
 }
 
+pub async fn get_file_diff(workspace_path: &Path, file_path: &str) -> Result<String> {
+    let ws_path = Path::new(file_path);
+
+    if is_git_repo(workspace_path).await {
+        return get_diff_in_repo(workspace_path, file_path).await;
+    }
+
+    let repos = find_git_repos(workspace_path).await;
+    for repo in &repos {
+        let rel_prefix = repo.strip_prefix(workspace_path).unwrap_or(Path::new(""));
+        if ws_path.starts_with(rel_prefix) {
+            let repo_relative = ws_path.strip_prefix(rel_prefix).unwrap_or(ws_path);
+            return get_diff_in_repo(repo, repo_relative.to_str().unwrap_or(file_path)).await;
+        }
+    }
+
+    anyhow::bail!("file {} not found in any git repository under {}", file_path, workspace_path.display())
+}
+
+async fn get_diff_in_repo(repo_path: &Path, file_path: &str) -> Result<String> {
+    let full_path = repo_path.join(file_path);
+    let is_tracked = run_git(repo_path, &["ls-files", file_path])
+        .await
+        .map(|o| !o.trim().is_empty())
+        .unwrap_or(false);
+
+    if is_tracked {
+        run_git(repo_path, &["diff", "HEAD", "--", file_path]).await
+    } else if full_path.exists() {
+        let content = tokio::fs::read_to_string(&full_path).await
+            .with_context(|| format!("failed to read untracked file {}", full_path.display()))?;
+        let lines: Vec<&str> = content.lines().collect();
+        let count = lines.len();
+        let mut diff = format!("diff --git a/{f} b/{f}\nnew file mode 100644\n--- /dev/null\n+++ b/{f}\n@@ -0,0 +1,{count} @@\n", f = file_path);
+        for line in &lines {
+            diff.push('+');
+            diff.push_str(line);
+            diff.push('\n');
+        }
+        Ok(diff)
+    } else {
+        Ok(String::new())
+    }
+}
+
+pub async fn get_workspace_diff(workspace_path: &Path, files: Option<&[String]>) -> Result<String> {
+    if is_git_repo(workspace_path).await {
+        let mut args = vec!["diff", "HEAD"];
+        if let Some(file_list) = files {
+            args.push("--");
+            let owned: Vec<&str> = file_list.iter().map(|s| s.as_str()).collect();
+            args.extend(owned);
+        }
+        return run_git(workspace_path, &args).await;
+    }
+
+    let repos = find_git_repos(workspace_path).await;
+    let mut combined = String::new();
+    for repo in &repos {
+        let prefix = repo.strip_prefix(workspace_path).unwrap_or(Path::new(""));
+        let mut args = vec!["diff", "HEAD"];
+        if let Some(file_list) = files {
+            let repo_files: Vec<&str> = file_list.iter()
+                .filter_map(|f| Path::new(f.as_str()).strip_prefix(prefix).ok())
+                .map(|p| p.to_str().unwrap_or(""))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if repo_files.is_empty() { continue; }
+            args.push("--");
+            args.extend(repo_files);
+        }
+        if let Ok(diff) = run_git(repo, &args).await {
+            if !diff.trim().is_empty() {
+                combined.push_str(&diff);
+                if !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+            }
+        }
+    }
+    Ok(combined)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileGitStatus {
+    pub absolute_path: String,
+    pub relative_path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFileStatus {
+    pub repo_path: String,
+    pub repo_name: String,
+    pub files: Vec<FileGitStatus>,
+}
+
+pub async fn get_files_git_status(file_paths: &[String]) -> Result<Vec<RepoFileStatus>> {
+    let mut repo_cache: HashMap<PathBuf, Vec<(String, PathBuf)>> = HashMap::new();
+
+    for file_path in file_paths {
+        let path = Path::new(file_path);
+        let dir = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else if path.exists() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+
+        let repo_root = find_repo_root(dir).await;
+        if let Some(root) = repo_root {
+            repo_cache.entry(root).or_default().push((file_path.clone(), path.to_path_buf()));
+        }
+    }
+
+    let mut results = Vec::new();
+    for (repo_root, files) in repo_cache {
+        let repo_name = repo_root.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| repo_root.to_string_lossy().to_string());
+
+        let mut file_statuses = Vec::new();
+        for (abs_path, full_path) in &files {
+            let relative = full_path.strip_prefix(&repo_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| abs_path.clone());
+
+            let status = run_git(&repo_root, &["status", "--porcelain", "--", &relative])
+                .await
+                .unwrap_or_default();
+            let git_status = if status.trim().is_empty() {
+                String::new()
+            } else {
+                status.trim().chars().take(2).collect::<String>().trim().to_string()
+            };
+
+            if !git_status.is_empty() {
+                file_statuses.push(FileGitStatus {
+                    absolute_path: abs_path.clone(),
+                    relative_path: relative,
+                    status: git_status,
+                });
+            }
+        }
+
+        if !file_statuses.is_empty() {
+            results.push(RepoFileStatus {
+                repo_path: repo_root.to_string_lossy().to_string(),
+                repo_name,
+                files: file_statuses,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
+async fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(start)
+        .output()
+        .await
+        .ok()?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Some(PathBuf::from(path))
+    } else {
+        None
+    }
+}
+
+pub async fn list_git_repos(workspace_path: &Path) -> Result<Vec<String>> {
+    if is_git_repo(workspace_path).await {
+        return Ok(vec![String::new()]);
+    }
+
+    let repos = find_git_repos(workspace_path).await;
+    Ok(repos.iter()
+        .filter_map(|r| r.strip_prefix(workspace_path).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect())
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoCommitParams {
+    pub repo_path: String,
+    pub message: String,
+    pub files: Vec<String>,
+}
+
+pub async fn commit_repos(commits: &[RepoCommitParams]) -> Result<Vec<String>> {
+    let mut hashes = Vec::new();
+    for params in commits {
+        let repo_path = Path::new(&params.repo_path);
+        if !repo_path.join(".git").exists() && !repo_path.join(".git").is_file() {
+            let root = find_repo_root(repo_path).await;
+            if root.is_none() {
+                anyhow::bail!("no git repository at {}", params.repo_path);
+            }
+        }
+        let files: Vec<String> = params.files.clone();
+        let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+
+        let hash = if file_refs.is_empty() {
+            commit_in_repo(repo_path, &params.message, None).await?
+        } else {
+            let borrowed: Vec<String> = file_refs.iter().map(|s| s.to_string()).collect();
+            commit_in_repo(repo_path, &params.message, Some(&borrowed)).await?
+        };
+        hashes.push(hash);
+    }
+    Ok(hashes)
+}
+
 async fn run_git(workspace_path: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -384,5 +604,126 @@ mod tests {
         // No changes remaining
         let after = get_changed_files(workspace.path()).await.unwrap();
         assert!(after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_diff_modified() {
+        let dir = make_git_repo().await;
+        fs::write(dir.path().join("initial.txt"), "modified content").unwrap();
+
+        let diff = get_file_diff(dir.path(), "initial.txt").await.unwrap();
+        assert!(diff.contains("-hello"));
+        assert!(diff.contains("+modified content"));
+    }
+
+    #[tokio::test]
+    async fn test_get_file_diff_untracked() {
+        let dir = make_git_repo().await;
+        fs::write(dir.path().join("new.txt"), "line 1\nline 2\n").unwrap();
+
+        let diff = get_file_diff(dir.path(), "new.txt").await.unwrap();
+        assert!(diff.contains("new file"));
+        assert!(diff.contains("+line 1"));
+        assert!(diff.contains("+line 2"));
+    }
+
+    #[tokio::test]
+    async fn test_get_workspace_diff_single_repo() {
+        let dir = make_git_repo().await;
+        fs::write(dir.path().join("initial.txt"), "changed").unwrap();
+
+        let diff = get_workspace_diff(dir.path(), None).await.unwrap();
+        assert!(diff.contains("-hello"));
+        assert!(diff.contains("+changed"));
+    }
+
+    #[tokio::test]
+    async fn test_get_files_git_status_groups_by_repo() {
+        let dir = make_git_repo().await;
+        fs::write(dir.path().join("initial.txt"), "modified").unwrap();
+        fs::write(dir.path().join("new.txt"), "new file").unwrap();
+
+        let paths = vec![
+            dir.path().join("initial.txt").to_string_lossy().to_string(),
+            dir.path().join("new.txt").to_string_lossy().to_string(),
+        ];
+        let status = get_files_git_status(&paths).await.unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].files.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_files_git_status_no_changes() {
+        let dir = make_git_repo().await;
+        let paths = vec![dir.path().join("initial.txt").to_string_lossy().to_string()];
+        let status = get_files_git_status(&paths).await.unwrap();
+        assert!(status.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_git_repos_single() {
+        let dir = make_git_repo().await;
+        let repos = list_git_repos(dir.path()).await.unwrap();
+        assert_eq!(repos, vec![""]);
+    }
+
+    #[tokio::test]
+    async fn test_list_git_repos_multi() {
+        let workspace = tempfile::tempdir().unwrap();
+        let repo_a = workspace.path().join("repo-a");
+        let repo_b = workspace.path().join("repo-b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        for repo in [&repo_a, &repo_b] {
+            run_git(repo, &["init"]).await.unwrap();
+        }
+
+        let mut repos = list_git_repos(workspace.path()).await.unwrap();
+        repos.sort();
+        assert_eq!(repos, vec!["repo-a", "repo-b"]);
+    }
+
+    #[tokio::test]
+    async fn test_commit_repos_independent_messages() {
+        let workspace = tempfile::tempdir().unwrap();
+        let repo_a = workspace.path().join("repo-a");
+        let repo_b = workspace.path().join("repo-b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        for repo in [&repo_a, &repo_b] {
+            run_git(repo, &["init"]).await.unwrap();
+            run_git(repo, &["config", "user.email", "test@test.com"]).await.unwrap();
+            run_git(repo, &["config", "user.name", "Test"]).await.unwrap();
+            fs::write(repo.join("init.txt"), "init").unwrap();
+            run_git(repo, &["add", "-A"]).await.unwrap();
+            run_git(repo, &["commit", "-m", "init"]).await.unwrap();
+        }
+
+        fs::write(repo_a.join("a.txt"), "change a").unwrap();
+        fs::write(repo_b.join("b.txt"), "change b").unwrap();
+
+        let commits = vec![
+            RepoCommitParams {
+                repo_path: repo_a.to_string_lossy().to_string(),
+                message: "commit for repo-a".to_string(),
+                files: vec!["a.txt".to_string()],
+            },
+            RepoCommitParams {
+                repo_path: repo_b.to_string_lossy().to_string(),
+                message: "commit for repo-b".to_string(),
+                files: vec!["b.txt".to_string()],
+            },
+        ];
+
+        let hashes = commit_repos(&commits).await.unwrap();
+        assert_eq!(hashes.len(), 2);
+
+        let log_a = run_git(&repo_a, &["log", "--oneline", "-1"]).await.unwrap();
+        assert!(log_a.contains("commit for repo-a"));
+
+        let log_b = run_git(&repo_b, &["log", "--oneline", "-1"]).await.unwrap();
+        assert!(log_b.contains("commit for repo-b"));
     }
 }

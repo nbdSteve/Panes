@@ -2,6 +2,7 @@ export type { AgentEvent, ThinkingEvent, TextEvent, ToolRequestEvent, ToolResult
 import type { AgentEvent } from "./events";
 export type { PanesError, PanesErrorType } from "./errors";
 export { parsePanesError, isWorkspaceOccupied, isNoGatePending, isValidationError } from "./errors";
+export type { CommentThread, CommentSide, LineSelection, FileGitStatus, RepoFileStatus, RepoCommitParams, ParsedDiff, DiffFile, DiffHunk, DiffLine, DiffLineType, FileStatus } from "./diff";
 
 export interface WorkspaceInfo {
   id: string;
@@ -30,6 +31,7 @@ export interface ThreadInfo {
   status: "starting" | "running" | "gate" | "complete" | "error" | "interrupted";
   costUsd?: number;
   completionActions?: Record<number, "committed" | "reverted" | "kept">;
+  diffComments?: Record<number, import("./diff").CommentThread[]>;
   queuedFollowUp?: string;
   events: AgentEvent[];
   memoryCount?: number;

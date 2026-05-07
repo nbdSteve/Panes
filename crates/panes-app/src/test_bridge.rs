@@ -400,6 +400,21 @@ async fn dispatch_command(
         "get_changed_files" => {
             Ok(serde_json::json!([]))
         }
+        "get_file_diff" => {
+            Ok(Value::String(String::new()))
+        }
+        "get_workspace_diff" => {
+            Ok(Value::String(String::new()))
+        }
+        "get_files_git_status" => {
+            Ok(Value::Array(vec![]))
+        }
+        "list_git_repos" => {
+            Ok(serde_json::json!([""])  )
+        }
+        "commit_repos" => {
+            Ok(serde_json::json!(["abc123"]))
+        }
         "extract_memories" => {
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?;

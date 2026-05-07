@@ -472,6 +472,59 @@ pub async fn get_changed_files(
         .map_err(PanesError::from)
 }
 
+#[tauri::command]
+pub async fn get_file_diff(
+    workspace_path: String,
+    file_path: String,
+) -> Result<String, PanesError> {
+    let expanded = expand_tilde(&workspace_path);
+    let path = PathBuf::from(&expanded);
+    git::get_file_diff(&path, &file_path)
+        .await
+        .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn get_workspace_diff(
+    workspace_path: String,
+    files: Option<Vec<String>>,
+) -> Result<String, PanesError> {
+    let expanded = expand_tilde(&workspace_path);
+    let path = PathBuf::from(&expanded);
+    git::get_workspace_diff(&path, files.as_deref())
+        .await
+        .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn get_files_git_status(
+    file_paths: Vec<String>,
+) -> Result<Vec<git::RepoFileStatus>, PanesError> {
+    git::get_files_git_status(&file_paths)
+        .await
+        .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn list_git_repos(
+    workspace_path: String,
+) -> Result<Vec<String>, PanesError> {
+    let expanded = expand_tilde(&workspace_path);
+    let path = PathBuf::from(&expanded);
+    git::list_git_repos(&path)
+        .await
+        .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn commit_repos(
+    commits: Vec<git::RepoCommitParams>,
+) -> Result<Vec<String>, PanesError> {
+    git::commit_repos(&commits)
+        .await
+        .map_err(PanesError::from)
+}
+
 // --- Memory extraction ---
 
 #[tauri::command]
