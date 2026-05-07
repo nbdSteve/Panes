@@ -20,7 +20,7 @@ function ensureBinary() {
   execSync("cargo build -p panes-app", {
     cwd: PROJECT_ROOT,
     stdio: "inherit",
-    timeout: 120_000,
+    timeout: 600_000,
   });
   built = true;
 }
