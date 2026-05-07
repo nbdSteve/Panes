@@ -211,7 +211,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               </div>
             )}
 
-            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionAction, gitFiles, {
+            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionActions, gitFiles, {
               onCommit: (summary: string) => {
                 setCommitDialog({ threadId: thread.id, summary });
                 setCommitMessage(summary);
@@ -674,7 +674,7 @@ function renderEvents(
   events: AgentEvent[],
   runningCost: number,
   threadId: string,
-  completionAction: "committed" | "reverted" | "kept" | undefined,
+  completionActions: Record<number, "committed" | "reverted" | "kept"> | undefined,
   gitFiles: string[] | null,
   callbacks: RenderCallbacks,
   showCost?: boolean,
@@ -682,6 +682,16 @@ function renderEvents(
   let segmentHasWrites = false;
   let segmentEvents: AgentEvent[] = [];
   const items = groupToolEvents(events);
+
+  // Track which completion card index each "complete" event is
+  let completionCounter = 0;
+  const itemToCompletionIdx = new Map<number, number>();
+  items.forEach((item, i) => {
+    if (item.type === "standalone" && item.event.event_type === "complete") {
+      itemToCompletionIdx.set(i, completionCounter++);
+    }
+  });
+  const lastCompletionIdx = completionCounter - 1;
 
   // Build a skip-text set: text events where the next non-cost event is complete with same content
   const skipTextIndices = new Set<number>();
@@ -813,13 +823,17 @@ function renderEvents(
 
       case "complete": {
         const hadWrites = segmentHasWrites;
+        const completionIdx = itemToCompletionIdx.get(i)!;
+        const isLastCompletion = completionIdx === lastCompletionIdx;
         const heuristicFiles = collectFilesChanged(segmentEvents);
-        const filesChanged = gitFiles && gitFiles.length > 0
+        const filesChanged = isLastCompletion && gitFiles && gitFiles.length > 0
           ? parseGitStatus(gitFiles)
           : heuristicFiles;
         const testResults = collectTestResults(segmentEvents);
         segmentHasWrites = false;
         segmentEvents = [];
+        const cardAction = completionActions?.[completionIdx];
+        const hasChanges = hadWrites || (isLastCompletion && gitFiles != null && gitFiles.length > 0);
         return (
           <CompletionCard
             key={i}
@@ -828,10 +842,10 @@ function renderEvents(
             showCost={showCost}
             durationMs={event.duration_ms || 0}
             turns={event.turns || 0}
-            hasFileChanges={hadWrites || (gitFiles != null && gitFiles.length > 0)}
+            hasFileChanges={hasChanges}
             filesChanged={filesChanged}
             testResults={testResults}
-            completionAction={completionAction}
+            completionAction={cardAction}
             onCommit={() => callbacks.onCommit(event.summary || "")}
             onRevert={callbacks.onRevert}
             onKeep={callbacks.onKeep}

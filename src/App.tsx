@@ -102,9 +102,12 @@ function App() {
   const handleCompletionAction = useCallback(
     (threadId: string, action: "committed" | "reverted" | "kept") => {
       setThreads((prev) =>
-        prev.map((t) =>
-          t.id === threadId ? { ...t, completionAction: action } : t
-        )
+        prev.map((t) => {
+          if (t.id !== threadId) return t;
+          const idx = t.events.filter((e) => e.event_type === "complete").length - 1;
+          const completionActions = { ...t.completionActions, [idx]: action };
+          return { ...t, completionActions };
+        })
       );
     },
     []

@@ -29,7 +29,7 @@ export interface ThreadInfo {
   prompt: string;
   status: "starting" | "running" | "gate" | "complete" | "error" | "interrupted";
   costUsd?: number;
-  completionAction?: "committed" | "reverted" | "kept";
+  completionActions?: Record<number, "committed" | "reverted" | "kept">;
   queuedFollowUp?: string;
   events: AgentEvent[];
   memoryCount?: number;
