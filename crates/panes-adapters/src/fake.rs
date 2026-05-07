@@ -88,6 +88,7 @@ impl AgentAdapter for FakeAdapter {
         _prompt: &str,
         _context: &SessionContext,
         model: Option<&str>,
+        _agent: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         let session_id = Uuid::new_v4().to_string();
         let model_name = model.unwrap_or("fake-model").to_string();
@@ -124,12 +125,14 @@ impl AgentAdapter for FakeAdapter {
         _session_id: &str,
         prompt: &str,
         model: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         self.spawn(
             workspace_path,
             prompt,
             &SessionContext { briefing: None, memories: vec![], budget_cap: None },
             model,
+            agent,
         ).await
     }
 
@@ -436,7 +439,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
 
         assert_eq!(session.init().model, "fake-model");
 
@@ -463,7 +466,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
 
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
@@ -497,7 +500,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
 
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
@@ -524,7 +527,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
 
         let mut events: Vec<AgentEvent> = vec![];
         let mut stream = session.events();
@@ -569,7 +572,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
 
@@ -613,7 +616,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
         let mut stream = session.events();
         let mut events: Vec<AgentEvent> = vec![];
 
@@ -637,7 +640,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let mut session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let mut session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
 
         let mut stream1 = session.events();
         let mut count1 = 0;
@@ -658,7 +661,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let session = adapter.spawn(workspace, "test", &ctx, Some("opus")).await.unwrap();
+        let session = adapter.spawn(workspace, "test", &ctx, Some("opus"), None).await.unwrap();
         assert_eq!(session.init().model, "opus");
     }
 
@@ -670,7 +673,7 @@ mod tests {
 
         let workspace = Path::new("/tmp");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let session = adapter.spawn(workspace, "test", &ctx, None).await.unwrap();
+        let session = adapter.spawn(workspace, "test", &ctx, None, None).await.unwrap();
         assert_eq!(session.init().model, "fake-model");
     }
 
@@ -681,7 +684,7 @@ mod tests {
         }).with_delay(0);
 
         let workspace = Path::new("/tmp");
-        let session = adapter.resume(workspace, "sid", "follow up", Some("sonnet")).await.unwrap();
+        let session = adapter.resume(workspace, "sid", "follow up", Some("sonnet"), None).await.unwrap();
         assert_eq!(session.init().model, "sonnet");
     }
 
@@ -692,7 +695,7 @@ mod tests {
         }).with_delay(0);
 
         let workspace = Path::new("/tmp");
-        let mut session = adapter.resume(workspace, "some-session-id", "follow up", None).await.unwrap();
+        let mut session = adapter.resume(workspace, "some-session-id", "follow up", None, None).await.unwrap();
         assert!(!session.init().session_id.is_empty());
 
         let mut stream = session.events();

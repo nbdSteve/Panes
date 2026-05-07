@@ -243,6 +243,7 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
         prompt: &str,
         context: &panes_events::SessionContext,
         model: Option<&str>,
+        _agent: Option<&str>,
     ) -> anyhow::Result<Box<dyn panes_adapters::AgentSession>> {
         let lower = prompt.to_lowercase();
         let (scenario, delay) = if lower.contains("slow") {
@@ -262,7 +263,7 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
         }
 
         let adapter = FakeAdapter::new(scenario).with_delay(delay);
-        adapter.spawn(workspace_path, prompt, context, model).await
+        adapter.spawn(workspace_path, prompt, context, model, None).await
     }
 
     async fn resume(
@@ -271,10 +272,11 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
         session_id: &str,
         prompt: &str,
         model: Option<&str>,
+        _agent: Option<&str>,
     ) -> anyhow::Result<Box<dyn panes_adapters::AgentSession>> {
         let scenario = route_prompt(prompt);
         let adapter = FakeAdapter::new(scenario).with_delay(80);
-        adapter.resume(workspace_path, session_id, prompt, model).await
+        adapter.resume(workspace_path, session_id, prompt, model, None).await
     }
 
     async fn list_models(&self) -> anyhow::Result<Vec<panes_adapters::ModelInfo>> {

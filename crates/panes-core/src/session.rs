@@ -154,11 +154,18 @@ impl SessionManager {
         let adapter = self
             .adapters
             .get(agent_name)
+            .or_else(|| self.adapters.get("claude-code"))
             .ok_or_else(|| PanesError::AdapterNotFound {
                 adapter: agent_name.to_string(),
                 message: format!("unknown agent: {agent_name}"),
             })?
             .clone();
+
+        let cli_agent = if self.adapters.contains_key(agent_name) {
+            None
+        } else {
+            Some(agent_name.to_string())
+        };
 
         {
             let active = self.active_threads.lock().await;
@@ -175,7 +182,7 @@ impl SessionManager {
         }
 
         let result = self
-            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model)
+            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref())
             .await
             .map_err(PanesError::from);
 
@@ -194,6 +201,7 @@ impl SessionManager {
         adapter: Arc<dyn AgentAdapter>,
         context: SessionContext,
         model: Option<&str>,
+        cli_agent: Option<&str>,
     ) -> Result<String> {
         // Git snapshot
         let snapshot = if git::is_git_repo(&workspace.path).await {
@@ -213,7 +221,7 @@ impl SessionManager {
 
         // Spawn agent session
         let session = adapter
-            .spawn(&workspace.path, prompt, &context, model)
+            .spawn(&workspace.path, prompt, &context, model, cli_agent)
             .await
             .context("failed to spawn agent session")?;
 
@@ -304,11 +312,18 @@ impl SessionManager {
         let adapter = self
             .adapters
             .get(agent_name)
+            .or_else(|| self.adapters.get("claude-code"))
             .ok_or_else(|| PanesError::AdapterNotFound {
                 adapter: agent_name.to_string(),
                 message: format!("unknown agent: {agent_name}"),
             })?
             .clone();
+
+        let cli_agent = if self.adapters.contains_key(agent_name) {
+            None
+        } else {
+            Some(agent_name.to_string())
+        };
 
         {
             let active = self.active_threads.lock().await;
@@ -331,7 +346,7 @@ impl SessionManager {
         }
 
         let result = self
-            .resume_thread_inner(thread_id, workspace, prompt, adapter, model)
+            .resume_thread_inner(thread_id, workspace, prompt, adapter, model, cli_agent.as_deref())
             .await
             .map_err(PanesError::from);
 
@@ -349,6 +364,7 @@ impl SessionManager {
         prompt: &str,
         adapter: Arc<dyn AgentAdapter>,
         model: Option<&str>,
+        cli_agent: Option<&str>,
     ) -> Result<()> {
         let claude_session_id = {
             let sids = self.session_ids.lock().await;
@@ -358,7 +374,7 @@ impl SessionManager {
         };
 
         let session = adapter
-            .resume(&workspace.path, &claude_session_id, prompt, model)
+            .resume(&workspace.path, &claude_session_id, prompt, model, cli_agent)
             .await
             .context("failed to resume agent session")?;
 
@@ -712,6 +728,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use panes_adapters::fake::{FakeAdapter, FakeScenario};
 
     async fn setup_session_manager() -> (SessionManager, mpsc::UnboundedReceiver<ThreadEvent>) {
@@ -834,6 +851,44 @@ mod tests {
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let thread_id = mgr.start_thread(&ws, "hello", "fake", ctx, None).await.unwrap();
+        assert!(!thread_id.is_empty());
+
+        let mut got_complete = false;
+        while let Some(te) = rx.recv().await {
+            if matches!(te.event, AgentEvent::Complete { .. }) {
+                got_complete = true;
+                break;
+            }
+        }
+        assert!(got_complete);
+    }
+
+    #[tokio::test]
+    async fn test_custom_agent_falls_through_to_claude_code_adapter() {
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Hello from agent!".to_string(),
+        }).with_delay(0);
+        // Register as "claude-code" — the default fallback
+        struct NamedFake(FakeAdapter);
+        #[async_trait::async_trait]
+        impl AgentAdapter for NamedFake {
+            fn name(&self) -> &str { "claude-code" }
+            async fn spawn(&self, wp: &Path, p: &str, c: &SessionContext, m: Option<&str>, _a: Option<&str>) -> Result<Box<dyn AgentSession>> {
+                self.0.spawn(wp, p, c, m, _a).await
+            }
+            async fn resume(&self, wp: &Path, sid: &str, p: &str, m: Option<&str>, _a: Option<&str>) -> Result<Box<dyn AgentSession>> {
+                self.0.resume(wp, sid, p, m, _a).await
+            }
+        }
+        mgr.register_adapter(Arc::new(NamedFake(adapter)));
+
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        // Use a custom agent name that doesn't match any registered adapter
+        let thread_id = mgr.start_thread(&ws, "hello", "my-custom-agent", ctx, None).await.unwrap();
         assert!(!thread_id.is_empty());
 
         let mut got_complete = false;
@@ -973,6 +1028,7 @@ mod tests {
                 _prompt: &str,
                 _context: &SessionContext,
                 _model: Option<&str>,
+                _agent: Option<&str>,
             ) -> Result<Box<dyn AgentSession>> {
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let resume_notify = Arc::new(Notify::new());
@@ -1040,12 +1096,14 @@ mod tests {
                 _session_id: &str,
                 prompt: &str,
                 model: Option<&str>,
+                agent: Option<&str>,
             ) -> Result<Box<dyn AgentSession>> {
                 self.spawn(
                     workspace_path,
                     prompt,
                     &SessionContext { briefing: None, memories: vec![], budget_cap: None },
                     model,
+                    agent,
                 ).await
             }
         }

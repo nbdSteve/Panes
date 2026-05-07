@@ -67,6 +67,7 @@ impl AgentAdapter for ClaudeAdapter {
         prompt: &str,
         context: &SessionContext,
         model: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         let mut full_prompt = String::new();
 
@@ -98,6 +99,10 @@ impl AgentAdapter for ClaudeAdapter {
 
         if let Some(m) = model {
             cmd.arg("--model").arg(m);
+        }
+
+        if let Some(a) = agent {
+            cmd.arg("--agent").arg(a);
         }
 
         cmd.arg(&full_prompt)
@@ -167,6 +172,7 @@ impl AgentAdapter for ClaudeAdapter {
         session_id: &str,
         prompt: &str,
         model: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Box<dyn AgentSession>> {
         let mut cmd = Command::new(&self.cli_path);
         cmd.arg("-p")
@@ -178,6 +184,10 @@ impl AgentAdapter for ClaudeAdapter {
 
         if let Some(m) = model {
             cmd.arg("--model").arg(m);
+        }
+
+        if let Some(a) = agent {
+            cmd.arg("--agent").arg(a);
         }
 
         cmd.arg("--resume")
@@ -398,7 +408,7 @@ mod tests {
     async fn test_spawn_nonexistent_binary() {
         let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None).await;
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None, None).await;
         let err = result.err().expect("expected spawn to fail");
         let msg = err.to_string();
         assert!(msg.contains("failed to spawn"), "error: {msg}");
@@ -407,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn test_resume_nonexistent_binary() {
         let adapter = ClaudeAdapter::with_cli_path("/nonexistent/binary/claude-fake-xyz");
-        let result = adapter.resume(Path::new("/tmp"), "session-123", "follow up", None).await;
+        let result = adapter.resume(Path::new("/tmp"), "session-123", "follow up", None, None).await;
         let err = result.err().expect("expected resume to fail");
         let msg = err.to_string();
         assert!(msg.contains("failed to spawn"), "error: {msg}");
@@ -421,7 +431,7 @@ mod tests {
             memories: vec!["User prefers tabs".to_string(), "Project uses React".to_string()],
             budget_cap: Some(5.0),
         };
-        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None).await;
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None, None).await;
         assert!(result.is_err());
     }
 
@@ -435,7 +445,7 @@ mod tests {
 
         let adapter = ClaudeAdapter::with_cli_path(script.to_str().unwrap());
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, Some("opus")).await;
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, Some("opus"), None).await;
         assert!(result.is_err(), "expected parse failure from fake binary");
         std::fs::remove_file(&script).ok();
     }
@@ -448,7 +458,7 @@ mod tests {
 
         let adapter = ClaudeAdapter::with_cli_path(script.to_str().unwrap());
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None).await;
+        let result = adapter.spawn(Path::new("/tmp"), "test prompt", &ctx, None, None).await;
         assert!(result.is_err(), "expected parse failure from fake binary");
         std::fs::remove_file(&script).ok();
     }
@@ -460,7 +470,7 @@ mod tests {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
         let adapter = ClaudeAdapter::with_cli_path(script.to_str().unwrap());
-        let result = adapter.resume(Path::new("/tmp"), "sess-123", "follow up", Some("sonnet")).await;
+        let result = adapter.resume(Path::new("/tmp"), "sess-123", "follow up", Some("sonnet"), None).await;
         assert!(result.is_err(), "expected parse failure from fake binary");
         std::fs::remove_file(&script).ok();
     }

@@ -261,7 +261,7 @@ function App() {
         setThreads((prev) =>
           prev.map((t) =>
             t.id === tempId
-              ? { ...t, status: "error", events: [{ event_type: "error", message: String(e) }] }
+              ? { ...t, status: "error", events: [{ event_type: "error", message: e instanceof Error ? e.message : typeof e === "string" ? e : (e as { message?: string })?.message ?? JSON.stringify(e) }] }
               : t
           )
         );
@@ -303,7 +303,7 @@ function App() {
               ? {
                   ...t,
                   status: "error" as const,
-                  events: [...t.events, { event_type: "error", message: String(e) }],
+                  events: [...t.events, { event_type: "error", message: e instanceof Error ? e.message : typeof e === "string" ? e : (e as { message?: string })?.message ?? JSON.stringify(e) }],
                 }
               : t
           )

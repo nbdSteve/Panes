@@ -28,6 +28,7 @@ pub trait AgentAdapter: Send + Sync {
         prompt: &str,
         context: &SessionContext,
         model: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Box<dyn AgentSession>>;
 
     async fn resume(
@@ -36,6 +37,7 @@ pub trait AgentAdapter: Send + Sync {
         session_id: &str,
         prompt: &str,
         model: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Box<dyn AgentSession>>;
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {

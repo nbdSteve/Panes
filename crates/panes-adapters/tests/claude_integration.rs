@@ -26,7 +26,7 @@ async fn test_claude_adapter_end_to_end() {
 
     eprintln!("=== Spawning claude adapter ===");
     let mut session = adapter
-        .spawn(workspace, "respond with only the word 'pong'. nothing else.", &context, None)
+        .spawn(workspace, "respond with only the word 'pong'. nothing else.", &context, None, None)
         .await
         .expect("failed to spawn session");
 
@@ -88,7 +88,7 @@ async fn test_claude_adapter_tool_use() {
 
     eprintln!("=== Spawning claude adapter (tool-use test) ===");
     let mut session = adapter
-        .spawn(workspace, "list the files in /tmp using the Bash tool. just run `ls /tmp` and report what you see.", &context, None)
+        .spawn(workspace, "list the files in /tmp using the Bash tool. just run `ls /tmp` and report what you see.", &context, None, None)
         .await
         .expect("failed to spawn session");
 
