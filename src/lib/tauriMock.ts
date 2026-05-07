@@ -301,6 +301,7 @@ interface MockThread {
 
 const mockThreads: MockThread[] = [];
 const activeThreadMeta = new Map<string, { workspaceId: string; prompt: string; events: Array<Record<string, unknown>> }>();
+const workspacePathsWithEdits = new Set<string>();
 
 interface PausedThread {
   threadId: string;
@@ -393,8 +394,14 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       }
       const threadId = crypto.randomUUID();
       const events = buildEvents(prompt);
+      const workspaceId = args?.workspaceId as string;
+      const workspacePath = args?.workspacePath as string;
+      const lower = prompt.toLowerCase();
+      if (lower.includes("edit") || lower.includes("write") || lower.includes("create file")) {
+        workspacePathsWithEdits.add(workspacePath);
+      }
       activeThreadMeta.set(threadId, {
-        workspaceId: args?.workspaceId as string,
+        workspaceId,
         prompt,
         events: [],
       });
@@ -609,8 +616,13 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       mockBriefings.delete(args?.workspaceId as string);
       return null;
 
-    case "get_changed_files":
-      return ["M  src/main.ts", "M  src/utils.ts", "?? src/new-file.ts"];
+    case "get_changed_files": {
+      const wsPath = args?.workspacePath as string;
+      if (workspacePathsWithEdits.has(wsPath)) {
+        return ["M  src/main.ts", "M  src/utils.ts", "?? src/new-file.ts"];
+      }
+      return [];
+    }
 
     case "get_workspace_cost":
       return 0;
