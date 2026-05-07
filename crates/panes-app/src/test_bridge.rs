@@ -749,6 +749,67 @@ async fn dispatch_command(
             }).await.map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
+        "list_validator_types" => {
+            let mgr = state.session_manager.lock().await;
+            let items: Vec<Value> = mgr
+                .validators
+                .catalog()
+                .iter()
+                .map(|t| serde_json::json!({
+                    "typeId": t.type_id,
+                    "label": t.label,
+                    "description": t.description,
+                    "defaultConfig": t.default_config,
+                }))
+                .collect();
+            Ok(Value::Array(items))
+        }
+        "list_validators" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            let rows = state.db.execute(move |conn| {
+                panes_core::db::list_validators(conn, &workspace_id)
+            }).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(rows).unwrap_or(Value::Array(vec![])))
+        }
+        "add_validator" => {
+            let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            let validator_type = args["validatorType"].as_str().ok_or("missing validatorType")?.to_string();
+            let config_json = args["configJson"].as_str().ok_or("missing configJson")?.to_string();
+            {
+                let mgr = state.session_manager.lock().await;
+                if mgr.validators.get(&validator_type).is_none() {
+                    return Err(format!("unknown validator type: {validator_type}"));
+                }
+            }
+            if serde_json::from_str::<Value>(&config_json).is_err() {
+                return Err("configJson is not valid JSON".to_string());
+            }
+            let row = state.db.execute(move |conn| {
+                panes_core::db::insert_validator(conn, &workspace_id, &validator_type, &config_json)
+            }).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(row).unwrap_or(Value::Null))
+        }
+        "update_validator" => {
+            let id = args["id"].as_str().ok_or("missing id")?.to_string();
+            let enabled = args.get("enabled").and_then(|v| v.as_bool());
+            let config_json = args.get("configJson").and_then(|v| v.as_str()).map(String::from);
+            if let Some(ref cfg) = config_json {
+                if serde_json::from_str::<Value>(cfg).is_err() {
+                    return Err("configJson is not valid JSON".to_string());
+                }
+            }
+            let row = state.db.execute(move |conn| {
+                panes_core::db::update_validator(conn, &id, enabled, config_json.as_deref())
+            }).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(row).unwrap_or(Value::Null))
+        }
+        "remove_validator" => {
+            let id = args["id"].as_str().ok_or("missing id")?.to_string();
+            state.db.execute(move |conn| {
+                panes_core::db::delete_validator(conn, &id)
+            }).await.map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         _ => Err(format!("unknown command: {cmd}")),
     }
 }

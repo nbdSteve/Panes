@@ -4,6 +4,7 @@ use serde::Serialize;
 
 pub const FEATURE_ROUTINES: &str = "routines";
 pub const FEATURE_COST_TRACKING: &str = "cost_tracking";
+pub const FEATURE_VALIDATORS: &str = "validators";
 
 struct FeatureDef {
     id: &'static str,
@@ -24,6 +25,12 @@ const FEATURE_REGISTRY: &[FeatureDef] = &[
         label: "Cost Tracking",
         description: "Show cost badges, per-thread costs, and aggregate spend across the UI.",
         default_enabled: true,
+    },
+    FeatureDef {
+        id: FEATURE_VALIDATORS,
+        label: "Output Validators",
+        description: "Run automated checks on agent output (citations, secret scans, custom rules). Failures surface a gate before output is acted on.",
+        default_enabled: false,
     },
 ];
 
@@ -143,11 +150,26 @@ mod tests {
     fn test_list_features() {
         let conn = setup_db();
         let features = list_features(&conn).unwrap();
-        assert_eq!(features.len(), 2);
+        assert_eq!(features.len(), 3);
         let routines = features.iter().find(|f| f.id == "routines").unwrap();
         assert!(!routines.enabled);
         let cost = features.iter().find(|f| f.id == "cost_tracking").unwrap();
         assert!(cost.enabled);
+        let validators = features.iter().find(|f| f.id == "validators").unwrap();
+        assert!(!validators.enabled);
+    }
+
+    #[test]
+    fn test_validators_disabled_by_default() {
+        let conn = setup_db();
+        assert!(!is_feature_enabled(&conn, FEATURE_VALIDATORS).unwrap());
+    }
+
+    #[test]
+    fn test_enable_validators() {
+        let conn = setup_db();
+        set_feature_enabled(&conn, FEATURE_VALIDATORS, true).unwrap();
+        assert!(is_feature_enabled(&conn, FEATURE_VALIDATORS).unwrap());
     }
 
     #[test]

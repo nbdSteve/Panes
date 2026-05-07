@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs, ModelInfo } from "../App";
 import type { RepoFileStatus, CommentThread } from "../types/diff";
 import GateCard from "./GateCard";
+import ValidationResultCard from "./ValidationResultCard";
 import CompletionCard from "./CompletionCard";
 import DiffView from "./DiffView";
 import CostBadge from "./CostBadge";
@@ -982,6 +983,58 @@ function renderEvents(
             </div>
           </div>
         );
+
+      case "validation_result": {
+        if (event.outcome === "pass") {
+          return (
+            <ValidationResultCard
+              key={i}
+              validator={event.validator}
+              outcome="pass"
+              findings={event.findings}
+              durationMs={event.duration_ms}
+            />
+          );
+        }
+        // Failure: render as a gate card unless there's already a Complete/Error after it.
+        const afterIdx = eventToOrigIdx.get(event) ?? 0;
+        const resolved = events.some(
+          (e) =>
+            (eventToOrigIdx.get(e) ?? 0) > afterIdx &&
+            (e.event_type === "complete" || e.event_type === "error"),
+        );
+        if (resolved) {
+          return (
+            <ValidationResultCard
+              key={i}
+              validator={event.validator}
+              outcome="fail"
+              findings={event.findings}
+              durationMs={event.duration_ms}
+            />
+          );
+        }
+        return (
+          <GateCard
+            key={i}
+            variant="validator"
+            validatorName={event.validator}
+            validationFindings={event.findings}
+            description=""
+            riskLevel="high"
+            toolUseId=""
+            toolName=""
+            runningCost={runningCost}
+            showCost={false}
+            onApprove={() => {
+              api.approveGate(threadId, "").catch(console.error);
+            }}
+            onReject={() => {
+              api.rejectGate(threadId, "", "Validator findings rejected").catch(console.error);
+            }}
+          />
+        );
+      }
 
       default:
         return null;

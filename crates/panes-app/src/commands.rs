@@ -1215,6 +1215,106 @@ pub async fn get_routine_cost(
     }).await.map_err(PanesError::from)
 }
 
+// --- Output validator commands ---
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidatorTypeInfo {
+    pub type_id: String,
+    pub label: String,
+    pub description: String,
+    pub default_config: serde_json::Value,
+}
+
+#[tauri::command]
+pub async fn list_validator_types(
+    session: tauri::State<'_, SessionState>,
+) -> Result<Vec<ValidatorTypeInfo>, PanesError> {
+    let sm = session.lock().await;
+    Ok(sm
+        .validators
+        .catalog()
+        .iter()
+        .map(|t| ValidatorTypeInfo {
+            type_id: t.type_id.to_string(),
+            label: t.label.to_string(),
+            description: t.description.to_string(),
+            default_config: t.default_config.clone(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn list_validators(
+    db: tauri::State<'_, DbState>,
+    workspace_id: String,
+) -> Result<Vec<panes_core::db::WorkspaceValidator>, PanesError> {
+    db.execute(move |conn| panes_core::db::list_validators(conn, &workspace_id))
+        .await
+        .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn add_validator(
+    db: tauri::State<'_, DbState>,
+    session: tauri::State<'_, SessionState>,
+    workspace_id: String,
+    validator_type: String,
+    config_json: String,
+) -> Result<panes_core::db::WorkspaceValidator, PanesError> {
+    // Validate the type_id is known.
+    {
+        let sm = session.lock().await;
+        if sm.validators.get(&validator_type).is_none() {
+            return Err(PanesError::ValidationError {
+                message: format!("unknown validator type: {validator_type}"),
+            });
+        }
+    }
+    // Verify config_json parses.
+    if serde_json::from_str::<serde_json::Value>(&config_json).is_err() {
+        return Err(PanesError::ValidationError {
+            message: "config_json is not valid JSON".to_string(),
+        });
+    }
+    db.execute(move |conn| {
+        panes_core::db::insert_validator(conn, &workspace_id, &validator_type, &config_json)
+    })
+    .await
+    .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn update_validator(
+    db: tauri::State<'_, DbState>,
+    id: String,
+    enabled: Option<bool>,
+    config_json: Option<String>,
+) -> Result<panes_core::db::WorkspaceValidator, PanesError> {
+    if let Some(ref cfg) = config_json {
+        if serde_json::from_str::<serde_json::Value>(cfg).is_err() {
+            return Err(PanesError::ValidationError {
+                message: "config_json is not valid JSON".to_string(),
+            });
+        }
+    }
+    db.execute(move |conn| {
+        panes_core::db::update_validator(conn, &id, enabled, config_json.as_deref())
+    })
+    .await
+    .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn remove_validator(
+    db: tauri::State<'_, DbState>,
+    id: String,
+) -> Result<(), PanesError> {
+    db.execute(move |conn| panes_core::db::delete_validator(conn, &id))
+        .await
+        .map_err(PanesError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -135,4 +135,52 @@ describe("GateCard", () => {
 
     expect(screen.getByText(/So far/)).toBeInTheDocument();
   });
+
+  it("validator variant renders findings header and accept/reject buttons", () => {
+    render(
+      <GateCard
+        {...baseProps}
+        variant="validator"
+        validatorName="citation"
+        validationFindings={[
+          {
+            severity: "error",
+            message: "missing path",
+            span: "src/gone.rs",
+            source_hint: "workspace",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText(/Validator found issues/)).toBeInTheDocument();
+    expect(screen.getByText(/citation/)).toBeInTheDocument();
+    expect(screen.getByText("missing path")).toBeInTheDocument();
+    expect(screen.getByText("Accept anyway")).toBeInTheDocument();
+    expect(screen.getByText("Reject output")).toBeInTheDocument();
+    // Tool-gate elements should be absent.
+    expect(screen.queryByText("Approval needed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Continue")).not.toBeInTheDocument();
+  });
+
+  it("validator variant Accept/Reject fire handlers", async () => {
+    const onApprove = vi.fn();
+    const onReject = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <GateCard
+        {...baseProps}
+        variant="validator"
+        validatorName="citation"
+        validationFindings={[
+          { severity: "error", message: "x", span: null, source_hint: null },
+        ]}
+        onApprove={onApprove}
+        onReject={onReject}
+      />,
+    );
+    await user.click(screen.getByText("Accept anyway"));
+    expect(onApprove).toHaveBeenCalled();
+    await user.click(screen.getByText("Reject output"));
+    expect(onReject).toHaveBeenCalled();
+  });
 });

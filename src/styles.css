@@ -4252,3 +4252,341 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* ---------------------------------------------------------
+   Output Validators panel
+   --------------------------------------------------------- */
+
+.validators-panel {
+  padding: 24px;
+  max-width: 720px;
+}
+
+.validators-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 16px;
+}
+
+.validators-panel-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+
+.validators-panel-subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 560px;
+  line-height: 1.5;
+}
+
+.validators-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f85149;
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.validators-error-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(248, 81, 73, 0.2);
+  color: #f85149;
+  font-weight: 700;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.validators-empty {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.validators-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.validators-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  transition: border-color var(--transition-fast);
+}
+
+.validators-item:hover {
+  border-color: var(--border-hover);
+}
+
+.validators-item.disabled {
+  opacity: 0.55;
+}
+
+.validators-item-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.validators-item-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.validators-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.validators-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.validators-disabled-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.validators-description {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.validators-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.validators-config {
+  border-top: 1px solid var(--border);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--bg);
+}
+
+.validators-config-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.validators-config-row input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+.validators-config-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.validators-config-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.validators-config-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.validators-config-hint code {
+  background: var(--bg-hover);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+}
+
+.validators-pattern-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.validators-pattern-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+}
+
+.validators-pattern-list code {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.validators-pattern-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.validators-pattern-add input {
+  flex: 1;
+  padding: 6px 10px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.validators-pattern-add input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.validators-advanced-toggle {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 4px 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.validators-advanced-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.validators-raw-json {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.validators-raw-json textarea {
+  padding: 8px 10px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  resize: vertical;
+}
+
+.validators-raw-json textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.validators-error-inline {
+  color: #f85149;
+  font-size: 11px;
+}
+
+.validators-add-section {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.validators-add-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+
+.validators-add-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .validators-add-options {
+    grid-template-columns: 1fr;
+  }
+}
+
+.validators-add-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  text-align: left;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.validators-add-option:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.validators-add-option:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.validators-add-option-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.validators-add-option-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+

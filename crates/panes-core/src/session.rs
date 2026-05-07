@@ -12,14 +12,22 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::db::DbHandle;
+use crate::db::{self, DbHandle};
 use crate::error::PanesError;
+use crate::features::{is_feature_enabled, FEATURE_VALIDATORS};
 use crate::git;
+use crate::validation::{ValidationContext, ValidatorRegistry};
 
 #[derive(Debug)]
 pub enum GateDecision {
     Continue,
     Abort,
+}
+
+#[derive(Debug)]
+enum ValidatorFlow {
+    Continue,
+    Aborted,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +89,6 @@ impl Drop for CostFinalizer {
 }
 
 struct ActiveThread {
-    #[allow(dead_code)]
     workspace_id: String,
     session: Box<dyn AgentSession>,
     snapshot: Option<git::SnapshotRef>,
@@ -96,6 +103,7 @@ pub struct SessionManager {
     cost_tracker: Arc<CostTracker>,
     event_tx: mpsc::UnboundedSender<ThreadEvent>,
     pub(crate) db: DbHandle,
+    pub validators: Arc<ValidatorRegistry>,
 }
 
 impl SessionManager {
@@ -114,6 +122,7 @@ impl SessionManager {
             cost_tracker,
             event_tx,
             db,
+            validators: Arc::new(ValidatorRegistry::with_builtins()),
         }
     }
 
@@ -282,6 +291,9 @@ impl SessionManager {
         let active_threads = self.active_threads.clone();
         let budget_cap = workspace.budget_cap;
         let db = self.db.clone();
+        let validators = self.validators.clone();
+        let workspace_id_owned = workspace.id.clone();
+        let workspace_path_owned = workspace.path.clone();
 
         tokio::spawn(async move {
             Self::consume_events(
@@ -293,6 +305,9 @@ impl SessionManager {
                 event_stream,
                 db,
                 gate_tx,
+                validators,
+                workspace_id_owned,
+                workspace_path_owned,
             )
             .await;
         });
@@ -426,6 +441,9 @@ impl SessionManager {
         let active_threads = self.active_threads.clone();
         let budget_cap = workspace.budget_cap;
         let db = self.db.clone();
+        let validators = self.validators.clone();
+        let workspace_id_owned = workspace.id.clone();
+        let workspace_path_owned = workspace.path.clone();
 
         tokio::spawn(async move {
             Self::consume_events(
@@ -437,6 +455,9 @@ impl SessionManager {
                 event_stream,
                 db,
                 gate_tx,
+                validators,
+                workspace_id_owned,
+                workspace_path_owned,
             )
             .await;
         });
@@ -454,6 +475,9 @@ impl SessionManager {
         mut events_stream: std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send>>,
         db: DbHandle,
         gate_tx: GateSender,
+        validators: Arc<ValidatorRegistry>,
+        workspace_id: String,
+        workspace_path: PathBuf,
     ) {
         let _cost_guard = CostFinalizer {
             thread_id: thread_id.clone(),
@@ -522,15 +546,20 @@ impl SessionManager {
                 None
             };
 
-            let thread_event = ThreadEvent {
-                thread_id: thread_id.clone(),
-                timestamp: Utc::now(),
-                event: event.clone(),
-                parent_tool_use_id: None,
-            };
-
-            if event_tx.send(thread_event).is_err() {
-                break;
+            // Defer forwarding Complete until after validators have run so that a
+            // validator-rejected completion never surfaces to the frontend as a
+            // successful completion.
+            let is_complete = matches!(event, AgentEvent::Complete { .. });
+            if !is_complete {
+                let thread_event = ThreadEvent {
+                    thread_id: thread_id.clone(),
+                    timestamp: Utc::now(),
+                    event: event.clone(),
+                    parent_tool_use_id: None,
+                };
+                if event_tx.send(thread_event).is_err() {
+                    break;
+                }
             }
 
             // Gate pausing: wait for user decision before consuming more events
@@ -567,6 +596,56 @@ impl SessionManager {
                         }
                         let abort_event = AgentEvent::Error {
                             message: "Gate rejected by user".to_string(),
+                            recoverable: false,
+                        };
+                        Self::persist_event(&db, &thread_id, &abort_event).await;
+                        let _ = event_tx.send(ThreadEvent {
+                            thread_id: thread_id.clone(),
+                            timestamp: Utc::now(),
+                            event: abort_event,
+                            parent_tool_use_id: None,
+                        });
+                        final_status = "interrupted";
+                        break;
+                    }
+                }
+            }
+
+            // Output validators: only run on Complete events in v1.
+            if is_complete {
+                let decision = Self::maybe_run_validators(
+                    &event,
+                    &validators,
+                    &workspace_id,
+                    &workspace_path,
+                    &thread_id,
+                    &db,
+                    &event_tx,
+                    &gate_tx,
+                )
+                .await;
+                match decision {
+                    ValidatorFlow::Continue => {
+                        // Forward the previously-deferred Complete event now.
+                        let thread_event = ThreadEvent {
+                            thread_id: thread_id.clone(),
+                            timestamp: Utc::now(),
+                            event: event.clone(),
+                            parent_tool_use_id: None,
+                        };
+                        if event_tx.send(thread_event).is_err() {
+                            break;
+                        }
+                    }
+                    ValidatorFlow::Aborted => {
+                        {
+                            let active = active_threads.lock().await;
+                            if let Some(thread) = active.get(&thread_id) {
+                                let _ = thread.session.cancel().await;
+                            }
+                        }
+                        let abort_event = AgentEvent::Error {
+                            message: "Validator findings rejected by user".to_string(),
                             recoverable: false,
                         };
                         Self::persist_event(&db, &thread_id, &abort_event).await;
@@ -637,6 +716,7 @@ impl SessionManager {
             AgentEvent::SubAgentSpawned { .. } => "sub_agent_spawned",
             AgentEvent::SubAgentComplete { .. } => "sub_agent_complete",
             AgentEvent::Complete { .. } => "complete",
+            AgentEvent::ValidationResult { .. } => "validation_result",
         }
         .to_string();
         let data = serde_json::to_string(event).unwrap_or_default();
@@ -649,6 +729,126 @@ impl SessionManager {
             )?;
             Ok(())
         }).await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn maybe_run_validators(
+        event: &AgentEvent,
+        validators: &ValidatorRegistry,
+        workspace_id: &str,
+        workspace_path: &std::path::Path,
+        thread_id: &str,
+        db: &DbHandle,
+        event_tx: &mpsc::UnboundedSender<ThreadEvent>,
+        gate_tx: &GateSender,
+    ) -> ValidatorFlow {
+        // Feature-flag check: load feature flag + configured validators in one DB hop.
+        let wid = workspace_id.to_string();
+        let loaded = db
+            .execute(move |conn| {
+                let enabled = is_feature_enabled(conn, FEATURE_VALIDATORS).unwrap_or(false);
+                if !enabled {
+                    return Ok::<_, anyhow::Error>((false, Vec::new()));
+                }
+                let rows = db::list_enabled_validators(conn, &wid).unwrap_or_default();
+                Ok((true, rows))
+            })
+            .await;
+
+        let (feature_enabled, configured) = match loaded {
+            Ok(v) => v,
+            Err(_) => return ValidatorFlow::Continue,
+        };
+        if !feature_enabled || configured.is_empty() {
+            return ValidatorFlow::Continue;
+        }
+
+        let mut any_failed = false;
+        let mut target_index = 0u64;
+        if let AgentEvent::Complete { turns, .. } = event {
+            target_index = *turns as u64;
+        }
+
+        for row in configured {
+            let Some(validator) = validators.get(&row.validator_type) else {
+                continue;
+            };
+            if !validator.wants(event) {
+                continue;
+            }
+            let config_value: serde_json::Value =
+                serde_json::from_str(&row.config_json).unwrap_or(serde_json::Value::Null);
+            let ctx = ValidationContext {
+                thread_id: thread_id.to_string(),
+                workspace_path: workspace_path.to_path_buf(),
+                config: config_value,
+                recent_text: Vec::new(),
+            };
+
+            let start = std::time::Instant::now();
+            let report = validator.validate(event, &ctx).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            if report.outcome == panes_events::ValidationOutcome::Fail {
+                any_failed = true;
+            }
+
+            let result_event = AgentEvent::ValidationResult {
+                validator: row.validator_type.clone(),
+                target_event_index: target_index,
+                outcome: report.outcome,
+                findings: report.findings,
+                duration_ms,
+            };
+            Self::persist_event(db, thread_id, &result_event).await;
+            let _ = event_tx.send(ThreadEvent {
+                thread_id: thread_id.to_string(),
+                timestamp: Utc::now(),
+                event: result_event,
+                parent_tool_use_id: None,
+            });
+        }
+
+        if !any_failed {
+            return ValidatorFlow::Continue;
+        }
+
+        // At least one validator failed — install a gate oneshot and pause.
+        let (tx, rx) = oneshot::channel::<GateDecision>();
+        {
+            let mut slot = gate_tx.lock().await;
+            *slot = Some(tx);
+        }
+        {
+            let tid = thread_id.to_string();
+            let _ = db
+                .execute(move |conn| {
+                    conn.execute(
+                        "UPDATE threads SET status = 'gate' WHERE id = ?1",
+                        rusqlite::params![tid],
+                    )?;
+                    Ok(())
+                })
+                .await;
+        }
+        info!(thread_id = %thread_id, "validator gate paused — waiting for user decision");
+
+        match rx.await {
+            Ok(GateDecision::Continue) | Err(_) => {
+                let tid = thread_id.to_string();
+                let _ = db
+                    .execute(move |conn| {
+                        conn.execute(
+                            "UPDATE threads SET status = 'running' WHERE id = ?1",
+                            rusqlite::params![tid],
+                        )?;
+                        Ok(())
+                    })
+                    .await;
+                ValidatorFlow::Continue
+            }
+            Ok(GateDecision::Abort) => ValidatorFlow::Aborted,
+        }
     }
 
     pub async fn approve(&self, thread_id: &str, _tool_use_id: &str) -> Result<(), PanesError> {
@@ -1916,5 +2116,258 @@ mod tests {
         let result = mgr.reject(&tid, "fake-tool-id", "test").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("thread not found"));
+    }
+
+    // ---------------------------------------------------------------
+    // Validator gate tests
+    // ---------------------------------------------------------------
+
+    fn validator_workspace(path: std::path::PathBuf) -> Workspace {
+        Workspace {
+            id: "ws-val".to_string(),
+            path,
+            name: "validator-ws".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        }
+    }
+
+    async fn insert_workspace_at(mgr: &SessionManager, ws: &Workspace) {
+        let id = ws.id.clone();
+        let path = ws.path.to_string_lossy().to_string();
+        let name = ws.name.clone();
+        mgr.db
+            .execute(move |conn| {
+                conn.execute(
+                    "INSERT INTO workspaces (id, path, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![id, path, name, "2024-01-01"],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn enable_validators_feature(mgr: &SessionManager) {
+        mgr.db
+            .execute(|conn| {
+                crate::features::set_feature_enabled(
+                    conn,
+                    crate::features::FEATURE_VALIDATORS,
+                    true,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn add_citation_validator(mgr: &SessionManager, workspace_id: &str) {
+        let wid = workspace_id.to_string();
+        mgr.db
+            .execute(move |conn| {
+                crate::db::insert_validator(conn, &wid, "citation", "{}")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn wait_for_validation_result(
+        rx: &mut mpsc::UnboundedReceiver<ThreadEvent>,
+    ) -> (String, panes_events::ValidationOutcome) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(te)) => {
+                    if let AgentEvent::ValidationResult {
+                        validator, outcome, ..
+                    } = &te.event
+                    {
+                        return (validator.clone(), *outcome);
+                    }
+                }
+                _ => panic!("timed out waiting for ValidationResult event"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validator_feature_disabled_skips_entirely() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "See src/missing.rs for details.".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = validator_workspace(tmp.path().to_path_buf());
+        insert_workspace_at(&mgr, &ws).await;
+        // Feature is off by default — even with a configured validator, nothing should gate.
+        add_citation_validator(&mgr, &ws.id).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let _tid = mgr.start_thread(&ws, "hi", "fake", ctx, None).await.unwrap();
+
+        let events = collect_events_until_done(&mut rx).await;
+        assert!(
+            events
+                .iter()
+                .any(|te| matches!(&te.event, AgentEvent::Complete { .. })),
+            "thread should complete without any validator activity"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|te| matches!(&te.event, AgentEvent::ValidationResult { .. })),
+            "no ValidationResult events should fire when feature is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validator_passes_on_real_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/real.rs"), "ok\n").unwrap();
+
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "See src/real.rs for details.".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = validator_workspace(tmp.path().to_path_buf());
+        insert_workspace_at(&mgr, &ws).await;
+        enable_validators_feature(&mgr).await;
+        add_citation_validator(&mgr, &ws.id).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let _tid = mgr.start_thread(&ws, "hi", "fake", ctx, None).await.unwrap();
+
+        let (who, outcome) = wait_for_validation_result(&mut rx).await;
+        assert_eq!(who, "citation");
+        assert_eq!(outcome, panes_events::ValidationOutcome::Pass);
+
+        let events = collect_events_until_done(&mut rx).await;
+        assert!(
+            events
+                .iter()
+                .any(|te| matches!(&te.event, AgentEvent::Complete { .. })),
+            "thread should complete after passing validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validator_failure_creates_gate_and_approve_resumes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "Bug is in src/missing.rs line 1.".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = validator_workspace(tmp.path().to_path_buf());
+        insert_workspace_at(&mgr, &ws).await;
+        enable_validators_feature(&mgr).await;
+        add_citation_validator(&mgr, &ws.id).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid = mgr.start_thread(&ws, "hi", "fake", ctx, None).await.unwrap();
+
+        let (_who, outcome) = wait_for_validation_result(&mut rx).await;
+        assert_eq!(outcome, panes_events::ValidationOutcome::Fail);
+
+        // DB status should flip to 'gate' while paused.
+        wait_for_db_status(&mgr, &tid, "gate", 2000).await;
+
+        // Approve via the existing gate API — tool_use_id is ignored for validator gates.
+        mgr.approve(&tid, "").await.unwrap();
+
+        let events = collect_events_until_done(&mut rx).await;
+        assert!(
+            events
+                .iter()
+                .any(|te| matches!(&te.event, AgentEvent::Complete { .. })),
+            "thread should complete after validator-gate approval"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validator_failure_reject_interrupts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "See src/gone.rs for the problem.".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = validator_workspace(tmp.path().to_path_buf());
+        insert_workspace_at(&mgr, &ws).await;
+        enable_validators_feature(&mgr).await;
+        add_citation_validator(&mgr, &ws.id).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid = mgr.start_thread(&ws, "hi", "fake", ctx, None).await.unwrap();
+
+        let (_who, outcome) = wait_for_validation_result(&mut rx).await;
+        assert_eq!(outcome, panes_events::ValidationOutcome::Fail);
+
+        wait_for_db_status(&mgr, &tid, "gate", 2000).await;
+        mgr.reject(&tid, "", "bad citation").await.unwrap();
+
+        let events = collect_events_until_done(&mut rx).await;
+        let had_error = events.iter().any(|te| {
+            matches!(&te.event, AgentEvent::Error { message, .. } if message.contains("Validator"))
+        });
+        assert!(had_error, "expected a validator-rejected error event");
+
+        wait_for_db_status(&mgr, &tid, "interrupted", 2000).await;
+    }
+
+    #[tokio::test]
+    async fn test_disabled_validator_row_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        let adapter = FakeAdapter::new(FakeScenario::TextOnly {
+            response: "The bug is in src/missing.rs.".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ws = validator_workspace(tmp.path().to_path_buf());
+        insert_workspace_at(&mgr, &ws).await;
+        enable_validators_feature(&mgr).await;
+
+        // Insert citation validator then disable it.
+        let wid = ws.id.clone();
+        mgr.db
+            .execute(move |conn| {
+                let v = crate::db::insert_validator(conn, &wid, "citation", "{}")?;
+                crate::db::update_validator(conn, &v.id, Some(false), None)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let _tid = mgr.start_thread(&ws, "hi", "fake", ctx, None).await.unwrap();
+
+        let events = collect_events_until_done(&mut rx).await;
+        assert!(
+            !events
+                .iter()
+                .any(|te| matches!(&te.event, AgentEvent::ValidationResult { .. })),
+            "disabled validators should not emit results"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|te| matches!(&te.event, AgentEvent::Complete { .. })),
+            "thread should complete normally"
+        );
     }
 }

@@ -2842,6 +2842,7 @@ dependencies = [
  "panes-cost",
  "panes-events",
  "panes-memory",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

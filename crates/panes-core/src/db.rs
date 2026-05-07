@@ -156,6 +156,147 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     )
     .context("failed to create costs timestamp index")?;
 
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS workspace_validators (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            validator_type TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            config_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspace_validators_workspace
+            ON workspace_validators(workspace_id);
+        ",
+    )
+    .context("failed to create workspace_validators table")?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceValidator {
+    pub id: String,
+    pub workspace_id: String,
+    pub validator_type: String,
+    pub enabled: bool,
+    pub config_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub fn list_validators(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceValidator>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, validator_type, enabled, config_json, created_at, updated_at \
+         FROM workspace_validators WHERE workspace_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![workspace_id], |row| {
+        Ok(WorkspaceValidator {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            validator_type: row.get(2)?,
+            enabled: row.get::<_, i64>(3)? != 0,
+            config_json: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn list_enabled_validators(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceValidator>> {
+    Ok(list_validators(conn, workspace_id)?
+        .into_iter()
+        .filter(|v| v.enabled)
+        .collect())
+}
+
+pub fn insert_validator(
+    conn: &Connection,
+    workspace_id: &str,
+    validator_type: &str,
+    config_json: &str,
+) -> Result<WorkspaceValidator> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO workspace_validators \
+         (id, workspace_id, validator_type, enabled, config_json, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, 1, ?4, ?5, ?5)",
+        rusqlite::params![id, workspace_id, validator_type, config_json, now],
+    )?;
+    Ok(WorkspaceValidator {
+        id,
+        workspace_id: workspace_id.to_string(),
+        validator_type: validator_type.to_string(),
+        enabled: true,
+        config_json: config_json.to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+pub fn update_validator(
+    conn: &Connection,
+    id: &str,
+    enabled: Option<bool>,
+    config_json: Option<&str>,
+) -> Result<WorkspaceValidator> {
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Some(e) = enabled {
+        conn.execute(
+            "UPDATE workspace_validators SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![e as i64, now, id],
+        )?;
+    }
+    if let Some(cfg) = config_json {
+        conn.execute(
+            "UPDATE workspace_validators SET config_json = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![cfg, now, id],
+        )?;
+    }
+    get_validator(conn, id)
+}
+
+pub fn get_validator(conn: &Connection, id: &str) -> Result<WorkspaceValidator> {
+    let v = conn.query_row(
+        "SELECT id, workspace_id, validator_type, enabled, config_json, created_at, updated_at \
+         FROM workspace_validators WHERE id = ?1",
+        rusqlite::params![id],
+        |row| {
+            Ok(WorkspaceValidator {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                validator_type: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                config_json: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        },
+    )?;
+    Ok(v)
+}
+
+pub fn delete_validator(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM workspace_validators WHERE id = ?1",
+        rusqlite::params![id],
+    )?;
     Ok(())
 }
 
@@ -553,6 +694,79 @@ mod tests {
         let empty_ws = result.iter().find(|r| r.workspace_id == "ws-empty").unwrap();
         assert!((empty_ws.total_usd - 0.0).abs() < 0.001);
         assert_eq!(empty_ws.thread_count, 0);
+    }
+
+    #[test]
+    fn test_workspace_validators_migration_creates_table() {
+        let conn = setup_db();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workspace_validators'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_insert_and_list_validator() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws-v");
+
+        let v = insert_validator(&conn, "ws-v", "citation", r#"{"check_line_refs":true}"#).unwrap();
+        assert_eq!(v.workspace_id, "ws-v");
+        assert_eq!(v.validator_type, "citation");
+        assert!(v.enabled);
+
+        let list = list_validators(&conn, "ws-v").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, v.id);
+    }
+
+    #[test]
+    fn test_update_validator_toggle_and_config() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws-v");
+        let v = insert_validator(&conn, "ws-v", "citation", "{}").unwrap();
+
+        let updated = update_validator(&conn, &v.id, Some(false), None).unwrap();
+        assert!(!updated.enabled);
+
+        let updated2 =
+            update_validator(&conn, &v.id, None, Some(r#"{"x":1}"#)).unwrap();
+        assert_eq!(updated2.config_json, r#"{"x":1}"#);
+    }
+
+    #[test]
+    fn test_delete_validator() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws-v");
+        let v = insert_validator(&conn, "ws-v", "citation", "{}").unwrap();
+        delete_validator(&conn, &v.id).unwrap();
+        assert!(list_validators(&conn, "ws-v").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_list_enabled_validators_filters() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws-v");
+        let a = insert_validator(&conn, "ws-v", "citation", "{}").unwrap();
+        let _ = insert_validator(&conn, "ws-v", "secret_scan", "{}").unwrap();
+        update_validator(&conn, &a.id, Some(false), None).unwrap();
+
+        let enabled = list_enabled_validators(&conn, "ws-v").unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].validator_type, "secret_scan");
+    }
+
+    #[test]
+    fn test_validator_cascades_on_workspace_delete() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws-v");
+        insert_validator(&conn, "ws-v", "citation", "{}").unwrap();
+
+        conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params!["ws-v"]).unwrap();
+        let remaining = list_validators(&conn, "ws-v").unwrap();
+        assert!(remaining.is_empty());
     }
 
     #[test]

@@ -8,8 +8,9 @@ interface SidebarProps {
   workspaces: WorkspaceInfo[];
   threads: ThreadInfo[];
   activeWorkspace: string | null;
-  activeView: "workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard";
+  activeView: "workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard" | "validators";
   routinesEnabled: boolean;
+  validatorsEnabled: boolean;
   routineCount: number;
   showCost: boolean;
   onSelectWorkspace: (id: string) => void;
@@ -17,6 +18,7 @@ interface SidebarProps {
   onSelectFeed: () => void;
   onSelectMemory: (workspaceId: string) => void;
   onSelectRoutines: (workspaceId: string) => void;
+  onSelectValidators: (workspaceId: string) => void;
   onSelectSettings: () => void;
   onAddWorkspace: (ws: WorkspaceInfo) => void;
   onRemoveWorkspace: (id: string) => void;
@@ -28,6 +30,7 @@ export default function Sidebar({
   activeWorkspace,
   activeView,
   routinesEnabled,
+  validatorsEnabled,
   routineCount,
   showCost,
   onSelectWorkspace,
@@ -35,6 +38,7 @@ export default function Sidebar({
   onSelectFeed,
   onSelectMemory,
   onSelectRoutines,
+  onSelectValidators,
   onSelectSettings,
   onAddWorkspace,
   onRemoveWorkspace,
@@ -202,6 +206,18 @@ export default function Sidebar({
               {routineCount > 0 && (
                 <span className="thread-count">{routineCount}</span>
               )}
+            </div>
+          )}
+          {validatorsEnabled && (
+            <div
+              className={`sidebar-item ${activeView === "validators" ? "active" : ""}`}
+              onClick={() => onSelectValidators(activeWorkspace)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 12l2 2 4-4" />
+                <path d="M21 12c0 5-4 9-9 9s-9-4-9-9 4-9 9-9 9 4 9 9z" />
+              </svg>
+              Validators
             </div>
           )}
         </div>

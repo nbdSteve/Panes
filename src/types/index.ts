@@ -1,4 +1,4 @@
-export type { AgentEvent, ThinkingEvent, TextEvent, ToolRequestEvent, ToolResultEvent, CostUpdateEvent, CompleteEvent, ErrorEvent, SubAgentSpawnedEvent, SubAgentCompleteEvent, FollowUpEvent } from "./events";
+export type { AgentEvent, ThinkingEvent, TextEvent, ToolRequestEvent, ToolResultEvent, CostUpdateEvent, CompleteEvent, ErrorEvent, SubAgentSpawnedEvent, SubAgentCompleteEvent, FollowUpEvent, ValidationResultEvent, ValidationFinding, ValidationOutcome, FindingSeverity } from "./events";
 import type { AgentEvent } from "./events";
 export type { PanesError, PanesErrorType } from "./errors";
 export { parsePanesError, isWorkspaceOccupied, isNoGatePending, isValidationError } from "./errors";
@@ -83,4 +83,21 @@ export interface RoutineExecution {
   startedAt: string;
   completedAt: string | null;
   errorMessage: string | null;
+}
+
+export interface WorkspaceValidator {
+  id: string;
+  workspaceId: string;
+  validatorType: string;
+  enabled: boolean;
+  configJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ValidatorTypeInfo {
+  typeId: string;
+  label: string;
+  description: string;
+  defaultConfig: unknown;
 }

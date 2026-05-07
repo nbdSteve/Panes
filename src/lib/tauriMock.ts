@@ -27,7 +27,36 @@ function buildEvents(prompt: string): Array<Record<string, unknown>> {
   const lower = prompt.toLowerCase();
   const events: Array<Record<string, unknown>> = [];
 
-  if (lower.includes("error") || lower.includes("fail")) {
+  if (lower.includes("validate")) {
+    events.push({ event_type: "thinking", text: "Generating output..." });
+    events.push({
+      event_type: "text",
+      text: "See src/missing.rs for the bug.",
+    });
+    events.push({
+      event_type: "validation_result",
+      validator: "citation",
+      target_event_index: 1,
+      outcome: "fail",
+      findings: [
+        {
+          severity: "error",
+          message: "referenced path does not exist: src/missing.rs",
+          span: "src/missing.rs",
+          source_hint: "workspace",
+        },
+      ],
+      duration_ms: 5,
+    });
+    events.push({ event_type: "__gate_pause__", id: "validator_gate" });
+    events.push({
+      event_type: "complete",
+      summary: "See src/missing.rs for the bug.",
+      total_cost_usd: 0.002,
+      duration_ms: 1000,
+      turns: 1,
+    });
+  } else if (lower.includes("error") || lower.includes("fail")) {
     events.push({ event_type: "thinking", text: "Let me try..." });
     events.push({
       event_type: "error",
@@ -771,11 +800,75 @@ diff --git a/src/lib.rs b/src/lib.rs
     case "get_routine_cost":
       return 0;
 
+    case "list_validator_types":
+      return [
+        {
+          typeId: "citation",
+          label: "Citation Check",
+          description: "Verifies file path citations resolve in the workspace.",
+          defaultConfig: { check_line_refs: true },
+        },
+        {
+          typeId: "secret_scan",
+          label: "Secret Scan",
+          description: "Flags output containing secret-like strings.",
+          defaultConfig: { custom_patterns: [] },
+        },
+      ];
+
+    case "list_validators":
+      return mockValidators.filter((v) => v.workspaceId === args?.workspaceId);
+
+    case "add_validator": {
+      const now = new Date().toISOString();
+      const v = {
+        id: crypto.randomUUID(),
+        workspaceId: args?.workspaceId as string,
+        validatorType: args?.validatorType as string,
+        enabled: true,
+        configJson: args?.configJson as string,
+        createdAt: now,
+        updatedAt: now,
+      };
+      mockValidators.push(v);
+      return v;
+    }
+
+    case "update_validator": {
+      const idx = mockValidators.findIndex((v) => v.id === args?.id);
+      if (idx >= 0) {
+        const next = { ...mockValidators[idx] };
+        if (args?.enabled !== undefined) next.enabled = args.enabled as boolean;
+        if (args?.configJson !== undefined)
+          next.configJson = args.configJson as string;
+        next.updatedAt = new Date().toISOString();
+        mockValidators[idx] = next;
+        return next;
+      }
+      return null;
+    }
+
+    case "remove_validator": {
+      const idx = mockValidators.findIndex((v) => v.id === args?.id);
+      if (idx >= 0) mockValidators.splice(idx, 1);
+      return null;
+    }
+
     default:
       console.warn(`[tauriMock] unhandled invoke: ${cmd}`, args);
       return null;
   }
 }
+
+const mockValidators: Array<{
+  id: string;
+  workspaceId: string;
+  validatorType: string;
+  enabled: boolean;
+  configJson: string;
+  createdAt: string;
+  updatedAt: string;
+}> = [];
 
 export function installTauriMock() {
   if ((window as any).__TAURI_INTERNALS__) return;

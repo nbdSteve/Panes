@@ -164,4 +164,43 @@ describe("mapBackendEvent", () => {
       cost_usd: 0.05,
     });
   });
+
+  it("maps validation_result pass event", () => {
+    const result = mapBackendEvent({
+      event_type: "validation_result",
+      validator: "citation",
+      target_event_index: 1,
+      outcome: "pass",
+      findings: [],
+      duration_ms: 3,
+    });
+    expect(result).toEqual({
+      event_type: "validation_result",
+      validator: "citation",
+      target_event_index: 1,
+      outcome: "pass",
+      findings: [],
+      duration_ms: 3,
+    });
+  });
+
+  it("maps validation_result fail event with findings", () => {
+    const result = mapBackendEvent({
+      event_type: "validation_result",
+      validator: "citation",
+      target_event_index: 2,
+      outcome: "fail",
+      findings: [
+        { severity: "error", message: "missing", span: "src/x.rs", source_hint: "workspace" },
+      ],
+      duration_ms: 8,
+    });
+    expect(result).toMatchObject({
+      event_type: "validation_result",
+      outcome: "fail",
+      findings: [
+        { severity: "error", message: "missing" },
+      ],
+    });
+  });
 });

@@ -8,7 +8,8 @@ export type AgentEvent =
   | ErrorEvent
   | SubAgentSpawnedEvent
   | SubAgentCompleteEvent
-  | FollowUpEvent;
+  | FollowUpEvent
+  | ValidationResultEvent;
 
 export interface ThinkingEvent {
   event_type: "thinking";
@@ -80,4 +81,23 @@ export interface SubAgentCompleteEvent {
 export interface FollowUpEvent {
   event_type: "follow_up";
   text: string;
+}
+
+export type ValidationOutcome = "pass" | "fail";
+export type FindingSeverity = "info" | "warning" | "error";
+
+export interface ValidationFinding {
+  severity: FindingSeverity;
+  message: string;
+  span?: string | null;
+  source_hint?: string | null;
+}
+
+export interface ValidationResultEvent {
+  event_type: "validation_result";
+  validator: string;
+  target_event_index: number;
+  outcome: ValidationOutcome;
+  findings: ValidationFinding[];
+  duration_ms: number;
 }

@@ -224,6 +224,11 @@ pub fn run() {
             commands::toggle_routine,
             commands::list_routine_executions,
             commands::get_routine_cost,
+            commands::list_validator_types,
+            commands::list_validators,
+            commands::add_validator,
+            commands::update_validator,
+            commands::remove_validator,
         ])
         .run(tauri::generate_context!())
         .expect("error running panes");
@@ -297,7 +302,15 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
 fn route_prompt(prompt: &str) -> FakeScenario {
     let lower = prompt.to_lowercase();
 
-    if lower.contains("error") || lower.contains("fail") {
+    if lower.contains("validate") {
+        // Complete summary references a path that will not exist inside the
+        // temp workspaces used by fullstack tests — triggers the citation
+        // validator when the FEATURE_VALIDATORS flag and a citation rule
+        // are configured.
+        FakeScenario::TextOnly {
+            response: "See src/missing.rs for the bug.".to_string(),
+        }
+    } else if lower.contains("error") || lower.contains("fail") {
         FakeScenario::Error {
             message: "Simulated error: something went wrong".to_string(),
         }

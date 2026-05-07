@@ -62,6 +62,15 @@ export function mapBackendEvent(
         summary: raw.summary as string,
         cost_usd: raw.cost_usd as number,
       };
+    case "validation_result":
+      return {
+        event_type: "validation_result",
+        validator: raw.validator as string,
+        target_event_index: raw.target_event_index as number,
+        outcome: raw.outcome as "pass" | "fail",
+        findings: (raw.findings as import("../types").ValidationFinding[]) ?? [],
+        duration_ms: raw.duration_ms as number,
+      };
     default:
       return null;
   }

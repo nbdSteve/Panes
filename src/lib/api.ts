@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parsePanesError, type PanesError } from "../types/errors";
-import type { FeatureInfo, RoutineInfo, RoutineExecution, RepoFileStatus, RepoCommitParams } from "../types";
+import type { FeatureInfo, RoutineInfo, RoutineExecution, RepoFileStatus, RepoCommitParams, WorkspaceValidator, ValidatorTypeInfo } from "../types";
 
 export interface StartThreadParams {
   workspaceId: string;
@@ -188,6 +188,24 @@ export const api = {
     call<RoutineExecution[]>("list_routine_executions", { routineId, limit }),
   getRoutineCost: (routineId: string) =>
     call<number>("get_routine_cost", { routineId }),
+
+  // Output validators
+  listValidatorTypes: () =>
+    call<ValidatorTypeInfo[]>("list_validator_types"),
+  listValidators: (workspaceId: string) =>
+    call<WorkspaceValidator[]>("list_validators", { workspaceId }),
+  addValidator: (params: {
+    workspaceId: string;
+    validatorType: string;
+    configJson: string;
+  }) => call<WorkspaceValidator>("add_validator", params as unknown as Record<string, unknown>),
+  updateValidator: (params: {
+    id: string;
+    enabled?: boolean;
+    configJson?: string;
+  }) => call<WorkspaceValidator>("update_validator", params as unknown as Record<string, unknown>),
+  removeValidator: (id: string) =>
+    call<void>("remove_validator", { id }),
 };
 
 export type { PanesError };

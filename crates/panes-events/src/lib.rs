@@ -53,6 +53,36 @@ pub enum AgentEvent {
         duration_ms: u64,
         turns: u32,
     },
+    ValidationResult {
+        validator: String,
+        target_event_index: u64,
+        outcome: ValidationOutcome,
+        findings: Vec<ValidationFinding>,
+        duration_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationOutcome {
+    Pass,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationFinding {
+    pub severity: FindingSeverity,
+    pub message: String,
+    pub span: Option<String>,
+    pub source_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -343,6 +373,67 @@ mod tests {
                 assert!((cost_usd - 0.01).abs() < f64::EPSILON);
             }
             other => panic!("expected SubAgentComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_agent_event_serde_validation_result() {
+        let event = AgentEvent::ValidationResult {
+            validator: "citation".to_string(),
+            target_event_index: 42,
+            outcome: ValidationOutcome::Fail,
+            findings: vec![ValidationFinding {
+                severity: FindingSeverity::Error,
+                message: "path does not exist".to_string(),
+                span: Some("src/missing.rs".to_string()),
+                source_hint: Some("workspace root".to_string()),
+            }],
+            duration_ms: 7,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event_type\":\"validation_result\""));
+        assert!(json.contains("\"outcome\":\"fail\""));
+        let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            AgentEvent::ValidationResult {
+                validator,
+                target_event_index,
+                outcome,
+                findings,
+                duration_ms,
+            } => {
+                assert_eq!(validator, "citation");
+                assert_eq!(target_event_index, 42);
+                assert_eq!(outcome, ValidationOutcome::Fail);
+                assert_eq!(findings.len(), 1);
+                assert_eq!(findings[0].severity, FindingSeverity::Error);
+                assert_eq!(findings[0].message, "path does not exist");
+                assert_eq!(findings[0].span.as_deref(), Some("src/missing.rs"));
+                assert_eq!(duration_ms, 7);
+            }
+            other => panic!("expected ValidationResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validation_outcome_serde() {
+        let pass = serde_json::to_string(&ValidationOutcome::Pass).unwrap();
+        assert_eq!(pass, "\"pass\"");
+        let fail: ValidationOutcome = serde_json::from_str("\"fail\"").unwrap();
+        assert_eq!(fail, ValidationOutcome::Fail);
+    }
+
+    #[test]
+    fn test_finding_severity_serde() {
+        for (sev, expected) in [
+            (FindingSeverity::Info, "\"info\""),
+            (FindingSeverity::Warning, "\"warning\""),
+            (FindingSeverity::Error, "\"error\""),
+        ] {
+            let s = serde_json::to_string(&sev).unwrap();
+            assert_eq!(s, expected);
+            let back: FindingSeverity = serde_json::from_str(expected).unwrap();
+            assert_eq!(back, sev);
         }
     }
 

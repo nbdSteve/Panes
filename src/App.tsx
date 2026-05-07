@@ -8,6 +8,7 @@ import FeedView from "./components/FeedView";
 import DashboardView from "./components/DashboardView";
 import SettingsPanel from "./components/SettingsPanel";
 import RoutinePanel from "./components/RoutinePanel";
+import WorkspaceValidatorsPanel from "./components/WorkspaceValidatorsPanel";
 import { mapBackendEvent } from "./lib/eventMapper";
 import { api } from "./lib/api";
 import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo } from "./types";
@@ -34,7 +35,7 @@ function App() {
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard">("dashboard");
+  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard" | "validators">("dashboard");
   const [adapters, setAdapters] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -203,7 +204,9 @@ function App() {
                 ? "error" as const
                 : mapped.event_type === "tool_request" && mapped.needs_approval
                   ? "gate" as const
-                  : "running" as const;
+                  : mapped.event_type === "validation_result" && mapped.outcome === "fail"
+                    ? "gate" as const
+                    : "running" as const;
 
           if (newStatus === "complete" && mapped.event_type === "complete") {
             toExtract.push(t);
@@ -423,6 +426,7 @@ function App() {
   }, []);
 
   const routinesEnabled = features.some((f) => f.id === "routines" && f.enabled);
+  const validatorsEnabled = features.some((f) => f.id === "validators" && f.enabled);
   const costTrackingEnabled = features.some((f) => f.id === "cost_tracking" && f.enabled);
   const routineCount = routines.filter((r) => r.enabled).length;
 
@@ -458,6 +462,7 @@ function App() {
         activeWorkspace={activeWorkspace}
         activeView={activeView}
         routinesEnabled={routinesEnabled}
+        validatorsEnabled={validatorsEnabled}
         routineCount={routineCount}
         showCost={costTrackingEnabled}
         onSelectWorkspace={(id) => {
@@ -487,6 +492,10 @@ function App() {
         onSelectRoutines={(wsId) => {
           setActiveWorkspace(wsId);
           setActiveView("routines");
+        }}
+        onSelectValidators={(wsId) => {
+          setActiveWorkspace(wsId);
+          setActiveView("validators");
         }}
         onSelectSettings={() => {
           setActiveWorkspace(null);
@@ -587,6 +596,10 @@ function App() {
 
         {activeView === "routines" && activeWs && (
           <RoutinePanel workspaceId={activeWs.id} onRoutinesChanged={setRoutines} />
+        )}
+
+        {activeView === "validators" && activeWs && (
+          <WorkspaceValidatorsPanel workspaceId={activeWs.id} />
         )}
 
         {activeView === "settings" && (
