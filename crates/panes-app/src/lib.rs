@@ -205,6 +205,8 @@ pub fn run() {
             commands::set_workspace_budget_cap,
             commands::get_aggregate_cost,
             commands::get_workspace_cost,
+            commands::get_cost_timeline,
+            commands::get_workspace_cost_breakdown,
             commands::get_memory_backend_status,
             commands::set_memory_backend,
             commands::get_features,

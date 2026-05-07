@@ -685,6 +685,280 @@ body {
   text-shadow: 0 0 16px rgba(0, 0, 0, 0.8);
 }
 
+/* ─── Dashboard view ─── */
+
+.dashboard-view {
+  padding: 20px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.dashboard-summary {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.dashboard-stat strong {
+  color: var(--text-primary);
+}
+
+.dashboard-stat-attention {
+  color: var(--warning);
+}
+
+.dashboard-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-card {
+  background: var(--bg-card, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  border-left: 3px solid var(--text-muted);
+}
+
+.dashboard-card:hover {
+  border-color: var(--accent);
+}
+
+.dashboard-card-working {
+  border-left-color: var(--warning);
+}
+
+.dashboard-card-gate {
+  border-left-color: var(--error);
+}
+
+.dashboard-card-error {
+  border-left-color: var(--error);
+}
+
+.dashboard-card-idle {
+  border-left-color: var(--text-muted);
+}
+
+.dashboard-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dashboard-card-name {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.dashboard-card-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.dashboard-card-active {
+  font-size: 12px;
+}
+
+.dashboard-card-prompt {
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.dashboard-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.dashboard-gate-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dashboard-idle-text {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ─── Feed analytics ─── */
+
+.feed-analytics {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.feed-analytics-toggle {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-card, var(--bg-secondary));
+  border: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.feed-analytics-toggle:hover {
+  color: var(--text-primary);
+}
+
+.feed-analytics-content {
+  padding: 12px;
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.feed-analytics-section {
+  flex: 1;
+  min-width: 200px;
+}
+
+.feed-analytics-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.feed-controls {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.feed-sort, .feed-date-range {
+  display: flex;
+  gap: 4px;
+}
+
+.feed-filter-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.feed-filter-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.feed-filter-btn.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+/* ─── Sparkline ─── */
+
+.cost-sparkline {
+  display: block;
+}
+
+.sparkline-line {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sparkline-area {
+  fill: var(--accent);
+  opacity: 0.1;
+}
+
+.sparkline-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 0;
+}
+
+/* ─── Cost bars ─── */
+
+.cost-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cost-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.cost-bar-label {
+  width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.cost-bar-track {
+  flex: 1;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.cost-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  min-width: 1px;
+  transition: width 0.3s ease;
+}
+
+.cost-bar-value {
+  width: 50px;
+  text-align: right;
+  font-family: var(--font-mono, monospace);
+  color: var(--cost);
+}
+
+.cost-bars-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 0;
+}
+
 /* ─── Thread view ─── */
 
 .thread-view {

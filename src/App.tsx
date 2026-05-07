@@ -5,6 +5,7 @@ import ThreadList from "./components/ThreadList";
 import ThreadView from "./components/ThreadView";
 import MemoryPanel from "./components/MemoryPanel";
 import FeedView from "./components/FeedView";
+import DashboardView from "./components/DashboardView";
 import SettingsPanel from "./components/SettingsPanel";
 import RoutinePanel from "./components/RoutinePanel";
 import { mapBackendEvent } from "./lib/eventMapper";
@@ -33,7 +34,7 @@ function App() {
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines">("feed");
+  const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard">("dashboard");
   const [adapters, setAdapters] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -433,6 +434,10 @@ function App() {
             .sort((a, b) => b.createdAt - a.createdAt)[0];
           setActiveThread(lastThread?.id ?? null);
         }}
+        onSelectDashboard={() => {
+          setActiveWorkspace(null);
+          setActiveView("dashboard");
+        }}
         onSelectFeed={() => {
           setActiveWorkspace(null);
           setActiveView("feed");
@@ -475,10 +480,34 @@ function App() {
       )}
 
       <main className="main-panel">
+        {activeView === "dashboard" && (
+          <DashboardView
+            workspaces={workspaces}
+            threads={threads}
+            showCost={costTrackingEnabled}
+            onNavigateToWorkspace={(wsId) => {
+              setActiveWorkspace(wsId);
+              setActiveView("workspace");
+              loadThreadsForWorkspace(wsId);
+              const lastThread = threads
+                .filter((t) => t.workspaceId === wsId)
+                .sort((a, b) => b.createdAt - a.createdAt)[0];
+              setActiveThread(lastThread?.id ?? null);
+            }}
+            onApproveGate={(threadId, toolUseId) => {
+              api.approveGate(threadId, toolUseId).catch(console.error);
+            }}
+            onRejectGate={(threadId, toolUseId) => {
+              api.rejectGate(threadId, toolUseId, "Rejected from dashboard").catch(console.error);
+            }}
+          />
+        )}
+
         {activeView === "feed" && (
           <FeedView
             workspaces={workspaces}
             showCost={costTrackingEnabled}
+            refreshKey={threads.filter(t => t.status === "complete" || t.status === "error" || t.status === "interrupted").length}
             onNavigateToThread={(threadId, workspaceId) => {
               setActiveWorkspace(workspaceId);
               setActiveView("workspace");

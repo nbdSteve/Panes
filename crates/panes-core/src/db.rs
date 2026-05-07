@@ -151,6 +151,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "threads", "session_id", "TEXT")?;
     add_column_if_missing(conn, "threads", "routine_id", "TEXT")?;
 
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp);",
+    )
+    .context("failed to create costs timestamp index")?;
+
     Ok(())
 }
 
@@ -199,6 +204,86 @@ pub fn routine_tables_exist(conn: &Connection) -> bool {
     )
     .unwrap_or(0)
         > 0
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyCost {
+    pub day: String,
+    pub total_usd: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCostBreakdown {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub total_usd: f64,
+    pub thread_count: u32,
+}
+
+pub fn query_cost_timeline(
+    conn: &Connection,
+    days: u32,
+    workspace_id: Option<&str>,
+) -> Result<Vec<DailyCost>> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+    let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+
+    let mut results = Vec::new();
+    if let Some(ws_id) = workspace_id {
+        let mut stmt = conn.prepare(
+            "SELECT DATE(timestamp) as day, SUM(total_usd) as total_usd \
+             FROM costs WHERE timestamp >= ?1 AND workspace_id = ?2 \
+             GROUP BY DATE(timestamp) ORDER BY day ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![cutoff_str, ws_id], |row| {
+            Ok(DailyCost {
+                day: row.get(0)?,
+                total_usd: row.get(1)?,
+            })
+        })?;
+        for row in rows {
+            results.push(row?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT DATE(timestamp) as day, SUM(total_usd) as total_usd \
+             FROM costs WHERE timestamp >= ?1 \
+             GROUP BY DATE(timestamp) ORDER BY day ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![cutoff_str], |row| {
+            Ok(DailyCost {
+                day: row.get(0)?,
+                total_usd: row.get(1)?,
+            })
+        })?;
+        for row in rows {
+            results.push(row?);
+        }
+    }
+    Ok(results)
+}
+
+pub fn query_workspace_cost_breakdown(conn: &Connection) -> Result<Vec<WorkspaceCostBreakdown>> {
+    let mut stmt = conn.prepare(
+        "SELECT w.id, w.name, COALESCE(SUM(t.cost_usd), 0) as total_usd, COUNT(t.id) as thread_count \
+         FROM workspaces w LEFT JOIN threads t ON t.workspace_id = w.id \
+         GROUP BY w.id ORDER BY total_usd DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(WorkspaceCostBreakdown {
+            workspace_id: row.get(0)?,
+            workspace_name: row.get(1)?,
+            total_usd: row.get(2)?,
+            thread_count: row.get(3)?,
+        })
+    })?;
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
 }
 
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, col_type: &str) -> Result<()> {
@@ -357,5 +442,127 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
+    }
+
+    fn insert_cost(conn: &Connection, thread_id: &str, workspace_id: &str, total_usd: f64, timestamp: &str) {
+        conn.execute(
+            "INSERT INTO costs (thread_id, workspace_id, total_usd, timestamp) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![thread_id, workspace_id, total_usd, timestamp],
+        ).unwrap();
+    }
+
+    #[test]
+    fn test_cost_timeline_groups_by_day() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws1");
+        insert_thread(&conn, "t1", "ws1", "completed");
+        insert_thread(&conn, "t2", "ws1", "completed");
+
+        insert_cost(&conn, "t1", "ws1", 0.05, "2026-05-01T10:00:00Z");
+        insert_cost(&conn, "t2", "ws1", 0.03, "2026-05-01T14:00:00Z");
+        insert_cost(&conn, "t1", "ws1", 0.10, "2026-05-02T09:00:00Z");
+
+        let result = query_cost_timeline(&conn, 365, None).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].day, "2026-05-01");
+        assert!((result[0].total_usd - 0.08).abs() < 0.001);
+        assert_eq!(result[1].day, "2026-05-02");
+        assert!((result[1].total_usd - 0.10).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cost_timeline_respects_date_filter() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws1");
+        insert_thread(&conn, "t1", "ws1", "completed");
+
+        insert_cost(&conn, "t1", "ws1", 0.50, "2020-01-01T10:00:00Z");
+        insert_cost(&conn, "t1", "ws1", 0.10, "2026-05-04T10:00:00Z");
+
+        let result = query_cost_timeline(&conn, 30, None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].day, "2026-05-04");
+    }
+
+    #[test]
+    fn test_cost_timeline_filters_by_workspace() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws1");
+        insert_workspace(&conn, "ws2");
+        insert_thread(&conn, "t1", "ws1", "completed");
+        insert_thread(&conn, "t2", "ws2", "completed");
+
+        insert_cost(&conn, "t1", "ws1", 0.10, "2026-05-04T10:00:00Z");
+        insert_cost(&conn, "t2", "ws2", 0.20, "2026-05-04T11:00:00Z");
+
+        let result = query_cost_timeline(&conn, 30, Some("ws1")).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!((result[0].total_usd - 0.10).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cost_timeline_empty_db_returns_empty_vec() {
+        let conn = setup_db();
+        let result = query_cost_timeline(&conn, 30, None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_workspace_cost_breakdown_sums_correctly() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws1");
+        insert_workspace(&conn, "ws2");
+
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, cost_usd, created_at) VALUES ('t1', 'ws1', 'claude-code', 'completed', 'test', 0.15, '2024-01-01')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, cost_usd, created_at) VALUES ('t2', 'ws1', 'claude-code', 'completed', 'test', 0.25, '2024-01-01')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, cost_usd, created_at) VALUES ('t3', 'ws2', 'claude-code', 'completed', 'test', 0.10, '2024-01-01')",
+            [],
+        ).unwrap();
+
+        let result = query_workspace_cost_breakdown(&conn).unwrap();
+        assert_eq!(result.len(), 2);
+        // Ordered by total_usd DESC
+        assert_eq!(result[0].workspace_id, "ws1");
+        assert!((result[0].total_usd - 0.40).abs() < 0.001);
+        assert_eq!(result[0].thread_count, 2);
+        assert_eq!(result[1].workspace_id, "ws2");
+        assert!((result[1].total_usd - 0.10).abs() < 0.001);
+        assert_eq!(result[1].thread_count, 1);
+    }
+
+    #[test]
+    fn test_workspace_cost_breakdown_includes_zero_cost_workspaces() {
+        let conn = setup_db();
+        insert_workspace(&conn, "ws1");
+        insert_workspace(&conn, "ws-empty");
+
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, cost_usd, created_at) VALUES ('t1', 'ws1', 'claude-code', 'completed', 'test', 0.50, '2024-01-01')",
+            [],
+        ).unwrap();
+
+        let result = query_workspace_cost_breakdown(&conn).unwrap();
+        assert_eq!(result.len(), 2);
+        let empty_ws = result.iter().find(|r| r.workspace_id == "ws-empty").unwrap();
+        assert!((empty_ws.total_usd - 0.0).abs() < 0.001);
+        assert_eq!(empty_ws.thread_count, 0);
+    }
+
+    #[test]
+    fn test_timestamp_index_exists() {
+        let conn = setup_db();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_costs_timestamp'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
     }
 }

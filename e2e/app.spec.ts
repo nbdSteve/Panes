@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 test.describe("Panes App — Core Flows", () => {
   test("shows welcome screen on launch", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator("text=No activity yet")).toBeVisible();
+    await expect(page.locator(".dashboard-view")).toBeVisible();
     await expect(page.locator("text=Add a workspace")).toBeVisible();
   });
 
@@ -186,8 +186,8 @@ test.describe("Panes App — Core Flows", () => {
   test("feed view and workspace switching", async ({ page }) => {
     await page.goto("/");
 
-    // Feed should be visible initially (empty state)
-    await expect(page.locator("text=No activity yet")).toBeVisible();
+    // Dashboard should be visible initially (empty state)
+    await expect(page.locator(".dashboard-view")).toBeVisible();
 
     // Add workspace
     await page.click("text=Add workspace");

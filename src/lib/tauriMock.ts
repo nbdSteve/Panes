@@ -530,6 +530,30 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     case "get_aggregate_cost":
       return mockThreads.reduce((sum, t) => sum + (t.costUsd || 0), 0);
 
+    case "get_cost_timeline": {
+      const days = (args?.days as number) || 30;
+      const data: { day: string; totalUsd: number }[] = [];
+      for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(Date.now() - i * 86400000);
+        data.push({
+          day: d.toISOString().slice(0, 10),
+          totalUsd: Math.round((Math.random() * 0.4 + 0.02) * 1000) / 1000,
+        });
+      }
+      return data;
+    }
+
+    case "get_workspace_cost_breakdown":
+      return mockWorkspaces.map(ws => {
+        const wsThreads = mockThreads.filter(t => t.workspaceId === ws.id);
+        return {
+          workspaceId: ws.id,
+          workspaceName: ws.name,
+          totalUsd: wsThreads.reduce((sum, t) => sum + (t.costUsd || 0), 0),
+          threadCount: wsThreads.length,
+        };
+      });
+
     case "get_memories":
       return [...mockMemories.filter((m) => m.workspaceId === args?.workspaceId)];
 

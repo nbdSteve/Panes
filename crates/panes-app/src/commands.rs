@@ -654,6 +654,29 @@ pub async fn get_workspace_cost(
     }).await.map_err(PanesError::from)
 }
 
+#[tauri::command]
+pub async fn get_cost_timeline(
+    db: tauri::State<'_, DbState>,
+    days: Option<u32>,
+    workspace_id: Option<String>,
+) -> Result<Vec<panes_core::db::DailyCost>, PanesError> {
+    let days = days.unwrap_or(30);
+    db.execute(move |conn| {
+        panes_core::db::query_cost_timeline(conn, days, workspace_id.as_deref())
+    })
+    .await
+    .map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn get_workspace_cost_breakdown(
+    db: tauri::State<'_, DbState>,
+) -> Result<Vec<panes_core::db::WorkspaceCostBreakdown>, PanesError> {
+    db.execute(|conn| panes_core::db::query_workspace_cost_breakdown(conn))
+        .await
+        .map_err(PanesError::from)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryBackendStatus {

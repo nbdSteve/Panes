@@ -8,11 +8,12 @@ interface SidebarProps {
   workspaces: WorkspaceInfo[];
   threads: ThreadInfo[];
   activeWorkspace: string | null;
-  activeView: "workspace" | "feed" | "memory" | "settings" | "routines";
+  activeView: "workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard";
   routinesEnabled: boolean;
   routineCount: number;
   showCost: boolean;
   onSelectWorkspace: (id: string) => void;
+  onSelectDashboard: () => void;
   onSelectFeed: () => void;
   onSelectMemory: (workspaceId: string) => void;
   onSelectRoutines: (workspaceId: string) => void;
@@ -30,6 +31,7 @@ export default function Sidebar({
   routineCount,
   showCost,
   onSelectWorkspace,
+  onSelectDashboard,
   onSelectFeed,
   onSelectMemory,
   onSelectRoutines,
@@ -107,6 +109,15 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-section">
+        <div
+          className={`sidebar-item ${activeView === "dashboard" ? "active" : ""}`}
+          onClick={onSelectDashboard}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" />
+          </svg>
+          Dashboard
+        </div>
         <div
           className={`sidebar-item ${activeView === "feed" ? "active" : ""}`}
           onClick={onSelectFeed}

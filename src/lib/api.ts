@@ -134,6 +134,10 @@ export const api = {
   getAggregateCost: () => call<number>("get_aggregate_cost"),
   getWorkspaceCost: (workspaceId: string) =>
     call<number>("get_workspace_cost", { workspaceId }),
+  getCostTimeline: (days?: number, workspaceId?: string) =>
+    call<{ day: string; totalUsd: number }[]>("get_cost_timeline", { days, workspaceId }),
+  getWorkspaceCostBreakdown: () =>
+    call<{ workspaceId: string; workspaceName: string; totalUsd: number; threadCount: number }[]>("get_workspace_cost_breakdown"),
 
   // Memory backend
   getMemoryBackendStatus: () => call<MemoryBackendStatus>("get_memory_backend_status"),
