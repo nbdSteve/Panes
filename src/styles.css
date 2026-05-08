@@ -1735,6 +1735,118 @@ body {
 .gate-card .gate-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ─── Validator gate variant ─── */
+
+.gate-validator {
+  border-color: rgba(248, 113, 113, 0.25);
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(248, 113, 113, 0.03) 100%);
+}
+
+.gate-validator .gate-label-icon {
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.gate-validator .gate-label-icon svg {
+  color: var(--error, #f87171);
+}
+
+.gate-validator .gate-label-text {
+  color: var(--error, #f87171);
+}
+
+.validation-findings {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.validation-finding {
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  align-items: flex-start;
+}
+
+.validation-finding.severity-error {
+  border-left: 3px solid var(--error, #f87171);
+}
+
+.validation-finding.severity-warning {
+  border-left: 3px solid var(--warning, #fbbf24);
+}
+
+.validation-finding.severity-info {
+  border-left: 3px solid var(--accent, #818cf8);
+}
+
+.finding-severity-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.finding-severity-badge.severity-error {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--error, #f87171);
+}
+
+.finding-severity-badge.severity-warning {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--warning, #fbbf24);
+}
+
+.finding-severity-badge.severity-info {
+  background: rgba(129, 140, 248, 0.15);
+  color: var(--accent, #818cf8);
+}
+
+.finding-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.finding-message {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.45;
+}
+
+.finding-span {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  align-self: flex-start;
+}
+
+.finding-source {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 /* ─── Resolved gate ─── */

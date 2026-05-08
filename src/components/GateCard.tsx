@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import CostBadge from "./CostBadge";
 import ValidationFindings, { ValidationFinding } from "./ValidationFindings";
 
@@ -38,6 +38,29 @@ export default function GateCard({
 }: GateCardProps) {
   const [steerMode, setSteerMode] = useState(false);
   const [steerText, setSteerText] = useState("");
+  const steerInputRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!steerMode) return;
+    // Scroll the thread content to the bottom after the textarea has been
+    // painted. Mirrors how ThreadView keeps the transcript pinned on new
+    // events. Two rAFs: first to let React commit the DOM, second so layout
+    // reflows after the textarea's rows=4 height is applied.
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const scroller = document.querySelector(".thread-content") as HTMLElement | null;
+        if (scroller) {
+          scroller.scrollTop = scroller.scrollHeight;
+        }
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [steerMode]);
+
   if (resolved === "approved") {
     return (
       <div className="card gate-card gate-resolved gate-approved">
@@ -157,7 +180,7 @@ export default function GateCard({
         </div>
 
         {steerMode && onSteer && (
-          <div className="gate-steer-input">
+          <div className="gate-steer-input" ref={steerInputRef}>
             <textarea
               placeholder="Describe the correction..."
               value={steerText}
@@ -228,7 +251,7 @@ export default function GateCard({
       </div>
 
       {steerMode && onSteer && (
-        <div className="gate-steer-input">
+        <div className="gate-steer-input" ref={steerInputRef}>
           <textarea
             placeholder="Redirect the agent..."
             value={steerText}

@@ -17,6 +17,7 @@ import { parseDiff } from "../lib/diffParser";
 import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
 import { collectTestResults, collectFilesChanged, extractFilePaths, FILE_WRITE_TOOLS } from "../lib/threadHelpers";
 import { buildCorrectionPrompt } from "../lib/validationPrompt";
+import { classifyValidationResult } from "../lib/validationResultView";
 import TranscriptView from "./TranscriptView";
 import RoutineBadge from "./RoutineBadge";
 
@@ -1007,7 +1008,12 @@ function renderEvents(
         );
 
       case "validation_result": {
-        if (event.outcome === "pass") {
+        const afterIdx = eventToOrigIdx.get(event) ?? 0;
+        const laterEvents = events.filter(
+          (e) => (eventToOrigIdx.get(e) ?? 0) > afterIdx,
+        );
+        const mode = classifyValidationResult(event, laterEvents, validatorTypes);
+        if (mode.kind === "pass") {
           return (
             <ValidationResultCard
               key={i}
@@ -1018,18 +1024,7 @@ function renderEvents(
             />
           );
         }
-        // Failure: render as a gate card unless the stream has already moved on.
-        const afterIdx = eventToOrigIdx.get(event) ?? 0;
-        const laterEvents = events.filter(
-          (e) => (eventToOrigIdx.get(e) ?? 0) > afterIdx,
-        );
-        const hasTerminal = laterEvents.some(
-          (e) => e.event_type === "complete" || e.event_type === "error",
-        );
-        const hasFollowUp = laterEvents.some(
-          (e) => e.event_type === "follow_up",
-        );
-        if (hasTerminal || hasFollowUp) {
+        if (mode.kind === "failResolved" || mode.kind === "failSteered") {
           return (
             <ValidationResultCard
               key={i}
@@ -1037,16 +1032,10 @@ function renderEvents(
               outcome="fail"
               findings={event.findings}
               durationMs={event.duration_ms}
-              resolution={
-                hasFollowUp ? "steered" : undefined
-              }
+              resolution={mode.kind === "failSteered" ? "steered" : undefined}
             />
           );
         }
-        const typeInfo = validatorTypes.find(
-          (t) => t.typeId === event.validator,
-        );
-        const correctable = typeInfo?.correctable ?? false;
         const correctionPrompt = buildCorrectionPrompt(event.findings);
         return (
           <GateCard
@@ -1070,7 +1059,7 @@ function renderEvents(
             }}
             onSteer={(text) => callbacks.onSteer(threadId, "", text)}
             onAutoFix={
-              correctable
+              mode.correctable
                 ? () => callbacks.onSteer(threadId, "", correctionPrompt)
                 : undefined
             }
