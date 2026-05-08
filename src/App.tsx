@@ -10,8 +10,9 @@ import SettingsPanel from "./components/SettingsPanel";
 import RoutinePanel from "./components/RoutinePanel";
 import WorkspaceValidatorsPanel from "./components/WorkspaceValidatorsPanel";
 import { mapBackendEvent } from "./lib/eventMapper";
+import { shouldFirePendingResume } from "./lib/pendingResume";
 import { api } from "./lib/api";
-import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo } from "./types";
+import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo, ValidatorTypeInfo } from "./types";
 
 export type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo };
 
@@ -41,6 +42,7 @@ function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [features, setFeatures] = useState<FeatureInfo[]>([]);
   const [routines, setRoutines] = useState<RoutineInfo[]>([]);
+  const [validatorTypes, setValidatorTypes] = useState<ValidatorTypeInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const wsConfigRef = useRef<Map<string, ConfigPrefs>>(new Map());
   const globalConfigRef = useRef<ConfigPrefs>(DEFAULT_CONFIG);
@@ -98,6 +100,7 @@ function App() {
       }
     }).catch(() => {});
     api.getFeatures().then(setFeatures).catch(() => {});
+    api.listValidatorTypes().then(setValidatorTypes).catch(() => {});
   }, [loadThreadsForWorkspace]);
 
   const handleCompletionAction = useCallback(
@@ -355,16 +358,15 @@ function App() {
   );
 
   useEffect(() => {
-    if (!pendingResumeRef.current) return;
-    const { threadId, prompt } = pendingResumeRef.current;
+    const target = shouldFirePendingResume(
+      pendingResumeRef.current,
+      threads,
+      workspaces,
+    );
+    if (!target) return;
     pendingResumeRef.current = null;
-    const thread = threads.find((t) => t.id === threadId);
-    if (!thread) return;
-    const ws = workspaces.find((w) => w.id === thread.workspaceId);
-    if (ws) {
-      handleResumeThread(ws, threadId, prompt);
-    }
-  });
+    handleResumeThread(target.workspace, target.threadId, target.prompt);
+  }, [threads, workspaces, handleResumeThread]);
 
   const handleSendPrompt = useCallback(
     (workspace: WorkspaceInfo, prompt: string, agent?: string, model?: string) => {
@@ -572,6 +574,7 @@ function App() {
             adapters={adapters}
             agents={agents}
             models={models.length > 0 ? models : FALLBACK_MODELS}
+            validatorTypes={validatorTypes}
             defaultConfig={wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current}
             onConfigChange={(config) => {
               wsConfigRef.current.set(activeWs.id, config);
@@ -599,7 +602,10 @@ function App() {
         )}
 
         {activeView === "validators" && activeWs && (
-          <WorkspaceValidatorsPanel workspaceId={activeWs.id} />
+          <WorkspaceValidatorsPanel
+            workspaceId={activeWs.id}
+            workspaceName={activeWs.name}
+          />
         )}
 
         {activeView === "settings" && (

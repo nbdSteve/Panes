@@ -22,8 +22,10 @@ test.describe("Gate Rejection", () => {
     // Gate should show rejected state
     await expect(page.locator("text=Aborted")).toBeVisible({ timeout: 2000 });
 
-    // Thread should complete (rejected action ends the turn)
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+    // Thread is stopped via a non-recoverable error. The error card appears
+    // and no completion card from the gated work should show.
+    await expect(page.locator(".error-card")).toBeVisible({ timeout: 3000 });
+    await expect(page.locator(".completion-card")).not.toBeVisible();
 
     // The post-gate tool_result and text events should NOT have been emitted
     // (the dangerous operation text should not appear)
@@ -38,8 +40,9 @@ test.describe("Gate Rejection", () => {
     await page.click("button:has-text('Abort')");
     await expect(page.locator("text=Aborted")).toBeVisible({ timeout: 2000 });
 
-    // Wait for the turn to complete after rejection
-    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 3000 });
+    // Thread stopped via a non-recoverable error — the textarea now continues
+    // this thread instead of starting a fresh one.
+    await expect(page.locator(".error-card")).toBeVisible({ timeout: 3000 });
 
     // User should be able to follow up
     await page.fill("textarea", "try a safer approach");
@@ -48,8 +51,8 @@ test.describe("Gate Rejection", () => {
     // Follow-up divider should appear
     await expect(page.locator(".follow-up .thread-prompt-text", { hasText: "try a safer approach" })).toBeVisible({ timeout: 2000 });
 
-    // Second completion should eventually appear
-    await expect(page.locator(".completion-card")).toHaveCount(2, { timeout: 5000 });
+    // A completion should eventually appear from the resumed thread.
+    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
   });
 });
 
@@ -155,8 +158,8 @@ test.describe("Double-Click Safety", () => {
     // Should resolve to aborted
     await expect(page.locator("text=Aborted").first()).toBeVisible({ timeout: 2000 });
 
-    // Should have exactly one completion card (double-click shouldn't double-fire)
-    await expect(page.locator(".completion-card")).toHaveCount(1, { timeout: 5000 });
+    // Thread should error exactly once (double-click shouldn't double-fire)
+    await expect(page.locator(".error-card")).toHaveCount(1, { timeout: 5000 });
   });
 });
 

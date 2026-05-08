@@ -1372,7 +1372,18 @@ body {
 .interrupted-card .step-description {
   color: var(--text-muted);
   font-style: italic;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
+
+.interrupted-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.75;
+  font-style: normal;
+}
+
 .icon-interrupted svg {
   color: var(--text-muted);
 }

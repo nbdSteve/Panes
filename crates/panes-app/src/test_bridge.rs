@@ -760,6 +760,7 @@ async fn dispatch_command(
                     "label": t.label,
                     "description": t.description,
                     "defaultConfig": t.default_config,
+                    "correctable": t.correctable,
                 }))
                 .collect();
             Ok(Value::Array(items))

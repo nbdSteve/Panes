@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../lib/api";
 import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs, ModelInfo } from "../App";
+import type { ValidatorTypeInfo } from "../types";
 import type { RepoFileStatus, CommentThread } from "../types/diff";
 import GateCard from "./GateCard";
 import ValidationResultCard from "./ValidationResultCard";
@@ -15,6 +16,7 @@ import { normalizeModelId } from "../lib/utils";
 import { parseDiff } from "../lib/diffParser";
 import { groupToolEvents, type ToolGroup } from "../lib/groupToolEvents";
 import { collectTestResults, collectFilesChanged, extractFilePaths, FILE_WRITE_TOOLS } from "../lib/threadHelpers";
+import { buildCorrectionPrompt } from "../lib/validationPrompt";
 import TranscriptView from "./TranscriptView";
 import RoutineBadge from "./RoutineBadge";
 
@@ -24,6 +26,7 @@ interface ThreadViewProps {
   adapters: string[];
   agents: AgentInfo[];
   models: ModelInfo[];
+  validatorTypes?: ValidatorTypeInfo[];
   defaultConfig: ConfigPrefs;
   onConfigChange: (config: ConfigPrefs) => void;
   onStartThread: (prompt: string, agent?: string, model?: string) => void;
@@ -38,7 +41,7 @@ interface ThreadViewProps {
   showCost?: boolean;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, models, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, models, validatorTypes, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
@@ -147,6 +150,13 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
     if (!prompt.trim()) return;
     if (isActive && thread) {
       onQueueFollowUp(thread.id, prompt.trim());
+    } else if (
+      thread &&
+      (thread.status === "interrupted" || thread.status === "error")
+    ) {
+      // Continue an interrupted/errored thread instead of starting a new one.
+      // Session is preserved on the backend, so resume picks up where we left off.
+      onResumeThread(thread.id, prompt.trim());
     } else {
       onStartThread(prompt.trim(), selectedAgent, selectedModel);
     }
@@ -255,7 +265,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
               </div>
             )}
 
-            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionActions, thread.feedbackSent, cardFiles, cardComments, {
+            {renderEvents(visibleEvents, runningCost, thread.id, thread.completionActions, thread.feedbackSent, cardFiles, cardComments, validatorTypes ?? [], {
               onInspect: (completionIdx: number) => {
                 setDiffView({ completionIdx });
                 if (diffRaw === null || diffView?.completionIdx !== completionIdx) {
@@ -307,7 +317,12 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
                     <rect x="6" y="6" width="12" height="12" rx="2" />
                   </svg>
                 </span>
-                <span className="step-description">Cancelled</span>
+                <span className="step-description">
+                  Cancelled
+                  <span className="interrupted-hint">
+                    Type a message to continue this thread.
+                  </span>
+                </span>
               </div>
             )}
           </>
@@ -726,6 +741,7 @@ function renderEvents(
   feedbackSent: Record<number, number> | undefined,
   cardFiles: Record<number, RepoFileStatus[]>,
   cardComments: Record<number, CommentThread[]>,
+  validatorTypes: ValidatorTypeInfo[],
   callbacks: RenderCallbacks,
   showCost?: boolean,
 ) {
@@ -996,14 +1012,18 @@ function renderEvents(
             />
           );
         }
-        // Failure: render as a gate card unless there's already a Complete/Error after it.
+        // Failure: render as a gate card unless the stream has already moved on.
         const afterIdx = eventToOrigIdx.get(event) ?? 0;
-        const resolved = events.some(
-          (e) =>
-            (eventToOrigIdx.get(e) ?? 0) > afterIdx &&
-            (e.event_type === "complete" || e.event_type === "error"),
+        const laterEvents = events.filter(
+          (e) => (eventToOrigIdx.get(e) ?? 0) > afterIdx,
         );
-        if (resolved) {
+        const hasTerminal = laterEvents.some(
+          (e) => e.event_type === "complete" || e.event_type === "error",
+        );
+        const hasFollowUp = laterEvents.some(
+          (e) => e.event_type === "follow_up",
+        );
+        if (hasTerminal || hasFollowUp) {
           return (
             <ValidationResultCard
               key={i}
@@ -1011,9 +1031,17 @@ function renderEvents(
               outcome="fail"
               findings={event.findings}
               durationMs={event.duration_ms}
+              resolution={
+                hasFollowUp ? "steered" : undefined
+              }
             />
           );
         }
+        const typeInfo = validatorTypes.find(
+          (t) => t.typeId === event.validator,
+        );
+        const correctable = typeInfo?.correctable ?? false;
+        const correctionPrompt = buildCorrectionPrompt(event.findings);
         return (
           <GateCard
             key={i}
@@ -1030,8 +1058,17 @@ function renderEvents(
               api.approveGate(threadId, "").catch(console.error);
             }}
             onReject={() => {
-              api.rejectGate(threadId, "", "Validator findings rejected").catch(console.error);
+              api
+                .rejectGate(threadId, "", "Validator findings rejected")
+                .catch(console.error);
             }}
+            onSteer={(text) => callbacks.onSteer(threadId, "", text)}
+            onAutoFix={
+              correctable
+                ? () => callbacks.onSteer(threadId, "", correctionPrompt)
+                : undefined
+            }
+            steerPlaceholder={correctionPrompt}
           />
         );
       }

@@ -467,24 +467,25 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       if (!pausedThreads.has(threadId)) return null;
       pausedThreads.delete(threadId);
       setTimeout(() => {
-        const completeEvent = {
-          event_type: "complete",
-          summary: "Action was rejected by the user.",
-          total_cost_usd: 0.005,
-          duration_ms: 3000,
-          turns: 1,
+        // Mirror the backend: rejecting a gate produces a non-recoverable Error
+        // that marks the thread as 'interrupted'. The thread remains resumable
+        // because the backend preserves session_id through interruption.
+        const errorEvent = {
+          event_type: "error",
+          message: "Gate rejected by user",
+          recoverable: false,
         };
         const meta = activeThreadMeta.get(threadId);
         if (meta) {
-          meta.events.push(completeEvent);
+          meta.events.push(errorEvent);
           mockThreads.push({
             id: threadId,
             workspaceId: meta.workspaceId,
             prompt: meta.prompt,
-            status: "completed",
-            summary: completeEvent.summary,
-            costUsd: completeEvent.total_cost_usd,
-            durationMs: completeEvent.duration_ms,
+            status: "interrupted",
+            summary: null,
+            costUsd: 0,
+            durationMs: 0,
             createdAt: new Date().toISOString(),
             events: [...meta.events],
           });
@@ -492,7 +493,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         emitEvent("panes://thread-event", {
           thread_id: threadId,
           timestamp: new Date().toISOString(),
-          event: completeEvent,
+          event: errorEvent,
           parent_tool_use_id: null,
         });
       }, 100);
@@ -807,12 +808,14 @@ diff --git a/src/lib.rs b/src/lib.rs
           label: "Citation Check",
           description: "Verifies file path citations resolve in the workspace.",
           defaultConfig: { check_line_refs: true },
+          correctable: true,
         },
         {
           typeId: "secret_scan",
           label: "Secret Scan",
           description: "Flags output containing secret-like strings.",
           defaultConfig: { custom_patterns: [] },
+          correctable: false,
         },
       ];
 

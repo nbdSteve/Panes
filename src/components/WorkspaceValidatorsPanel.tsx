@@ -5,6 +5,7 @@ import type { PanesError } from "../types/errors";
 
 interface Props {
   workspaceId: string;
+  workspaceName?: string;
 }
 
 function errorMessage(e: unknown): string {
@@ -42,7 +43,10 @@ function stringifyJson(value: unknown): string {
   }
 }
 
-export default function WorkspaceValidatorsPanel({ workspaceId }: Props) {
+export default function WorkspaceValidatorsPanel({
+  workspaceId,
+  workspaceName,
+}: Props) {
   const [types, setTypes] = useState<ValidatorTypeInfo[]>([]);
   const [rows, setRows] = useState<WorkspaceValidator[]>([]);
   const [loading, setLoading] = useState(true);
@@ -145,8 +149,10 @@ export default function WorkspaceValidatorsPanel({ workspaceId }: Props) {
         <div>
           <h2>Output Validators</h2>
           <p className="validators-panel-subtitle">
-            Run automated checks on every completion in this workspace. Failures
-            pause the thread and prompt you to accept or reject the output.
+            Validators are scoped to{" "}
+            <strong>{workspaceName ?? "this workspace"}</strong>. They run after
+            every completion in this workspace; failures pause the thread and
+            prompt you to accept or reject the output.
           </p>
         </div>
       </div>

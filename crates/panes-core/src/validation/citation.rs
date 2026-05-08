@@ -42,6 +42,7 @@ impl CitationValidator {
                 "allow_outside_workspace": false,
                 "check_line_refs": true,
             }),
+            correctable: true,
         }
     }
 }

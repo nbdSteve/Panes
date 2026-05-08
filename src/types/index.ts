@@ -100,4 +100,5 @@ export interface ValidatorTypeInfo {
   label: string;
   description: string;
   defaultConfig: unknown;
+  correctable: boolean;
 }

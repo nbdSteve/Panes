@@ -1224,6 +1224,7 @@ pub struct ValidatorTypeInfo {
     pub label: String,
     pub description: String,
     pub default_config: serde_json::Value,
+    pub correctable: bool,
 }
 
 #[tauri::command]
@@ -1240,6 +1241,7 @@ pub async fn list_validator_types(
             label: t.label.to_string(),
             description: t.description.to_string(),
             default_config: t.default_config.clone(),
+            correctable: t.correctable,
         })
         .collect())
 }

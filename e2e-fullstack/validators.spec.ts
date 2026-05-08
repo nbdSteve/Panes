@@ -48,6 +48,44 @@ test.describe("Full-Stack: Validator Gate", () => {
       page.locator("text=referenced path does not exist: src/missing.rs"),
     ).toBeVisible();
     await expect(page.locator("button:has-text('Accept anyway')")).toBeVisible();
-    await expect(page.locator("button:has-text('Reject output')")).toBeVisible();
+    await expect(page.locator("button:has-text('Steer')")).toBeVisible();
+    await expect(page.locator("button:has-text('Auto-fix')")).toBeVisible();
+    await expect(page.locator(".gate-validator button:has-text('Reject')")).toBeVisible();
+  });
+
+  test("reject -> continue resumes the thread via resume_thread (session preserved)", async ({ page }) => {
+    await page.goto("/");
+    await addWorkspace(page, wsPath, "ValReject");
+    await enableValidatorsFeature(page);
+    await addCitationValidator(page, "ValReject");
+
+    await page.locator(".sidebar-item", { hasText: "ValReject" }).click();
+    await sendPrompt(page, "validate reject test");
+
+    await expect(page.locator(".gate-card.gate-validator")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Reject — thread should be interrupted on the backend but the session_id
+    // is preserved so the textarea can continue.
+    await page.locator(".gate-validator button:has-text('Reject')").click();
+
+    // Frontend maps a non-recoverable error to an .error-card.
+    await expect(page.locator(".error-card")).toBeVisible({ timeout: 5_000 });
+
+    // Type a follow-up in the (same-thread) textarea. handleSend detects the
+    // errored/interrupted state and calls resume_thread, which requires the
+    // preserved session_id.
+    const followUp = "resume continuation check";
+    await page.fill("textarea", followUp);
+    await page.press("textarea", "Enter");
+
+    // Confirm the resume actually fired on the backend by watching for the
+    // follow-up prompt being rendered. Whether a subsequent validator-gate
+    // catches the resumed response depends on its exact text; for this test
+    // we only care that the same-thread resume path was exercised end-to-end.
+    await expect(
+      page.locator(".follow-up .thread-prompt-text", { hasText: followUp }),
+    ).toBeVisible({ timeout: 10_000 });
   });
 });

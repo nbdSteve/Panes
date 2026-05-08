@@ -156,7 +156,7 @@ describe("GateCard", () => {
     expect(screen.getByText(/citation/)).toBeInTheDocument();
     expect(screen.getByText("missing path")).toBeInTheDocument();
     expect(screen.getByText("Accept anyway")).toBeInTheDocument();
-    expect(screen.getByText("Reject output")).toBeInTheDocument();
+    expect(screen.getByText("Reject")).toBeInTheDocument();
     // Tool-gate elements should be absent.
     expect(screen.queryByText("Approval needed")).not.toBeInTheDocument();
     expect(screen.queryByText("Continue")).not.toBeInTheDocument();
@@ -180,7 +180,99 @@ describe("GateCard", () => {
     );
     await user.click(screen.getByText("Accept anyway"));
     expect(onApprove).toHaveBeenCalled();
-    await user.click(screen.getByText("Reject output"));
+    await user.click(screen.getByText("Reject"));
     expect(onReject).toHaveBeenCalled();
+  });
+
+  it("validator variant shows Auto-fix when onAutoFix is provided", () => {
+    render(
+      <GateCard
+        {...baseProps}
+        variant="validator"
+        validatorName="citation"
+        validationFindings={[
+          { severity: "error", message: "x", span: null, source_hint: null },
+        ]}
+        onAutoFix={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Auto-fix")).toBeInTheDocument();
+  });
+
+  it("validator variant hides Auto-fix when onAutoFix is not provided", () => {
+    render(
+      <GateCard
+        {...baseProps}
+        variant="validator"
+        validatorName="secret_scan"
+        validationFindings={[
+          { severity: "error", message: "x", span: null, source_hint: null },
+        ]}
+      />,
+    );
+    expect(screen.queryByText("Auto-fix")).not.toBeInTheDocument();
+  });
+
+  it("validator variant Auto-fix invokes handler", async () => {
+    const onAutoFix = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <GateCard
+        {...baseProps}
+        variant="validator"
+        validatorName="citation"
+        validationFindings={[
+          { severity: "error", message: "x", span: null, source_hint: null },
+        ]}
+        onAutoFix={onAutoFix}
+      />,
+    );
+    await user.click(screen.getByText("Auto-fix"));
+    expect(onAutoFix).toHaveBeenCalled();
+  });
+
+  it("validator variant Steer opens textarea pre-filled with placeholder", async () => {
+    const user = userEvent.setup();
+    render(
+      <GateCard
+        {...baseProps}
+        variant="validator"
+        validatorName="citation"
+        validationFindings={[
+          { severity: "error", message: "x", span: null, source_hint: null },
+        ]}
+        onSteer={vi.fn()}
+        steerPlaceholder="pre-filled correction"
+      />,
+    );
+    await user.click(screen.getByText("Steer"));
+    const textarea = screen.getByPlaceholderText(
+      "Describe the correction...",
+    ) as HTMLTextAreaElement;
+    expect(textarea).toBeInTheDocument();
+    expect(textarea.value).toBe("pre-filled correction");
+  });
+
+  it("validator variant Steer submits edited text", async () => {
+    const onSteer = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <GateCard
+        {...baseProps}
+        variant="validator"
+        validatorName="citation"
+        validationFindings={[
+          { severity: "error", message: "x", span: null, source_hint: null },
+        ]}
+        onSteer={onSteer}
+        steerPlaceholder="original"
+      />,
+    );
+    await user.click(screen.getByText("Steer"));
+    const textarea = screen.getByPlaceholderText("Describe the correction...");
+    await user.clear(textarea);
+    await user.type(textarea, "edited correction");
+    await user.click(screen.getByText("Send"));
+    expect(onSteer).toHaveBeenCalledWith("edited correction");
   });
 });

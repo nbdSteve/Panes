@@ -59,6 +59,9 @@ impl SecretScanValidator {
             label: "Secret Scan",
             description: "Flags agent output containing well-known secret patterns (AWS keys, GitHub tokens, private keys, Slack tokens). Supports additional regex patterns via config.",
             default_config: json!({ "custom_patterns": [] }),
+            // Asking the LLM to "please don't leak that secret" is nonsense —
+            // the secret came from somewhere. Hard-abort is safer.
+            correctable: false,
         }
     }
 }

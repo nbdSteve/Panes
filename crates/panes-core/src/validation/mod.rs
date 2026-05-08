@@ -58,6 +58,10 @@ pub struct ValidatorTypeInfo {
     pub label: &'static str,
     pub description: &'static str,
     pub default_config: serde_json::Value,
+    /// Whether findings from this validator are usable as a correction prompt
+    /// to the LLM. True for content problems (e.g. bad citations). False for
+    /// things like secret leaks, where re-prompting doesn't make sense.
+    pub correctable: bool,
 }
 
 #[derive(Clone)]

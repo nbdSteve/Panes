@@ -13,6 +13,8 @@ interface GateCardProps {
   onApprove: () => void;
   onReject: () => void;
   onSteer?: (text: string) => void;
+  onAutoFix?: () => void;
+  steerPlaceholder?: string;
   variant?: "tool" | "validator";
   validatorName?: string;
   validationFindings?: ValidationFinding[];
@@ -28,6 +30,8 @@ export default function GateCard({
   onApprove,
   onReject,
   onSteer,
+  onAutoFix,
+  steerPlaceholder,
   variant = "tool",
   validatorName,
   validationFindings,
@@ -98,6 +102,14 @@ export default function GateCard({
   }
 
   if (variant === "validator") {
+    const submitSteer = () => {
+      if (!onSteer) return;
+      const text = steerText.trim();
+      if (!text) return;
+      onSteer(text);
+      setSteerMode(false);
+      setSteerText("");
+    };
     return (
       <div className="card gate-card gate-validator">
         <div className="gate-label">
@@ -120,10 +132,57 @@ export default function GateCard({
           <button className="btn btn-success btn-sm" onClick={onApprove}>
             Accept anyway
           </button>
+          {onSteer && (
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                const next = !steerMode;
+                setSteerMode(next);
+                if (next && steerPlaceholder && !steerText) {
+                  setSteerText(steerPlaceholder);
+                }
+              }}
+            >
+              Steer
+            </button>
+          )}
+          {onAutoFix && (
+            <button className="btn btn-secondary btn-sm" onClick={onAutoFix}>
+              Auto-fix
+            </button>
+          )}
           <button className="btn btn-danger btn-sm" onClick={onReject}>
-            Reject output
+            Reject
           </button>
         </div>
+
+        {steerMode && onSteer && (
+          <div className="gate-steer-input">
+            <textarea
+              placeholder="Describe the correction..."
+              value={steerText}
+              onChange={(e) => setSteerText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submitSteer();
+                }
+                if (e.key === "Escape") {
+                  setSteerMode(false);
+                }
+              }}
+              rows={4}
+              autoFocus
+            />
+            <button
+              className="btn btn-sm btn-steer-submit"
+              disabled={!steerText.trim()}
+              onClick={submitSteer}
+            >
+              Send
+            </button>
+          </div>
+        )}
       </div>
     );
   }
