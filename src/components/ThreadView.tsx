@@ -105,7 +105,13 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
 
       if (paths.length === 0) return;
 
-      api.getFilesGitStatus(paths).then((status) => {
+      // Resolve relative paths against the active workspace before asking the
+      // backend for git status — get_files_git_status treats non-absolute paths
+      // as relative to the backend CWD, which would point outside the workspace.
+      const resolved = paths.map((p) =>
+        p.startsWith("/") ? p : `${workspace.path.replace(/\/$/, "")}/${p}`,
+      );
+      api.getFilesGitStatus(resolved).then((status) => {
         setCardFiles((prev) => ({ ...prev, [idx]: status }));
       }).catch(() => {});
     });

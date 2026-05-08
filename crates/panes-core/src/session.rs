@@ -64,12 +64,12 @@ impl std::fmt::Display for ThreadStatus {
 
 type GateSender = Arc<Mutex<Option<oneshot::Sender<GateDecision>>>>;
 
-/// Drop guard that persists thread costs even if `consume_events` is aborted.
+/// Drop guard that persists thread costs when `consume_events` exits.
 ///
-/// `try_execute_blocking` calls `blocking_recv()` in Drop, which is safe
-/// because the `DbHandle` actor runs on a dedicated `std::thread` (not a
-/// tokio task). The `blocking_recv` completes as soon as the actor processes
-/// the operation, or returns immediately if the actor has shut down.
+/// Most callers are on a tokio runtime worker, where a blocking recv would
+/// panic. We fire a detached async task via the current tokio handle when one
+/// is available; if called from a non-tokio context (e.g. a Drop during test
+/// teardown) we fall back to the blocking path.
 struct CostFinalizer {
     thread_id: String,
     cost_tracker: Arc<CostTracker>,
@@ -78,12 +78,32 @@ struct CostFinalizer {
 
 impl Drop for CostFinalizer {
     fn drop(&mut self) {
-        if let Some(cost) = self.cost_tracker.finalize(&self.thread_id) {
-            let db = self.db.clone();
-            let _ = db.try_execute_blocking(move |conn| {
-                panes_cost::save_cost(conn, &cost).ok();
-                Ok(())
-            });
+        let Some(cost) = self.cost_tracker.finalize(&self.thread_id) else {
+            return;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // Fire-and-forget on the current runtime so we don't block the
+                // task being torn down. `db.execute` is async and doesn't panic
+                // when called from a runtime worker.
+                let db = self.db.clone();
+                handle.spawn(async move {
+                    let _ = db
+                        .execute(move |conn| {
+                            panes_cost::save_cost(conn, &cost).ok();
+                            Ok(())
+                        })
+                        .await;
+                });
+            }
+            Err(_) => {
+                // No tokio runtime active (e.g. synchronous test teardown).
+                // Safe to block here because this thread is not a runtime worker.
+                let _ = self.db.try_execute_blocking(move |conn| {
+                    panes_cost::save_cost(conn, &cost).ok();
+                    Ok(())
+                });
+            }
         }
     }
 }

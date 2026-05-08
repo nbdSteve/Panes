@@ -483,7 +483,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
             workspaceId: meta.workspaceId,
             prompt: meta.prompt,
             status: "interrupted",
-            summary: null,
+            summary: "",
             costUsd: 0,
             durationMs: 0,
             createdAt: new Date().toISOString(),

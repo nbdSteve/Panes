@@ -398,25 +398,72 @@ async fn dispatch_command(
             Ok(serde_json::to_value(result).unwrap_or(Value::Array(vec![])))
         }
         "get_changed_files" => {
-            Ok(serde_json::json!([]))
+            let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
+            let expanded = crate::commands::expand_tilde(workspace_path);
+            let path = std::path::PathBuf::from(&expanded);
+            let files = panes_core::git::get_changed_files(&path)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(files).unwrap_or(Value::Array(vec![])))
         }
         "get_file_diff" => {
-            Ok(Value::String(String::new()))
+            let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
+            let file_path = args["filePath"].as_str().ok_or("missing filePath")?;
+            let expanded = crate::commands::expand_tilde(workspace_path);
+            let path = std::path::PathBuf::from(&expanded);
+            let diff = panes_core::git::get_file_diff(&path, file_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Value::String(diff))
         }
         "get_workspace_diff" => {
-            Ok(Value::String(String::new()))
+            let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
+            let files: Option<Vec<String>> = args
+                .get("files")
+                .and_then(|f| f.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+            let expanded = crate::commands::expand_tilde(workspace_path);
+            let path = std::path::PathBuf::from(&expanded);
+            let diff = panes_core::git::get_workspace_diff(&path, files.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Value::String(diff))
         }
         "get_files_git_status" => {
-            Ok(Value::Array(vec![]))
+            let file_paths: Vec<String> = args
+                .get("filePaths")
+                .and_then(|f| f.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let status = panes_core::git::get_files_git_status(&file_paths)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(status).unwrap_or(Value::Array(vec![])))
         }
         "list_git_repos" => {
-            Ok(serde_json::json!([""])  )
+            let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
+            let expanded = crate::commands::expand_tilde(workspace_path);
+            let path = std::path::PathBuf::from(&expanded);
+            let repos = panes_core::git::list_git_repos(&path)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(repos).unwrap_or(Value::Array(vec![])))
         }
         "commit_repos" => {
-            Ok(serde_json::json!(["abc123"]))
+            let commits_val = args.get("commits").ok_or("missing commits")?.clone();
+            let commits: Vec<panes_core::git::RepoCommitParams> =
+                serde_json::from_value(commits_val).map_err(|e| e.to_string())?;
+            let hashes = panes_core::git::commit_repos(&commits)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(hashes).unwrap_or(Value::Array(vec![])))
         }
         "generate_commit_message" => {
-            Ok(serde_json::json!("feat: update files with improvements\n\nApply requested changes to source files."))
+            // Deterministic stub so tests don't depend on an LLM call; real
+            // generation hits Bedrock which is offline during E2E.
+            Ok(serde_json::json!(
+                "feat: update files with improvements\n\nApply requested changes to source files."
+            ))
         }
         "extract_memories" => {
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?;
