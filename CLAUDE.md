@@ -47,7 +47,7 @@ The Rust backend spawns agent CLIs (e.g. `claude -p --output-format stream-json`
 ```
 panes-events          ← Shared types: AgentEvent, RiskLevel, ThreadEvent, SessionContext
     ↑
-panes-adapters        ← AgentAdapter trait + implementations (Claude CLI, Fake)
+panes-adapters        ← AgentAdapter trait + implementations (Claude CLI, ACP/kiro-cli, Fake)
 panes-cost            ← CostTracker (in-memory accumulator) + SQLite persistence
 panes-memory          ← MemoryManager (dual-backend: SQLite FTS5 + Mem0 sidecar), briefings
     ↑
@@ -67,9 +67,18 @@ panes-app             ← Tauri entry point, IPC command handlers, test bridge
 
 ### Agent adapter abstraction
 
-`AgentAdapter` (trait in `panes-adapters/src/lib.rs`) defines `spawn()` → `Box<dyn AgentSession>`. `AgentSession` provides `events()` → `Stream<AgentEvent>`, plus `approve()`, `reject()`, `cancel()`. Two implementations exist:
+`AgentAdapter` (trait in `panes-adapters/src/lib.rs`) defines `spawn()` → `Box<dyn AgentSession>`. `AgentSession` provides `events()` → `Stream<AgentEvent>`, plus `approve()`, `reject()`, `cancel()`. Three implementations exist:
 - `ClaudeAdapter` — spawns `claude` CLI, parses stream-json via `parser.rs`, classifies risk via `risk.rs`
+- `AcpAdapter` — JSON-RPC 2.0 over stdio (Agent Client Protocol). Constructed per-backend with the backend's real CLI name (e.g. `"kiro-cli"`) — the string `"acp"` is a transport label only and must never appear in the UI. `AcpAdapter::kiro_cli()` is the preset.
 - `FakeAdapter` — configurable scenarios (TextOnly, GatedAction, FileEdit, MultiStep, Error) for tests
+
+The ACP adapter lives in `crates/panes-adapters/src/acp/`:
+- `transport.rs` — JSON-RPC framing, stdout reader task, auth/fatal stderr monitoring
+- `session.rs` — initialize / session/new / session/load / session/set_mode / session/prompt / session/cancel helpers (kiro-cli's `set_mode` quirk: readiness signaled via `_kiro.dev/commands/available` notification, not a response)
+- `events.rs` — `TranslationContext` maps ACP messages to `AgentEvent`, handles text coalescing and permission bookkeeping (options carried through so `approve`/`reject` can pick a valid optionId rather than hardcoding)
+- `adapter.rs` — `AcpAdapter` + `AcpSession` implementing the public traits
+- `tests/fake-acp-agent.rs` + `tests/acp_integration.rs` — end-to-end contract tests without a real kiro-cli binary
+- `tests/acp_replay.rs` + `tests/fixtures/acp/*.jsonl` — protocol-drift regression corpus
 
 ### Gate mechanism
 
@@ -114,7 +123,9 @@ Multi-agent swarms use Beads (the original Go version, not beads_rust) for task 
 |-----|--------|
 | `PANES_TEST_MODE` | Use fake adapters, start WebSocket test bridge on :3001 |
 | `PANES_CLAUDE_PATH` | Path to Claude CLI binary (default: `claude`) |
+| `PANES_KIRO_CLI_PATH` | Path to kiro-cli binary. When set (or `kiro-cli` is on PATH), the `kiro-cli` ACP adapter is registered alongside Claude. |
 | `PANES_DATA_DIR` | Override data directory (default: `~/Library/Application Support/dev.panes/`) |
 | `CLAUDE_CODE_USE_BEDROCK` | Passed through to Claude CLI |
-| `AWS_PROFILE` | Passed through to Claude CLI |
+| `AWS_PROFILE` | Forwarded to Claude CLI (used with `CLAUDE_CODE_USE_BEDROCK=1`) |
+| `SSH_AUTH_SOCK` | Forwarded to kiro-cli for Midway auth |
 | `PANES_MEM0_PYTHON` | Python binary for Mem0 sidecar |

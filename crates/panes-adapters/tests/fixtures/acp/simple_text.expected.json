@@ -1,0 +1,4 @@
+[
+  { "type": "Text", "text_contains": "Hello, world." },
+  { "type": "Complete", "summary_contains": "Hello, world.", "turns": 1 }
+]

@@ -1,5 +1,8 @@
+pub mod acp;
 pub mod claude;
 pub mod fake;
+
+pub use acp::{AcpAdapter, replay_messages_for_tests};
 
 use std::path::Path;
 use std::pin::Pin;

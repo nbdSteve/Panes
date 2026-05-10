@@ -1,0 +1,4 @@
+[
+  { "type": "Text", "text_contains": "fresh turn" },
+  { "type": "Complete", "summary_contains": "fresh turn" }
+]

@@ -304,6 +304,12 @@ pub async fn start_thread(
     workspace_path: String,
     workspace_name: String,
     prompt: String,
+    // `adapter` selects the AgentAdapter (claude-code, kiro-cli, ...).
+    // `agent` is the adapter-specific sub-agent/mode name passed through
+    // to the adapter (claude's --agent flag / ACP's set_mode modeId). When
+    // `adapter` is absent, `agent` is interpreted as the adapter name for
+    // backward compatibility with the pre-kiro-cli IPC shape.
+    adapter: Option<String>,
     agent: Option<String>,
     model: Option<String>,
 ) -> Result<StartThreadResult, PanesError> {
@@ -316,11 +322,23 @@ pub async fn start_thread(
             |row| row.get(0),
         ).unwrap_or(None))
     }).await.map_err(PanesError::from)?;
+
+    // Resolve the adapter name. SessionManager's overloaded dispatch treats
+    // `agent_name` both as adapter lookup key AND as CLI sub-agent — when
+    // the caller supplies both we prefer `adapter` for routing and leave
+    // `agent` for the per-adapter flag. When only `agent` is supplied we
+    // send it as-is for backward compat.
+    let agent_for_dispatch = adapter
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| agent.clone().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "claude-code".to_string());
+
     let workspace = Workspace {
         id: workspace_id.clone(),
         path: PathBuf::from(&expanded_path),
         name: workspace_name,
-        default_agent: agent.clone(),
+        default_agent: Some(agent_for_dispatch.clone()),
         budget_cap,
     };
 
@@ -343,10 +361,8 @@ pub async fn start_thread(
         budget_cap: None,
     };
 
-    let agent_name = resolve_agent_name(agent);
-
     let mgr = session_manager.lock().await;
-    let thread_id = mgr.start_thread(&workspace, &prompt, &agent_name, context, model.as_deref())
+    let thread_id = mgr.start_thread(&workspace, &prompt, &agent_for_dispatch, context, model.as_deref())
         .await?;
 
     Ok(StartThreadResult {
@@ -796,8 +812,27 @@ pub async fn list_models(
 pub fn list_agents(adapter: String) -> Result<Vec<AgentInfo>, PanesError> {
     match adapter.as_str() {
         "claude-code" => list_agents_claude(),
+        "kiro-cli" => Ok(list_agents_kiro_cli()),
         _ => Ok(vec![]),
     }
+}
+
+/// Static list of kiro-cli agent modes. These map to the `modeId` sent to
+/// `session/set_mode` during initialization. Keep in sync with the
+/// `default_modes` registered in `AcpAdapter::kiro_cli()`.
+fn list_agents_kiro_cli() -> Vec<AgentInfo> {
+    vec![
+        AgentInfo {
+            name: "harold".into(),
+            model: None,
+            description: Some("Harold — default kiro-cli agent".into()),
+        },
+        AgentInfo {
+            name: "builder".into(),
+            model: None,
+            description: Some("Builder mode — broader tool access".into()),
+        },
+    ]
 }
 
 fn list_agents_claude() -> Result<Vec<AgentInfo>, PanesError> {
@@ -1739,6 +1774,26 @@ Body text here
         let result = list_agents("unknown-adapter".to_string());
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_list_agents_kiro_cli_returns_known_modes() {
+        let result = list_agents("kiro-cli".to_string()).expect("ok");
+        assert!(!result.is_empty(), "kiro-cli must expose its mode list");
+        let names: Vec<&str> = result.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"harold"), "expected harold in: {names:?}");
+        assert!(names.contains(&"builder"), "expected builder in: {names:?}");
+    }
+
+    #[test]
+    fn test_list_agents_never_exposes_acp_as_adapter_name() {
+        // Guardrail: the string "acp" is the protocol, never a user-visible
+        // adapter id. If this ever starts returning modes, something leaked.
+        let result = list_agents("acp".to_string()).expect("ok");
+        assert!(
+            result.is_empty(),
+            "'acp' must not be a valid adapter id in the UI — saw: {result:?}"
+        );
     }
 
     #[test]

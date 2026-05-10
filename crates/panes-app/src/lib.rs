@@ -4,6 +4,7 @@ mod test_bridge;
 use std::sync::Arc;
 
 use panes_adapters::claude::ClaudeAdapter;
+use panes_adapters::{AcpAdapter, AgentAdapter};
 use panes_adapters::fake::{FakeAdapter, FakeScenario, FakeStep};
 use panes_core::db;
 use panes_core::session::SessionManager;
@@ -100,6 +101,15 @@ pub fn run() {
             }
         }
         session_manager.register_adapter(Arc::new(adapter));
+
+        // Register kiro-cli if the binary resolves. Graceful no-op otherwise —
+        // Panes stays usable with just Claude when kiro-cli isn't installed.
+        if let Some(kiro) = AcpAdapter::kiro_cli() {
+            tracing::info!(name = kiro.name(), "registering ACP-backed agent");
+            session_manager.register_adapter(Arc::new(kiro));
+        } else {
+            tracing::debug!("kiro-cli not found on PATH — ACP adapter not registered");
+        }
     }
 
     let session_arc = Arc::new(tokio::sync::Mutex::new(session_manager));
@@ -237,15 +247,26 @@ pub fn run() {
 fn register_fake_adapters(session_manager: &mut SessionManager) {
     // The default "claude-code" adapter in test mode cycles through scenarios
     // based on the prompt content, so tests can trigger specific behaviors.
-    session_manager.register_adapter(Arc::new(PromptRoutedFakeAdapter));
+    session_manager.register_adapter(Arc::new(PromptRoutedFakeAdapter {
+        name: "claude-code",
+    }));
+    // Register the same prompt-routed scenarios under "kiro-cli" so mock E2E
+    // tests can exercise the adapter picker without needing a real kiro-cli.
+    session_manager.register_adapter(Arc::new(PromptRoutedFakeAdapter {
+        name: "kiro-cli",
+    }));
 }
 
-struct PromptRoutedFakeAdapter;
+struct PromptRoutedFakeAdapter {
+    /// Adapter id surfaced to the UI. Same scenario logic for every name —
+    /// the only difference is which adapter the frontend picker shows.
+    name: &'static str,
+}
 
 #[async_trait::async_trait]
 impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
     fn name(&self) -> &str {
-        "claude-code"
+        self.name
     }
 
     async fn spawn(

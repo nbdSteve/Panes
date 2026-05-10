@@ -7,6 +7,17 @@ export interface StartThreadParams {
   workspacePath: string;
   workspaceName: string;
   prompt: string;
+  /**
+   * Adapter name — `"claude-code"`, `"kiro-cli"`, etc. Selects which
+   * `AgentAdapter` implementation spawns the backend. If omitted, the
+   * workspace's default adapter is used.
+   */
+  adapter?: string;
+  /**
+   * Per-adapter sub-agent or mode name (e.g. `"codebase-analyzer"` for
+   * claude-code, `"harold"` for kiro-cli). Passed to the adapter via its
+   * `--agent`/`set_mode` mechanism. Independent of `adapter`.
+   */
   agent?: string;
   model?: string;
 }
@@ -23,6 +34,7 @@ export interface ResumeThreadParams {
   workspacePath: string;
   workspaceName: string;
   prompt: string;
+  adapter?: string;
   agent?: string;
   model?: string;
 }

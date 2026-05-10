@@ -1,0 +1,7 @@
+[
+  { "type": "Text", "text_contains": "I'll update the file." },
+  { "type": "ToolRequest", "tool_name": "edit", "needs_approval": true, "risk_level": "medium" },
+  { "type": "ToolResult", "success": true, "output_contains": "edited 1 file" },
+  { "type": "Text", "text_contains": "Done." },
+  { "type": "Complete", "summary_contains": "Done." }
+]

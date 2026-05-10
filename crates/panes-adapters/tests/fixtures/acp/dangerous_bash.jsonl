@@ -1,0 +1,2 @@
+{"jsonrpc":"2.0","id":"perm-danger","method":"session/request_permission","params":{"toolCall":{"toolCallId":"tc-rm","kind":"execute","title":"rm -rf /tmp/test","rawInput":{"command":"rm -rf /tmp/test"}},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow"}]}}
+{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}

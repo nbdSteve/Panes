@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I'll update the file."}}}}
+{"jsonrpc":"2.0","id":"perm-0","method":"session/request_permission","params":{"toolCall":{"toolCallId":"tc-edit-1","kind":"edit","title":"edit src/main.rs","rawInput":{"path":"src/main.rs"}},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow"}]}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-edit-1","status":"completed","output":"edited 1 file"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}}
+{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}

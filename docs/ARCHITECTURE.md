@@ -1,5 +1,7 @@
 # Panes — Architecture
 
+> **Implementation note (2026-05):** Some diagrams in this document show "ACP Client" as a separate box alongside an "Adapter Layer". That framing is historical — the shipped implementation makes ACP *one adapter implementation* (`crates/panes-adapters/src/acp/`), not a privileged path. All agents route through the same `AgentAdapter` trait. The string `"acp"` is an internal transport label; users see the actual CLI name (`claude-code`, `kiro-cli`, `codex`, …) in the agent picker. See GAPS.md for the decision trail.
+
 ## System Overview
 
 ```

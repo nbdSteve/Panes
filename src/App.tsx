@@ -12,6 +12,7 @@ import WorkspaceValidatorsPanel from "./components/WorkspaceValidatorsPanel";
 import { mapBackendEvent } from "./lib/eventMapper";
 import { shouldFirePendingResume } from "./lib/pendingResume";
 import { api } from "./lib/api";
+import { refreshAdapterLists } from "./lib/adapterLists";
 import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo, ValidatorTypeInfo } from "./types";
 
 export type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo };
@@ -268,7 +269,7 @@ function App() {
   }, []);
 
   const handleStartThread = useCallback(
-    async (workspace: WorkspaceInfo, prompt: string, agent?: string, model?: string) => {
+    async (workspace: WorkspaceInfo, prompt: string, adapter?: string, agent?: string, model?: string) => {
       const tempId = crypto.randomUUID();
 
       setThreads((prev) => [
@@ -290,7 +291,8 @@ function App() {
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          agent: agent || workspace.defaultAgent || undefined,
+          adapter: adapter || workspace.defaultAgent || undefined,
+          agent: agent || undefined,
           model: model ?? undefined,
         });
 
@@ -369,12 +371,12 @@ function App() {
   }, [threads, workspaces, handleResumeThread]);
 
   const handleSendPrompt = useCallback(
-    (workspace: WorkspaceInfo, prompt: string, agent?: string, model?: string) => {
+    (workspace: WorkspaceInfo, prompt: string, adapter?: string, agent?: string, model?: string) => {
       const thread = threads.find((t) => t.id === activeThread);
       if (thread && (thread.status === "complete" || thread.status === "error" || thread.status === "interrupted")) {
         handleResumeThread(workspace, thread.id, prompt);
       } else if (!thread) {
-        handleStartThread(workspace, prompt, agent, model);
+        handleStartThread(workspace, prompt, adapter, agent, model);
       }
     },
     [activeThread, threads, handleStartThread, handleResumeThread]
@@ -577,10 +579,23 @@ function App() {
             validatorTypes={validatorTypes}
             defaultConfig={wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current}
             onConfigChange={(config) => {
+              const prev = wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current;
               wsConfigRef.current.set(activeWs.id, config);
               globalConfigRef.current = config;
+              // Re-fetch agents/models when the adapter changes so each backend's
+              // mode/model list shows in the picker. The helper swallows errors
+              // on both listAgents and listModels — see adapterLists.test.ts.
+              if (config.adapter && config.adapter !== prev.adapter) {
+                refreshAdapterLists(config.adapter, FALLBACK_MODELS, {
+                  listAgents: (a) => api.listAgents(a) as Promise<AgentInfo[]>,
+                  listModels: (a) => api.listModels(a) as Promise<ModelInfo[]>,
+                }).then(({ agents, models }) => {
+                  setAgents(agents);
+                  setModels(models);
+                });
+              }
             }}
-            onStartThread={(prompt, agent, model) => handleSendPrompt(activeWs, prompt, agent, model)}
+            onStartThread={(prompt, adapter, agent, model) => handleSendPrompt(activeWs, prompt, adapter, agent, model)}
             onCompletionAction={handleCompletionAction}
             onCancel={handleCancelThread}
             onQueueFollowUp={handleQueueFollowUp}

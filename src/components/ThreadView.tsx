@@ -30,7 +30,7 @@ interface ThreadViewProps {
   validatorTypes?: ValidatorTypeInfo[];
   defaultConfig: ConfigPrefs;
   onConfigChange: (config: ConfigPrefs) => void;
-  onStartThread: (prompt: string, agent?: string, model?: string) => void;
+  onStartThread: (prompt: string, adapter?: string, agent?: string, model?: string) => void;
   onCompletionAction: (threadId: string, action: "committed" | "reverted" | "kept") => void;
   onCancel: (threadId: string) => void;
   onQueueFollowUp: (threadId: string, prompt: string) => void;
@@ -165,7 +165,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
       // Session is preserved on the backend, so resume picks up where we left off.
       onResumeThread(thread.id, prompt.trim());
     } else {
-      onStartThread(prompt.trim(), selectedAgent, selectedModel);
+      onStartThread(prompt.trim(), selectedAdapter, selectedAgent, selectedModel);
     }
     setPrompt("");
     if (textareaRef.current) {

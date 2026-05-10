@@ -330,7 +330,10 @@ interface MockThread {
 }
 
 const mockThreads: MockThread[] = [];
-const activeThreadMeta = new Map<string, { workspaceId: string; prompt: string; events: Array<Record<string, unknown>> }>();
+const activeThreadMeta = new Map<string, { workspaceId: string; prompt: string; events: Array<Record<string, unknown>>; adapter?: string }>();
+// Test-only: record the adapter of the most recent start_thread call so E2E
+// tests can verify the frontend routed a prompt through the expected backend.
+let lastStartThreadAdapter: string | null = null;
 const workspacePathsWithEdits = new Set<string>();
 
 interface PausedThread {
@@ -418,9 +421,14 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
     case "start_thread": {
       const prompt = args?.prompt as string;
-      const agent = (args?.agent as string) || "claude-code";
-      if (agent !== "claude-code") {
-        throw new Error(`unknown agent: ${agent}`);
+      // `adapter` is the adapter selector; `agent` is the per-adapter
+      // sub-agent/mode. Backward-compat: if adapter isn't set, accept
+      // `agent` as the adapter name (matches the pre-kiro-cli IPC shape).
+      const adapter = (args?.adapter as string)
+        || (args?.agent as string)
+        || "claude-code";
+      if (adapter !== "claude-code" && adapter !== "kiro-cli") {
+        throw new Error(`unknown adapter: ${adapter}`);
       }
       const threadId = crypto.randomUUID();
       const events = buildEvents(prompt);
@@ -434,7 +442,9 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         workspaceId,
         prompt,
         events: [],
+        adapter,
       });
+      lastStartThreadAdapter = adapter;
       setTimeout(() => emitThreadEvents(threadId, events), 300);
       return { threadId, memoryCount: 0, hasBriefing: false };
     }
@@ -442,15 +452,18 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     case "resume_thread": {
       const threadId = args?.threadId as string;
       const prompt = args?.prompt as string;
-      const agent = (args?.agent as string) || "claude-code";
-      if (agent !== "claude-code") {
-        throw new Error(`unknown agent: ${agent}`);
+      const adapter = (args?.adapter as string)
+        || (args?.agent as string)
+        || "claude-code";
+      if (adapter !== "claude-code" && adapter !== "kiro-cli") {
+        throw new Error(`unknown adapter: ${adapter}`);
       }
       const events = buildEvents(prompt);
       activeThreadMeta.set(threadId, {
         workspaceId: args?.workspaceId as string,
         prompt,
         events: [],
+        adapter,
       });
       setTimeout(() => emitThreadEvents(threadId, events), 300);
       return null;
@@ -732,7 +745,13 @@ diff --git a/src/lib.rs b/src/lib.rs
       return null;
 
     case "list_adapters":
-      return ["claude-code"];
+      return ["claude-code", "kiro-cli"];
+
+    // Test-only: returns the adapter name of the most recent start_thread
+    // call. Lets E2E tests verify the frontend actually routes prompts to
+    // the adapter the user picked — the production code doesn't need this.
+    case "__test_last_start_thread_adapter":
+      return lastStartThreadAdapter;
 
     case "list_agents":
       if ((args?.adapter as string) === "claude-code") {
@@ -745,6 +764,12 @@ diff --git a/src/lib.rs b/src/lib.rs
           { name: "load-test-planner", model: "opus", description: "Plan load tests before implementation begins..." },
           { name: "thoughts-analyzer", model: "opus", description: "Deep dive on research topics by analyzing thought documents..." },
           { name: "thoughts-locator", model: "sonnet", description: "Discover relevant documents in the thoughts/ directory..." },
+        ];
+      }
+      if ((args?.adapter as string) === "kiro-cli") {
+        return [
+          { name: "harold", model: null, description: "Harold — default kiro-cli agent" },
+          { name: "builder", model: null, description: "Builder mode — broader tool access" },
         ];
       }
       return [];

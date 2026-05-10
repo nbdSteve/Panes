@@ -1,5 +1,5 @@
 mod parser;
-mod risk;
+pub(crate) mod risk;
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;

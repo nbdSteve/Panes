@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call","toolCallId":"tc-a","kind":"read","title":"read a.rs","rawInput":{"path":"a.rs"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call","toolCallId":"tc-b","kind":"read","title":"read b.rs","rawInput":{"path":"b.rs"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-b","status":"completed","output":"contents of b"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-a","status":"completed","output":"contents of a"}}}
+{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}

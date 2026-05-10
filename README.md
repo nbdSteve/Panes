@@ -37,7 +37,18 @@ panes/
 
 - Rust 1.80+
 - Node 20+
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- At least one agent backend:
+  - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (default), or
+  - kiro-cli (Amazon internal) — any binary that speaks [ACP](https://github.com/zed-industries/agent-client-protocol) over stdio
+
+## Supported agents
+
+| Agent | Transport | Env var to enable | Notes |
+|-------|-----------|-------------------|-------|
+| `claude-code` | `claude -p --output-format stream-json` | `PANES_CLAUDE_PATH` | Reference adapter. Full cost tracking. |
+| `kiro-cli` | ACP (JSON-RPC 2.0 over stdio) | `PANES_KIRO_CLI_PATH` or `kiro-cli` on PATH | Registered automatically when the binary resolves. Per-turn cost tracking not available today — totals come from your Bedrock bill. |
+
+Additional ACP-compatible agents (Codex, Gemini CLI, etc.) can be added by constructing an `AcpAdapter::new(name, path, args)` in `crates/panes-app/src/lib.rs`. The adapter's `name` is what appears in the picker — use the backend's real CLI name, not `"acp"`.
 
 ## Getting started
 
@@ -57,9 +68,11 @@ PANES_TEST_MODE=1 npx tauri dev
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `PANES_CLAUDE_PATH` | `claude` | Path to Claude Code CLI binary |
-| `PANES_TEST_MODE` | unset | Use fake adapter instead of real Claude |
+| `PANES_KIRO_CLI_PATH` | resolved via PATH | Path to kiro-cli binary. If set (or `kiro-cli` is on PATH), the `kiro-cli` adapter is registered alongside Claude. |
+| `PANES_TEST_MODE` | unset | Use fake adapters instead of real agent CLIs |
 | `CLAUDE_CODE_USE_BEDROCK` | unset | Passed through to Claude CLI |
-| `AWS_PROFILE` | unset | Passed through to Claude CLI |
+| `AWS_PROFILE` | unset | Forwarded to Claude CLI (used when `CLAUDE_CODE_USE_BEDROCK=1`) |
+| `SSH_AUTH_SOCK` | inherited | Forwarded to kiro-cli for Midway auth |
 
 ## Tests
 
