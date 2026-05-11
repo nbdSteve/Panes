@@ -3157,6 +3157,27 @@ body {
   font-size: 12px;
 }
 
+.settings-adapter-select {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: all var(--transition-fast);
+}
+
+.settings-adapter-select:hover {
+  border-color: var(--accent);
+}
+
+.settings-adapter-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
 .sidebar-add-form {
   display: flex;
   flex-direction: column;

@@ -399,6 +399,22 @@ function App() {
     } catch {}
   }, []);
 
+  const handleSetDefaultAgent = useCallback(async (workspaceId: string, agent: string) => {
+    // Optimistic local update so the dropdown reflects the choice immediately;
+    // revert on failure so the UI doesn't drift from persisted state.
+    const prev = workspaces.find((w) => w.id === workspaceId)?.defaultAgent;
+    setWorkspaces((w) =>
+      w.map((ws) => (ws.id === workspaceId ? { ...ws, defaultAgent: agent } : ws))
+    );
+    try {
+      await api.setWorkspaceDefaultAgent(workspaceId, agent);
+    } catch {
+      setWorkspaces((w) =>
+        w.map((ws) => (ws.id === workspaceId ? { ...ws, defaultAgent: prev } : ws))
+      );
+    }
+  }, [workspaces]);
+
   const handleRemoveWorkspace = useCallback(async (id: string) => {
     try { await api.removeWorkspace(id); } catch {}
     setWorkspaces((prev) => prev.filter((w) => w.id !== id));
@@ -640,6 +656,7 @@ function App() {
             workspaces={workspaces}
             features={features}
             onToggleFeature={handleToggleFeature}
+            onSetDefaultAgent={handleSetDefaultAgent}
           />
         )}
       </main>

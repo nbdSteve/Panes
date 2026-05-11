@@ -8,12 +8,14 @@ interface SettingsPanelProps {
   workspaces: WorkspaceInfo[];
   features: FeatureInfo[];
   onToggleFeature: (featureId: string, enabled: boolean) => void;
+  onSetDefaultAgent: (workspaceId: string, agent: string) => void;
 }
 
-export default function SettingsPanel({ workspaces, features, onToggleFeature }: SettingsPanelProps) {
+export default function SettingsPanel({ workspaces, features, onToggleFeature, onSetDefaultAgent }: SettingsPanelProps) {
   const showCost = features.some((f) => f.id === "cost_tracking" && f.enabled);
   const [backendStatus, setBackendStatus] = useState<MemoryBackendStatus | null>(null);
   const [totalCost, setTotalCost] = useState(0);
+  const [adapters, setAdapters] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
@@ -31,6 +33,7 @@ export default function SettingsPanel({ workspaces, features, onToggleFeature }:
     Promise.all([
       loadStatus(),
       api.getAggregateCost().then(setTotalCost).catch(() => {}),
+      api.listAdapters().then(setAdapters).catch(() => setAdapters(["claude-code"])),
     ]).finally(() => setLoading(false));
   }, [loadStatus]);
 
@@ -105,9 +108,27 @@ export default function SettingsPanel({ workspaces, features, onToggleFeature }:
             <div key={ws.id} className="settings-row">
               <span className="settings-label">{ws.name}</span>
               <div className="settings-ws-details">
-                <span className="settings-value">
-                  {ws.defaultAgent ?? "claude-code"}
-                </span>
+                <select
+                  className="settings-adapter-select"
+                  aria-label={`Default adapter for ${ws.name}`}
+                  value={ws.defaultAgent ?? "claude-code"}
+                  onChange={(e) => onSetDefaultAgent(ws.id, e.target.value)}
+                >
+                  {/* Include the workspace's current value even if it's not
+                      in the adapter list (e.g. the kiro-cli binary went
+                      missing) so the user can see what's stored rather than
+                      a silent reset to claude-code. */}
+                  {adapters.length === 0 || !adapters.includes(ws.defaultAgent ?? "claude-code") ? (
+                    <option value={ws.defaultAgent ?? "claude-code"}>
+                      {ws.defaultAgent ?? "claude-code"}
+                    </option>
+                  ) : null}
+                  {adapters.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
                 {showCost && (
                   <span className={`settings-value ${ws.budgetCap ? "" : "muted"}`}>
                     {ws.budgetCap ? `Cap: ${formatCost(ws.budgetCap)}` : "No cap"}
