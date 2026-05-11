@@ -211,6 +211,28 @@ fn main() {
                         }
                         respond(&mut stdout, id, json!({"stopReason": "end_turn"}));
                     }
+                    "realistic_streaming" => {
+                        // Emulate kiro-cli's real token streaming: 30 chunks
+                        // emitted with the same inter-chunk spacing we see
+                        // from the real binary (~100ms). This exercises the
+                        // translator's coalesce logic + the UI's adjacent-
+                        // text-merge path end-to-end.
+                        let chunks = [
+                            "This ", "is ", "a ", "**Brazil ",
+                            "workspace** ", "containing ", "the ",
+                            "**GroceryPackUWC** ", "fleet ", "— ", "a ",
+                            "UWC ", "(Universal ", "Workc", "ell) ",
+                            "project ", "for ", "grocery ", "automation. ",
+                            "It ", "has ", "3 ", "packages:\n\n",
+                            "1. ", "**GroceryPackUWCCDK** ", "— ", "CDK ",
+                            "infrastructure ", "(Type", "Script).",
+                        ];
+                        for chunk in chunks {
+                            send_text_chunk(&mut stdout, chunk);
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        respond(&mut stdout, id, json!({"stopReason": "end_turn"}));
+                    }
                     "resume_existing" => {
                         send_text_chunk(&mut stdout, "resumed session here");
                         respond(&mut stdout, id, json!({"stopReason": "end_turn"}));

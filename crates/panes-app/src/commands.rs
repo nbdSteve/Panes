@@ -393,6 +393,21 @@ pub async fn resume_thread(
             |row| row.get(0),
         ).unwrap_or(None))
     }).await.map_err(PanesError::from)?;
+
+    // The adapter the thread was originally spawned with wins — the frontend's
+    // `agent` param is only used when the DB row is somehow missing. Without
+    // this, a kiro-cli thread gets routed to claude-code on resume and fails
+    // with "failed to resume session" because kiro-cli session ids are
+    // meaningless to the claude CLI.
+    let tid = thread_id.clone();
+    let stored_agent: Option<String> = db.execute(move |conn| {
+        Ok(conn.query_row(
+            "SELECT agent_type FROM threads WHERE id = ?1",
+            rusqlite::params![tid],
+            |row| row.get(0),
+        ).ok())
+    }).await.map_err(PanesError::from)?;
+
     let workspace = Workspace {
         id: workspace_id,
         path: PathBuf::from(&expanded_path),
@@ -401,7 +416,7 @@ pub async fn resume_thread(
         budget_cap,
     };
 
-    let agent_name = resolve_agent_name(agent);
+    let agent_name = resolve_agent_name(stored_agent.or(agent));
 
     let mgr = session_manager.lock().await;
     mgr.resume_thread(&thread_id, &workspace, &prompt, &agent_name, model.as_deref())
@@ -439,6 +454,16 @@ pub async fn cancel_thread(
     let mgr = session_manager.lock().await;
     mgr.cancel(&thread_id)
         .await
+}
+
+#[tauri::command]
+pub async fn set_thread_model(
+    session_manager: tauri::State<'_, SessionState>,
+    thread_id: String,
+    model: String,
+) -> Result<(), PanesError> {
+    let mgr = session_manager.lock().await;
+    mgr.set_thread_model(&thread_id, &model).await
 }
 
 #[tauri::command]
@@ -809,30 +834,46 @@ pub async fn list_models(
 }
 
 #[tauri::command]
-pub fn list_agents(adapter: String) -> Result<Vec<AgentInfo>, PanesError> {
-    match adapter.as_str() {
-        "claude-code" => list_agents_claude(),
-        "kiro-cli" => Ok(list_agents_kiro_cli()),
-        _ => Ok(vec![]),
+pub async fn list_agents(
+    session_manager: tauri::State<'_, SessionState>,
+    adapter: String,
+) -> Result<Vec<AgentInfo>, PanesError> {
+    // Claude's agent list comes from ~/.claude/agents/*.md — panes-app
+    // parses this directly because it predates the trait-based discovery.
+    if adapter == "claude-code" {
+        return list_agents_claude();
     }
+    // Every other adapter exposes its agent list via the trait, which ACP
+    // adapters populate from the backend's session/new response.
+    let adapter_ref = {
+        let mgr = session_manager.lock().await;
+        mgr.adapter(&adapter)
+    };
+    list_agents_via_trait(adapter_ref).await
 }
 
-/// Static list of kiro-cli agent modes. These map to the `modeId` sent to
-/// `session/set_mode` during initialization. Keep in sync with the
-/// `default_modes` registered in `AcpAdapter::kiro_cli()`.
-fn list_agents_kiro_cli() -> Vec<AgentInfo> {
-    vec![
-        AgentInfo {
-            name: "harold".into(),
-            model: None,
-            description: Some("Harold — default kiro-cli agent".into()),
-        },
-        AgentInfo {
-            name: "builder".into(),
-            model: None,
-            description: Some("Builder mode — broader tool access".into()),
-        },
-    ]
+/// Shared implementation reachable from both the IPC handler and tests.
+/// `adapter_ref` is `None` when the adapter isn't registered; returns an
+/// empty list in that case so the UI picker hides gracefully rather than
+/// erroring out.
+async fn list_agents_via_trait(
+    adapter_ref: Option<std::sync::Arc<dyn panes_adapters::AgentAdapter>>,
+) -> Result<Vec<AgentInfo>, PanesError> {
+    let Some(adapter_ref) = adapter_ref else {
+        return Ok(vec![]);
+    };
+    let raw = adapter_ref
+        .list_agents()
+        .await
+        .map_err(|e| PanesError::Internal { message: e.to_string() })?;
+    Ok(raw
+        .into_iter()
+        .map(|a| AgentInfo {
+            name: a.name,
+            model: a.model,
+            description: a.description,
+        })
+        .collect())
 }
 
 fn list_agents_claude() -> Result<Vec<AgentInfo>, PanesError> {
@@ -1769,27 +1810,40 @@ Body text here
         assert!(json.contains("\"description\""));
     }
 
-    #[test]
-    fn test_list_agents_unknown_adapter_returns_empty() {
-        let result = list_agents("unknown-adapter".to_string());
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+    #[tokio::test]
+    async fn test_list_agents_unknown_adapter_returns_empty() {
+        // Unknown adapters resolve to `None` — the helper should return an
+        // empty list without erroring.
+        let result = list_agents_via_trait(None).await.expect("ok");
+        assert!(result.is_empty());
     }
 
-    #[test]
-    fn test_list_agents_kiro_cli_returns_known_modes() {
-        let result = list_agents("kiro-cli".to_string()).expect("ok");
-        assert!(!result.is_empty(), "kiro-cli must expose its mode list");
-        let names: Vec<&str> = result.iter().map(|a| a.name.as_str()).collect();
-        assert!(names.contains(&"harold"), "expected harold in: {names:?}");
-        assert!(names.contains(&"builder"), "expected builder in: {names:?}");
+    #[tokio::test]
+    async fn test_list_agents_via_trait_returns_adapter_agents() {
+        // Exercise the trait-dispatch path. AcpAdapter's list_agents runs
+        // ensure_probed under the hood — against a broken binary that
+        // returns no modes, so we get an empty list but not a crash.
+        // Discovery-success assertions live in the adapter's own tests.
+        use panes_adapters::AcpAdapter;
+        let adapter = std::sync::Arc::new(
+            AcpAdapter::new("kiro-cli", "/nonexistent-bin-xyz", vec![]),
+        ) as std::sync::Arc<dyn panes_adapters::AgentAdapter>;
+        let result = list_agents_via_trait(Some(adapter))
+            .await
+            .expect("trait dispatch must not propagate discovery failure");
+        assert!(
+            result.is_empty(),
+            "no backend available → empty list, not an error: {result:?}"
+        );
     }
 
-    #[test]
-    fn test_list_agents_never_exposes_acp_as_adapter_name() {
+    #[tokio::test]
+    async fn test_list_agents_never_exposes_acp_as_adapter_name() {
         // Guardrail: the string "acp" is the protocol, never a user-visible
-        // adapter id. If this ever starts returning modes, something leaked.
-        let result = list_agents("acp".to_string()).expect("ok");
+        // adapter id. Even if someone mistakenly registered an adapter under
+        // that name, the absence of such a registration means the lookup
+        // returns None and we get an empty list.
+        let result = list_agents_via_trait(None).await.expect("ok");
         assert!(
             result.is_empty(),
             "'acp' must not be a valid adapter id in the UI — saw: {result:?}"
@@ -2177,5 +2231,71 @@ Body text here
     #[test]
     fn test_resolve_agent_name_claude_code_preserved() {
         assert_eq!(resolve_agent_name(Some("claude-code".to_string())), "claude-code");
+    }
+
+    #[test]
+    fn test_resume_reads_stored_adapter_from_threads_table() {
+        // Regression for: kiro-cli threads failing to resume because
+        // `resume_thread` defaulted to claude-code when the frontend didn't
+        // pass an `agent` hint. The stored adapter must win.
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at) VALUES ('t-kiro', 'ws1', 'kiro-cli', 'complete', 'hi', '2024-01-01')",
+            [],
+        ).unwrap();
+
+        // This is exactly what resume_thread now runs.
+        let stored: Option<String> = conn.query_row(
+            "SELECT agent_type FROM threads WHERE id = ?1",
+            rusqlite::params!["t-kiro"],
+            |row| row.get(0),
+        ).ok();
+        assert_eq!(stored.as_deref(), Some("kiro-cli"));
+
+        // With no frontend hint, we should still resolve to kiro-cli.
+        let resolved = resolve_agent_name(stored.or(None));
+        assert_eq!(resolved, "kiro-cli");
+    }
+
+    #[test]
+    fn test_resume_falls_back_to_frontend_agent_when_db_missing() {
+        // If somehow the thread row is gone, accept the frontend-provided
+        // hint rather than hardwiring to claude-code.
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+
+        let stored: Option<String> = conn.query_row(
+            "SELECT agent_type FROM threads WHERE id = ?1",
+            rusqlite::params!["does-not-exist"],
+            |row| row.get(0),
+        ).ok();
+        assert!(stored.is_none(), "no row, no stored agent");
+
+        let resolved = resolve_agent_name(stored.or(Some("kiro-cli".to_string())));
+        assert_eq!(resolved, "kiro-cli");
+    }
+
+    #[test]
+    fn test_resume_stored_adapter_wins_over_frontend_hint() {
+        // Precedence: the DB-stored agent_type is authoritative. A stale
+        // frontend hint (e.g. an in-flight request using the workspace's
+        // old default) must not be able to re-route a kiro-cli thread.
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/a");
+        conn.execute(
+            "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at) VALUES ('t-kiro', 'ws1', 'kiro-cli', 'complete', 'hi', '2024-01-01')",
+            [],
+        ).unwrap();
+
+        let stored: Option<String> = conn.query_row(
+            "SELECT agent_type FROM threads WHERE id = ?1",
+            rusqlite::params!["t-kiro"],
+            |row| row.get(0),
+        ).ok();
+
+        // Frontend wrongly hints claude-code; stored kiro-cli must win.
+        let resolved = resolve_agent_name(stored.or(Some("claude-code".to_string())));
+        assert_eq!(resolved, "kiro-cli");
     }
 }

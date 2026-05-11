@@ -193,6 +193,7 @@ pub fn run() {
             commands::approve_gate,
             commands::reject_gate,
             commands::cancel_thread,
+            commands::set_thread_model,
             commands::commit_changes,
             commands::revert_changes,
             commands::get_changed_files,

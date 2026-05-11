@@ -229,6 +229,8 @@ fn parse_assistant_event(v: &Value, parent_tool_use_id: Option<&str>) -> Vec<Age
             cache_creation_tokens: cache_creation,
             total_usd: estimated_cost,
             model,
+            // Claude CLI reports real token counts — totals are trustworthy.
+            estimated: false,
         });
     }
 

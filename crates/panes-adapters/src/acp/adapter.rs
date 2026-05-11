@@ -20,10 +20,10 @@ use panes_events::{AgentEvent, SessionContext, SessionInit};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::{AgentAdapter, AgentSession, ModelInfo};
+use crate::{AgentAdapter, AgentInfo, AgentSession, ModelInfo};
 
 use super::events::TranslationContext;
-use super::session::{self, ClientInfo};
+use super::session::{self, AcpMode, ClientInfo};
 use super::transport::AcpTransport;
 
 /// Graceful-cancel deadline: we wait this long after `session/cancel` for
@@ -37,6 +37,23 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(test)]
 const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// What the adapter has learned from the backend at runtime.
+///
+/// Populated by a lightweight probe session (`initialize` + `session/new` +
+/// shutdown) the first time `list_agents`/`list_models` is called, then
+/// kept fresh by every real `spawn`/`resume`. No seeds — if discovery
+/// fails, the picker is empty, which is correct: sending a prompt to an
+/// agent that doesn't work is worse than an empty picker.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DiscoveredMetadata {
+    pub modes: Vec<AcpMode>,
+    pub models: Vec<ModelInfo>,
+    /// True once any discovery has succeeded. Lets us distinguish "we
+    /// haven't probed yet" from "the backend legitimately reported an
+    /// empty list". The former triggers a probe; the latter doesn't.
+    pub probed: bool,
+}
+
 /// ACP-backed implementation of [`AgentAdapter`].
 ///
 /// Construct one per backend. `name` is user-visible — use the real CLI name
@@ -46,8 +63,10 @@ pub struct AcpAdapter {
     cli_path: String,
     subcommand: Vec<String>,
     env_vars: Vec<(String, String)>,
-    /// Modes surfaced via `list_agents()` for UI picker population.
-    default_modes: Vec<String>,
+    /// Runtime metadata populated from session responses. Seeded from the
+    /// constructor's `with_default_modes` call (if any) so the picker has
+    /// something to show before the first thread runs.
+    discovered: Arc<std::sync::Mutex<DiscoveredMetadata>>,
 }
 
 impl AcpAdapter {
@@ -63,7 +82,7 @@ impl AcpAdapter {
             cli_path: cli_path.into(),
             subcommand,
             env_vars: Vec::new(),
-            default_modes: Vec::new(),
+            discovered: Arc::new(std::sync::Mutex::new(DiscoveredMetadata::default())),
         }
     }
 
@@ -72,17 +91,12 @@ impl AcpAdapter {
     /// on PATH. Returns `None` otherwise so registration is a graceful no-op.
     ///
     /// Forwards `SSH_AUTH_SOCK` from the parent process to the child so
-    /// kiro-cli's Midway auth works. Without this, Amazon users see opaque
-    /// auth failures in stderr rather than a clear diagnostic.
+    /// kiro-cli's Midway auth works.
     pub fn kiro_cli() -> Option<Self> {
         let path = std::env::var("PANES_KIRO_CLI_PATH")
             .ok()
             .or_else(|| which_binary("kiro-cli"))?;
-        let mut adapter = Self::new("kiro-cli", path, vec!["acp".to_string()])
-            .with_default_modes(vec!["harold".to_string(), "builder".to_string()]);
-        // Forward SSH_AUTH_SOCK so Midway auth works when the user is
-        // already ssh-agent authenticated. kiro-cli handles its own AWS
-        // credentials internally — we don't forward AWS_PROFILE.
+        let mut adapter = Self::new("kiro-cli", path, vec!["acp".to_string()]);
         if let Ok(val) = std::env::var("SSH_AUTH_SOCK") {
             adapter = adapter.env("SSH_AUTH_SOCK", val);
         }
@@ -94,16 +108,122 @@ impl AcpAdapter {
         self
     }
 
-    pub fn with_default_modes(mut self, modes: Vec<String>) -> Self {
-        self.default_modes = modes;
-        self
+    /// Snapshot of the discovered mode list.
+    pub fn discovered_modes(&self) -> Vec<AcpMode> {
+        self.discovered
+            .lock()
+            .map(|g| g.modes.clone())
+            .unwrap_or_default()
     }
 
-    /// List of modes returned by `list_agents()`. Separate accessor so
-    /// panes-app can route its `list_agents` IPC to `AgentAdapter::list_agents`
-    /// once the trait method lands in a later step.
-    pub fn default_modes(&self) -> &[String] {
-        &self.default_modes
+    /// Snapshot of discovered models.
+    pub fn discovered_models(&self) -> Vec<ModelInfo> {
+        self.discovered
+            .lock()
+            .map(|g| g.models.clone())
+            .unwrap_or_default()
+    }
+
+    /// True if we've successfully probed the backend at least once. Used
+    /// by `ensure_probed` to avoid re-probing on every list_agents call.
+    fn has_probed(&self) -> bool {
+        self.discovered
+            .lock()
+            .map(|g| g.probed)
+            .unwrap_or(false)
+    }
+
+    /// Replace the discovered cache with whatever the backend just reported.
+    fn store_discovery(&self, modes: &[AcpMode], models: &[String]) {
+        let Ok(mut guard) = self.discovered.lock() else {
+            return;
+        };
+        guard.probed = true;
+        guard.modes = modes.to_vec();
+        guard.models = models
+            .iter()
+            .map(|id| ModelInfo {
+                id: id.clone(),
+                label: id.clone(),
+                description: String::new(),
+            })
+            .collect();
+    }
+
+    fn first_discovered_mode_id(&self) -> Option<String> {
+        self.discovered
+            .lock()
+            .ok()
+            .and_then(|g| g.modes.first().map(|m| m.id.clone()))
+    }
+
+    /// If we haven't successfully probed yet, spin up a lightweight
+    /// discovery session (spawn + initialize + session/new + shutdown) to
+    /// learn what modes/models the backend advertises. Idempotent: once
+    /// probed, returns without doing work.
+    ///
+    /// Called lazily from `list_agents`/`list_models` so the picker gets
+    /// the real list the first time the user opens it. Real `spawn`/
+    /// `resume` calls also refresh the cache, so subsequent list calls
+    /// stay fresh.
+    ///
+    /// Probe failures are swallowed — an empty picker is better than a
+    /// fatal error up the IPC. The session layer logs the underlying error.
+    async fn ensure_probed(&self) {
+        if self.has_probed() {
+            return;
+        }
+        // Probe against the adapter's own CWD (safe neutral directory) —
+        // session/new requires one, and it shouldn't matter for a discovery
+        // session that never prompts. Use a temp dir so the backend doesn't
+        // accidentally touch a real workspace.
+        let cwd = std::env::temp_dir();
+        let mut transport = match self.spawn_transport(&cwd).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, adapter = %self.name, "discovery: spawn failed");
+                return;
+            }
+        };
+
+        if let Err(e) = session::initialize(
+            &mut transport,
+            &ClientInfo {
+                name: "panes",
+                version: env!("CARGO_PKG_VERSION"),
+            },
+        )
+        .await
+        {
+            tracing::warn!(error = %e, adapter = %self.name, "discovery: initialize failed");
+            transport.shutdown().await;
+            return;
+        }
+
+        match session::new_session(&mut transport, &cwd).await {
+            Ok(ns) => {
+                self.store_discovery(&ns.available_modes, &ns.available_models);
+                tracing::info!(
+                    adapter = %self.name,
+                    modes = ns.available_modes.len(),
+                    models = ns.available_models.len(),
+                    "discovery: cached backend metadata",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, adapter = %self.name, "discovery: session/new failed");
+            }
+        }
+        transport.shutdown().await;
+    }
+
+    /// Extract the child-spawning helper so the probe can share it with
+    /// the real `spawn`/`resume` paths without duplicating Command setup.
+    async fn spawn_transport(&self, cwd: &Path) -> Result<AcpTransport> {
+        let cmd = self.build_command(cwd);
+        AcpTransport::spawn(cmd)
+            .await
+            .with_context(|| format!("failed to spawn ACP backend '{}'", &self.cli_path))
     }
 
     fn build_command(&self, cwd: &Path) -> Command {
@@ -168,12 +288,21 @@ impl AgentAdapter for AcpAdapter {
             .await
             .context("ACP session/new failed")?;
 
+        // Cache the backend-reported mode + model lists so `list_agents` /
+        // `list_models` can surface them in the UI. Subsequent sessions
+        // update the cache (backend may have reloaded tools between runs).
+        self.store_discovery(&new_sess.available_modes, &new_sess.available_models);
+
         // Mode: prefer the caller's override; otherwise fall back to the
-        // adapter's first registered mode; otherwise skip `set_mode` entirely.
-        // Sending "default" as a modeId to kiro-cli (which expects harold /
-        // builder / <named-agent>) would fail with no clear diagnostic.
-        if let Some(mode) = agent.or_else(|| self.default_modes.first().map(|s| s.as_str())) {
-            let _ = session::set_mode(&mut transport, &new_sess.session_id, mode).await;
+        // first discovered mode; otherwise skip `set_mode` entirely.
+        // Sending an unrecognized modeId to kiro-cli would fail with no
+        // clear diagnostic.
+        let discovered_mode = self.first_discovered_mode_id();
+        if let Some(mode) = agent
+            .map(String::from)
+            .or(discovered_mode)
+        {
+            let _ = session::set_mode(&mut transport, &new_sess.session_id, &mode).await;
         }
 
         // Model (optional)
@@ -189,16 +318,24 @@ impl AgentAdapter for AcpAdapter {
             .await
             .context("ACP session/prompt failed")?;
 
+        let effective_model = resolved_model
+            .or_else(|| new_sess.available_models.first().cloned())
+            .unwrap_or_else(|| "unknown".to_string());
         let init = SessionInit {
             session_id: new_sess.session_id.clone(),
-            model: resolved_model
-                .or_else(|| new_sess.available_models.first().cloned())
-                .unwrap_or_else(|| "unknown".to_string()),
+            model: effective_model.clone(),
             cwd: workspace_path.to_string_lossy().to_string(),
             tools: Vec::new(),
         };
 
-        let session = AcpSession::new(transport, init, new_sess.session_id, prompt_req_id);
+        let session = AcpSession::new(
+            transport,
+            init,
+            new_sess.session_id,
+            prompt_req_id,
+            &prompt_text,
+            &effective_model,
+        );
         Ok(Box::new(session))
     }
 
@@ -224,19 +361,23 @@ impl AgentAdapter for AcpAdapter {
         )
         .await?;
 
-        let resumed = session::load_session(&mut transport, session_id, workspace_path)
+        let load_result = session::load_session(&mut transport, session_id, workspace_path)
             .await
-            .unwrap_or(false);
-        let effective_session_id = if resumed {
+            .unwrap_or_default();
+        let effective_session_id = if load_result.resumed {
+            // Backend confirmed the load — persist whatever it reported.
+            self.store_discovery(&load_result.available_modes, &load_result.available_models);
             session_id.to_string()
         } else {
             tracing::info!(session_id, "session/load did not resume — falling back to session/new");
             let ns = session::new_session(&mut transport, workspace_path).await?;
+            self.store_discovery(&ns.available_modes, &ns.available_models);
             ns.session_id
         };
 
-        if let Some(mode) = agent.or_else(|| self.default_modes.first().map(|s| s.as_str())) {
-            let _ = session::set_mode(&mut transport, &effective_session_id, mode).await;
+        let discovered_mode = self.first_discovered_mode_id();
+        if let Some(mode) = agent.map(String::from).or(discovered_mode) {
+            let _ = session::set_mode(&mut transport, &effective_session_id, &mode).await;
         }
 
         if let Some(m) = model {
@@ -258,20 +399,50 @@ impl AgentAdapter for AcpAdapter {
         let prompt_req_id =
             session::prompt(&mut transport, &effective_session_id, &prompt_text).await?;
 
+        let effective_model = model.unwrap_or("unknown").to_string();
         let init = SessionInit {
             session_id: effective_session_id.clone(),
-            model: model.unwrap_or("unknown").to_string(),
+            model: effective_model.clone(),
             cwd: workspace_path.to_string_lossy().to_string(),
             tools: Vec::new(),
         };
-        let session = AcpSession::new(transport, init, effective_session_id, prompt_req_id);
+        let session = AcpSession::new(
+            transport,
+            init,
+            effective_session_id,
+            prompt_req_id,
+            &prompt_text,
+            &effective_model,
+        );
         Ok(Box::new(session))
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        // Models are backend-owned and only known after `session/new` runs.
-        // Returning an empty list tells the UI to hide the model picker.
-        Ok(Vec::new())
+        // Backend-owned — trigger a probe on first call so the picker
+        // reflects real capabilities before the user sends a prompt.
+        self.ensure_probed().await;
+        Ok(self.discovered_models())
+    }
+
+    async fn list_agents(&self) -> Result<Vec<AgentInfo>> {
+        // Backend-owned — each entry's `name` is the modeId sent to
+        // session/set_mode. On first call we spin up a lightweight probe
+        // session to learn what the backend actually advertises; after
+        // that the cache stays fresh via real spawn/resume calls.
+        //
+        // `AgentInfo.name` is the protocol identifier (the modeId we send
+        // back via set_mode), not a display string — `description` carries
+        // the human-readable blurb that the picker renders below it.
+        self.ensure_probed().await;
+        Ok(self
+            .discovered_modes()
+            .into_iter()
+            .map(|m| AgentInfo {
+                name: m.id.clone(),
+                model: None,
+                description: m.description.or(m.name),
+            })
+            .collect())
     }
 }
 
@@ -296,9 +467,12 @@ impl AcpSession {
         init: SessionInit,
         session_id: String,
         prompt_req_id: u64,
+        prompt_text: &str,
+        model: &str,
     ) -> Self {
         let mut ctx = TranslationContext::new();
-        ctx.begin_prompt(prompt_req_id);
+        ctx.cost.set_model(model);
+        ctx.begin_prompt(prompt_req_id, prompt_text);
         let shared = Arc::new(Shared {
             transport: Mutex::new(Some(transport)),
             ctx: Mutex::new(ctx),
@@ -401,6 +575,16 @@ impl AgentSession for AcpSession {
             t.shutdown().await;
         }
         Ok(())
+    }
+
+    async fn set_model(&self, model: &str) -> Result<()> {
+        // ACP has a first-class session/set_model that works on a live session.
+        let session_id = self.shared.session_id.clone();
+        let mut guard = self.shared.transport.lock().await;
+        let transport = guard
+            .as_mut()
+            .ok_or_else(|| anyhow!("session already shut down"))?;
+        session::set_model(transport, &session_id, model).await
     }
 }
 
@@ -700,11 +884,106 @@ mod tests {
     // ─── AcpAdapter construction ──────────────────────────────────────────
 
     #[test]
-    fn adapter_exposes_name_and_default_modes() {
-        let a = AcpAdapter::new("kiro-cli", "/bin/true", vec!["acp".to_string()])
-            .with_default_modes(vec!["harold".to_string(), "default".to_string()]);
+    fn adapter_starts_with_empty_discovery() {
+        let a = AcpAdapter::new("kiro-cli", "/bin/true", vec!["acp".to_string()]);
         assert_eq!(a.name(), "kiro-cli");
-        assert_eq!(a.default_modes(), &["harold".to_string(), "default".to_string()]);
+        assert!(a.discovered_modes().is_empty());
+        assert!(a.discovered_models().is_empty());
+        assert!(!a.has_probed(), "never probed → has_probed false");
+    }
+
+    #[test]
+    fn store_discovery_marks_probed_and_replaces_lists() {
+        let a = AcpAdapter::new("x", "/bin/true", vec![]);
+        let backend_modes = vec![
+            AcpMode { id: "mode-a".to_string(), name: Some("Mode A".to_string()), description: None },
+            AcpMode { id: "mode-b".to_string(), name: Some("Mode B".to_string()), description: None },
+        ];
+        a.store_discovery(&backend_modes, &["claude-sonnet".into()]);
+        assert!(a.has_probed());
+        let modes = a.discovered_modes();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].id, "mode-a");
+        let models = a.discovered_models();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "claude-sonnet");
+    }
+
+    #[test]
+    fn store_discovery_replaces_prior_cache_even_when_empty() {
+        // Rationale: if the backend removes a mode between sessions (e.g.
+        // config change), the UI must stop offering it. Always replace.
+        let a = AcpAdapter::new("x", "/bin/true", vec![]);
+        let first = vec![AcpMode { id: "old".to_string(), name: None, description: None }];
+        a.store_discovery(&first, &[]);
+        assert_eq!(a.discovered_modes().len(), 1);
+
+        a.store_discovery(&[], &[]);
+        assert!(a.discovered_modes().is_empty(), "empty response clears cache");
+        assert!(a.has_probed(), "probed flag stays true after empty discovery");
+    }
+
+    #[test]
+    fn first_discovered_mode_id_is_none_without_discovery() {
+        let a = AcpAdapter::new("x", "/bin/true", vec![]);
+        assert!(a.first_discovered_mode_id().is_none());
+    }
+
+    #[test]
+    fn first_discovered_mode_id_returns_first_after_store() {
+        let a = AcpAdapter::new("x", "/bin/true", vec![]);
+        a.store_discovery(
+            &[
+                AcpMode { id: "mode-a".into(), name: None, description: None },
+                AcpMode { id: "mode-b".into(), name: None, description: None },
+            ],
+            &[],
+        );
+        assert_eq!(a.first_discovered_mode_id().as_deref(), Some("mode-a"));
+    }
+
+    #[tokio::test]
+    async fn list_agents_trait_method_returns_discovered_modes() {
+        let a = AcpAdapter::new("kiro-cli", "/bin/true", vec![]);
+        a.store_discovery(
+            &[
+                AcpMode { id: "mode-a".into(), name: Some("Mode A".into()), description: None },
+                AcpMode { id: "mode-b".into(), name: None, description: None },
+            ],
+            &[],
+        );
+        let agents = AgentAdapter::list_agents(&a).await.expect("ok");
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].name, "mode-a");
+        assert_eq!(agents[0].description.as_deref(), Some("Mode A"));
+        assert_eq!(agents[1].name, "mode-b");
+        assert!(agents[1].description.is_none());
+    }
+
+    #[tokio::test]
+    async fn ensure_probed_is_idempotent_after_successful_probe() {
+        let a = AcpAdapter::new("x", "/bin/true", vec![]);
+        // Simulate a successful probe having run.
+        a.store_discovery(&[AcpMode { id: "mode-a".into(), name: None, description: None }], &[]);
+        let start = std::time::Instant::now();
+        a.ensure_probed().await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "ensure_probed after successful probe must be a no-op, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_probed_against_broken_binary_does_not_panic() {
+        // No seed, bad binary → probe fails silently, list stays empty.
+        let a = AcpAdapter::new("x", "/nonexistent/bin/definitely-not-here", vec![]);
+        a.ensure_probed().await;
+        assert!(a.discovered_modes().is_empty(), "empty list, not a crash");
+        assert!(
+            !a.has_probed(),
+            "probe that fails does not mark as probed so next call retries"
+        );
     }
 
     #[test]
@@ -750,7 +1029,7 @@ mod tests {
     fn mock_shared(prompt_req_id: u64, queue: VecDeque<JsonRpcMessage>) -> std::sync::Arc<super::Shared> {
         let transport = AcpTransport::mock(queue);
         let mut ctx = TranslationContext::new();
-        ctx.begin_prompt(prompt_req_id);
+        ctx.begin_prompt(prompt_req_id, "");
         std::sync::Arc::new(super::Shared {
             transport: super::Mutex::new(Some(transport)),
             ctx: super::Mutex::new(ctx),

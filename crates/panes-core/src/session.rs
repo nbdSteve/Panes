@@ -737,6 +737,7 @@ impl SessionManager {
             AgentEvent::SubAgentComplete { .. } => "sub_agent_complete",
             AgentEvent::Complete { .. } => "complete",
             AgentEvent::ValidationResult { .. } => "validation_result",
+            AgentEvent::ContextUsage { .. } => "context_usage",
         }
         .to_string();
         let data = serde_json::to_string(event).unwrap_or_default();
@@ -916,6 +917,24 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Switch the active model on a live thread. Unsupported by adapters
+    /// whose backend can't change mid-session (Claude stream-json) — those
+    /// return a clear error the UI surfaces to the user.
+    pub async fn set_thread_model(&self, thread_id: &str, model: &str) -> Result<(), PanesError> {
+        let active = self.active_threads.lock().await;
+        let thread = active
+            .get(thread_id)
+            .ok_or_else(|| PanesError::ThreadNotFound {
+                thread_id: thread_id.to_string(),
+                message: "thread not found".to_string(),
+            })?;
+        thread
+            .session
+            .set_model(model)
+            .await
+            .map_err(|e| PanesError::Internal { message: e.to_string() })
+    }
+
     pub async fn get_snapshot(&self, thread_id: &str) -> Option<git::SnapshotRef> {
         let active = self.active_threads.lock().await;
         active
@@ -942,6 +961,15 @@ impl SessionManager {
             })?;
         adapter.list_models().await
             .map_err(|e| PanesError::Internal { message: e.to_string() })
+    }
+
+    /// Borrow the Arc for a named adapter so callers can reach its
+    /// `list_agents` / `list_models` trait methods. Returns `None` if the
+    /// adapter isn't registered — matches what `list_adapters` would have
+    /// shown. Marked async-safe via Arc cloning rather than returning a
+    /// reference tied to the SessionManager lock lifetime.
+    pub fn adapter(&self, adapter_name: &str) -> Option<Arc<dyn AgentAdapter>> {
+        self.adapters.get(adapter_name).cloned()
     }
 }
 

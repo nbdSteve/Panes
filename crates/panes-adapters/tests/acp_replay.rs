@@ -72,6 +72,7 @@ fn check(spec: &Value, actual: &AgentEvent, context: &str) {
         AgentEvent::SubAgentSpawned { .. } => "SubAgentSpawned",
         AgentEvent::SubAgentComplete { .. } => "SubAgentComplete",
         AgentEvent::ValidationResult { .. } => "ValidationResult",
+        AgentEvent::ContextUsage { .. } => "ContextUsage",
     };
     assert_eq!(
         ty, variant_name,

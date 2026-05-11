@@ -15,7 +15,7 @@ export interface StartThreadParams {
   adapter?: string;
   /**
    * Per-adapter sub-agent or mode name (e.g. `"codebase-analyzer"` for
-   * claude-code, `"harold"` for kiro-cli). Passed to the adapter via its
+   * claude-code, a kiro-cli mode id for kiro-cli). Passed to the adapter via its
    * `--agent`/`set_mode` mechanism. Independent of `adapter`.
    */
   agent?: string;
@@ -94,6 +94,13 @@ export const api = {
     call<void>("resume_thread", params as unknown as Record<string, unknown>),
   cancelThread: (threadId: string) =>
     call<void>("cancel_thread", { threadId }),
+  /**
+   * Switch the active model on a running thread. Errors if the thread's
+   * adapter can't change models mid-session (Claude stream-json); ACP
+   * adapters accept it via session/set_model.
+   */
+  setThreadModel: (threadId: string, model: string) =>
+    call<void>("set_thread_model", { threadId, model }),
   deleteThread: (threadId: string) =>
     call<void>("delete_thread", { threadId }),
   listThreads: (workspaceId: string) =>

@@ -1,4 +1,4 @@
-export type { AgentEvent, ThinkingEvent, TextEvent, ToolRequestEvent, ToolResultEvent, CostUpdateEvent, CompleteEvent, ErrorEvent, SubAgentSpawnedEvent, SubAgentCompleteEvent, FollowUpEvent, ValidationResultEvent, ValidationFinding, ValidationOutcome, FindingSeverity } from "./events";
+export type { AgentEvent, ThinkingEvent, TextEvent, ToolRequestEvent, ToolResultEvent, CostUpdateEvent, CompleteEvent, ErrorEvent, SubAgentSpawnedEvent, SubAgentCompleteEvent, FollowUpEvent, ValidationResultEvent, ContextUsageEvent, ValidationFinding, ValidationOutcome, FindingSeverity } from "./events";
 import type { AgentEvent } from "./events";
 export type { PanesError, PanesErrorType } from "./errors";
 export { parsePanesError, isWorkspaceOccupied, isNoGatePending, isValidationError } from "./errors";

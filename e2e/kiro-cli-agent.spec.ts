@@ -46,7 +46,7 @@ test.describe("kiro-cli agent", () => {
     await expect(triggerValue).toHaveText("kiro-cli");
   });
 
-  test("kiro-cli exposes harold and builder modes in the agent picker", async ({ page }) => {
+  test("kiro-cli exposes discovered modes in the agent picker", async ({ page }) => {
     await addWorkspace(page);
     await openAdapterDropdown(page);
     await page.locator(".config-dropdown-item-label", { hasText: "kiro-cli" }).click();
@@ -59,8 +59,9 @@ test.describe("kiro-cli agent", () => {
     await agentTrigger.click();
 
     // Wait for the menu to show kiro-cli modes (not the stale claude-code list).
-    await expect(page.locator(".config-dropdown-item-label", { hasText: "harold" })).toBeVisible({ timeout: 3000 });
-    await expect(page.locator(".config-dropdown-item-label", { hasText: "builder" })).toBeVisible();
+    // The mock returns neutral ids; production probes the real backend.
+    await expect(page.locator(".config-dropdown-item-label", { hasText: "mode-a" })).toBeVisible({ timeout: 3000 });
+    await expect(page.locator(".config-dropdown-item-label", { hasText: "mode-b" })).toBeVisible();
   });
 
   test("sending a text prompt via kiro-cli produces a completion card", async ({ page }) => {
@@ -132,5 +133,45 @@ test.describe("kiro-cli agent", () => {
     await page.click("button:has-text('Continue')");
 
     await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
+  });
+
+  test("follow-up prompt on a kiro-cli thread resumes via kiro-cli, not claude-code", async ({
+    page,
+  }) => {
+    // Regression: resume_thread ignored the adapter the thread was spawned
+    // with and defaulted to claude-code when the frontend didn't pass a
+    // hint (the UI never does). A kiro-cli follow-up would silently get
+    // routed through the Claude CLI and fail with "failed to resume session"
+    // because kiro-cli's UUID session ids mean nothing to Claude.
+    await addWorkspace(page);
+    await openAdapterDropdown(page);
+    await page.locator(".config-dropdown-item-label", { hasText: "kiro-cli" }).click();
+    await page.waitForTimeout(150);
+
+    // Round 1: start a kiro-cli thread and wait for completion.
+    await page.fill("textarea", "say hi");
+    await page.press("textarea", "Enter");
+    await expect(page.locator(".completion-card")).toBeVisible({ timeout: 5000 });
+
+    const startAdapter = await page.evaluate(async () => {
+      // @ts-expect-error — mock exposes __TAURI_INTERNALS__
+      return window.__TAURI_INTERNALS__.invoke("__test_last_start_thread_adapter");
+    });
+    expect(startAdapter).toBe("kiro-cli");
+
+    // Round 2: send a follow-up. Completion → handleSendPrompt routes to
+    // handleResumeThread → resume_thread IPC.
+    await page.fill("textarea", "and say it again");
+    await page.press("textarea", "Enter");
+    await expect(page.locator(".completion-card")).toHaveCount(2, { timeout: 5000 });
+
+    const resumeAdapter = await page.evaluate(async () => {
+      // @ts-expect-error
+      return window.__TAURI_INTERNALS__.invoke("__test_last_resume_thread_adapter");
+    });
+    expect(
+      resumeAdapter,
+      "kiro-cli thread must resume via kiro-cli, not default to claude-code",
+    ).toBe("kiro-cli");
   });
 });

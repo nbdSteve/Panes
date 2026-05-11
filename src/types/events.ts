@@ -9,7 +9,14 @@ export type AgentEvent =
   | SubAgentSpawnedEvent
   | SubAgentCompleteEvent
   | FollowUpEvent
-  | ValidationResultEvent;
+  | ValidationResultEvent
+  | ContextUsageEvent;
+
+export interface ContextUsageEvent {
+  event_type: "context_usage";
+  /** Fraction of the context window used, 0-100. */
+  percentage: number;
+}
 
 export interface ThinkingEvent {
   event_type: "thinking";
@@ -49,6 +56,12 @@ export interface CostUpdateEvent {
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
   model?: string;
+  /**
+   * True when the adapter couldn't get real token counts from the backend
+   * and tokenized locally as a rough approximation. UI badges these as
+   * "est." so users don't treat them as billing-grade.
+   */
+  estimated?: boolean;
 }
 
 export interface CompleteEvent {

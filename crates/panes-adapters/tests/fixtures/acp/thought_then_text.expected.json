@@ -1,5 +1,6 @@
 [
   { "type": "Thinking", "text_contains": "reasoning about" },
   { "type": "Text", "text_contains": "here is the answer" },
+  { "type": "CostUpdate" },
   { "type": "Complete", "summary_contains": "here is the answer" }
 ]

@@ -152,9 +152,7 @@ fn collect_bare_paths(text: &str, out: &mut Vec<PathCandidate>) {
             continue;
         }
         let (path_part, line_ref) = split_line_ref(trimmed);
-        // Require a file extension or at least one path separator to avoid
-        // matching plain words with trailing punctuation.
-        if !path_part.contains('/') && !path_part.contains('.') {
+        if !is_path_like(path_part) {
             continue;
         }
         out.push(PathCandidate {
@@ -181,6 +179,77 @@ fn looks_like_local_path(s: &str) -> bool {
     // Require either a slash or a dot-extension; filter noise like "e.g." via the
     // caller (extension check there), but that's belt-and-suspenders.
     core.chars().any(|c| c == '/' || c == '.')
+}
+
+/// Common source/config/document extensions treated as path evidence.
+/// Extensions must be 1-6 chars, all ASCII lowercase letters or digits,
+/// and contain at least one letter — pure-digit "extensions" like `.3`
+/// are version-number fragments, not file extensions.
+fn looks_like_extension(ext: &str) -> bool {
+    if ext.is_empty() || ext.len() > 6 {
+        return false;
+    }
+    let mut has_letter = false;
+    for b in ext.bytes() {
+        if b.is_ascii_lowercase() {
+            has_letter = true;
+        } else if !b.is_ascii_digit() {
+            return false;
+        }
+    }
+    has_letter
+}
+
+/// True if the token is specific enough to plausibly be a filesystem path,
+/// not prose. The validator's false-positive rate was unmanageable with the
+/// old rule ("contains / or ."), which flagged things like "and/or",
+/// "stacks/constructs", "e.g", version strings, and slash-separated
+/// alternatives. We now require one of:
+/// - an absolute or workspace-relative path prefix: `/`, `./`, `../`, `~/`
+/// - a known file-extension suffix (lowercase, 1-6 chars)
+/// - at least two path segments where the last one has an extension
+fn is_path_like(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    // Filter out dotted English abbreviations and small numeric strings.
+    let lower = s.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "e.g" | "i.e" | "etc" | "e.g." | "i.e." | "etc." | "vs" | "vs." | "a.m" | "p.m"
+    ) {
+        return false;
+    }
+
+    // Any path-prefix sigil is strong evidence.
+    if s.starts_with('/')
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.starts_with("~/")
+    {
+        return true;
+    }
+
+    // Last segment with a plausible extension.
+    let last_seg = s.rsplit('/').next().unwrap_or(s);
+    if let Some((stem, ext)) = last_seg.rsplit_once('.') {
+        // Stem must be non-empty and the extension must be extension-shaped.
+        // Also reject "2.0"-style version numbers: if the stem is all digits
+        // AND the ext is all digits, treat it as a number, not a path.
+        let stem_all_digits = !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit());
+        let ext_all_digits = !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_digit());
+        if stem_all_digits && ext_all_digits {
+            return false;
+        }
+        if !stem.is_empty() && looks_like_extension(ext) {
+            return true;
+        }
+    }
+
+    // A multi-segment path where NO segment has an extension is almost never
+    // an actual file reference in free text — that's prose like "stacks/
+    // constructs" or "fleet/partition". Require extension evidence.
+    false
 }
 
 fn split_line_ref(s: &str) -> (&str, Option<u32>) {
@@ -417,5 +486,139 @@ mod tests {
         assert!(raws.contains(&"src/a.rs"));
         assert!(raws.contains(&"b/c.txt"));
         assert!(!raws.iter().any(|r| r.starts_with("http")));
+    }
+
+    // ─── prose false-positive regressions ────────────────────────────────
+    //
+    // Every case below was observed as a real false-positive against kiro-cli
+    // output in production. The "validator too sensitive" complaint boiled
+    // down to these three categories, so pin each one down as a test.
+
+    #[tokio::test]
+    async fn slash_separated_prose_alternatives_are_not_citations() {
+        let tmp = TempDir::new().unwrap();
+        let v = CitationValidator::default();
+        let ctx = ctx_for(&tmp, json!({}));
+        let event = complete(
+            "Are the bakery steps a new fleet/partition, or new stacks/constructs \
+             within the existing fleet? We could use and/or logic here.",
+        );
+        let report = v.validate(&event, &ctx).await;
+        assert_eq!(
+            report.outcome,
+            panes_events::ValidationOutcome::Pass,
+            "slash-separated prose alternatives should not be flagged as paths; got: {:?}",
+            report.findings
+        );
+    }
+
+    #[tokio::test]
+    async fn english_abbreviations_are_not_citations() {
+        let tmp = TempDir::new().unwrap();
+        let v = CitationValidator::default();
+        let ctx = ctx_for(&tmp, json!({}));
+        let event = complete(
+            "We should, e.g., prefer shared constructs (i.e., reusable patterns) \
+             and avoid duplication. Etc.",
+        );
+        let report = v.validate(&event, &ctx).await;
+        assert_eq!(
+            report.outcome,
+            panes_events::ValidationOutcome::Pass,
+            "e.g / i.e / etc must not be treated as paths; got: {:?}",
+            report.findings
+        );
+    }
+
+    #[tokio::test]
+    async fn version_numbers_are_not_citations() {
+        let tmp = TempDir::new().unwrap();
+        let v = CitationValidator::default();
+        let ctx = ctx_for(&tmp, json!({}));
+        let event = complete("Upgrade requires 2.0 or 3.14.1 at minimum.");
+        let report = v.validate(&event, &ctx).await;
+        assert_eq!(
+            report.outcome,
+            panes_events::ValidationOutcome::Pass,
+            "bare version strings should not be flagged; got: {:?}",
+            report.findings
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_word_with_slash_but_no_extension_is_not_flagged() {
+        // The old heuristic accepted any token containing `/` as a path
+        // candidate. That was wrong: English prose uses slashes as
+        // alternation separators. Without a file extension or path-prefix
+        // sigil we can't tell a file path from prose, so we err on the side
+        // of passing.
+        let tmp = TempDir::new().unwrap();
+        let v = CitationValidator::default();
+        let ctx = ctx_for(&tmp, json!({}));
+        let event = complete("The input/output boundary determines the read/write policy.");
+        let report = v.validate(&event, &ctx).await;
+        assert_eq!(report.outcome, panes_events::ValidationOutcome::Pass);
+    }
+
+    #[tokio::test]
+    async fn explicit_relative_path_prefix_still_flags_missing_files() {
+        // Counter-check: the tightened heuristic must not silently drop real
+        // citations. If the agent writes "./src/foo.rs" or "src/foo.rs",
+        // missing files still need to be reported.
+        let tmp = TempDir::new().unwrap();
+        let v = CitationValidator::default();
+        let ctx = ctx_for(&tmp, json!({}));
+        let event = complete("Check ./src/foo.rs for the bug.");
+        let report = v.validate(&event, &ctx).await;
+        assert_eq!(report.outcome, panes_events::ValidationOutcome::Fail);
+        assert!(report.findings[0].message.contains("does not exist"));
+    }
+
+    // ─── is_path_like unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn is_path_like_accepts_explicit_prefixes() {
+        assert!(is_path_like("/etc/hosts"));
+        assert!(is_path_like("./src/foo.rs"));
+        assert!(is_path_like("../common/util.ts"));
+        assert!(is_path_like("~/projects/x"));
+    }
+
+    #[test]
+    fn is_path_like_accepts_paths_with_file_extensions() {
+        assert!(is_path_like("src/main.rs"));
+        assert!(is_path_like("README.md"));
+        assert!(is_path_like("package.json"));
+        assert!(is_path_like("foo.tsx"));
+    }
+
+    #[test]
+    fn is_path_like_rejects_prose_slashes() {
+        assert!(!is_path_like("and/or"));
+        assert!(!is_path_like("read/write"));
+        assert!(!is_path_like("stacks/constructs"));
+        assert!(!is_path_like("fleet/partition"));
+    }
+
+    #[test]
+    fn is_path_like_rejects_abbreviations() {
+        assert!(!is_path_like("e.g"));
+        assert!(!is_path_like("i.e"));
+        assert!(!is_path_like("etc"));
+        assert!(!is_path_like("vs"));
+    }
+
+    #[test]
+    fn is_path_like_rejects_version_numbers() {
+        assert!(!is_path_like("2.0"));
+        assert!(!is_path_like("3.14"));
+        assert!(!is_path_like("1.2.3"));
+    }
+
+    #[test]
+    fn is_path_like_rejects_uppercase_extensions() {
+        // Source file extensions are conventionally lowercase. Accepting
+        // uppercase would re-enable false positives from acronyms.
+        assert!(!is_path_like("e.G"));
     }
 }

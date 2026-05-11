@@ -224,6 +224,7 @@ fn build_events(scenario: &FakeScenario) -> Vec<AgentEvent> {
                 cache_creation_tokens: 0,
                 total_usd: 0.003,
                 model: "fake-model".to_string(),
+                estimated: false,
             });
             events.push(AgentEvent::Text {
                 text: response.clone(),
@@ -266,6 +267,7 @@ fn build_events(scenario: &FakeScenario) -> Vec<AgentEvent> {
                 cache_creation_tokens: 0,
                 total_usd: 0.012,
                 model: "fake-model".to_string(),
+                estimated: false,
             });
             events.push(AgentEvent::Text {
                 text: response.clone(),
@@ -308,6 +310,7 @@ fn build_events(scenario: &FakeScenario) -> Vec<AgentEvent> {
                 cache_creation_tokens: 0,
                 total_usd: 0.025,
                 model: "fake-model".to_string(),
+                estimated: false,
             });
             events.push(AgentEvent::Text {
                 text: response.clone(),
@@ -348,6 +351,7 @@ fn build_events(scenario: &FakeScenario) -> Vec<AgentEvent> {
                 cache_creation_tokens: 0,
                 total_usd: 0.018,
                 model: "fake-model".to_string(),
+                estimated: false,
             });
             events.push(AgentEvent::Text {
                 text: response.clone(),
@@ -389,6 +393,7 @@ fn build_events(scenario: &FakeScenario) -> Vec<AgentEvent> {
                     cache_creation_tokens: 0,
                     total_usd: 0.005 * (i as f64 + 1.0),
                     model: "fake-model".to_string(),
+                estimated: false,
                 });
             }
             events.push(AgentEvent::Text {

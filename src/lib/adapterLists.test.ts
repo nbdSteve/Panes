@@ -8,7 +8,7 @@ const FALLBACK: ModelInfo[] = [
 
 describe("refreshAdapterLists", () => {
   it("returns both lists when the backend succeeds", async () => {
-    const agents: AgentInfo[] = [{ name: "harold", model: null, description: "" }];
+    const agents: AgentInfo[] = [{ name: "mode-a", model: null, description: "" }];
     const models: ModelInfo[] = [{ id: "sonnet", label: "Sonnet", description: "" }];
     const api = {
       listAgents: vi.fn().mockResolvedValue(agents),

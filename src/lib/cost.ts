@@ -2,6 +2,7 @@ export interface ThreadEvent {
   event_type: string;
   total_usd?: number;
   total_cost_usd?: number;
+  estimated?: boolean;
 }
 
 export interface CostThread {
@@ -40,4 +41,15 @@ export function calculateRunningCost(events: ThreadEvent[]): number {
     }
   }
   return total + turnEstimate;
+}
+
+/**
+ * True if any cost_update event on this thread was locally estimated
+ * (adapter couldn't get real token counts). Used to badge the cost
+ * display as "est." so users know the number isn't billing-grade.
+ */
+export function threadCostIsEstimated(thread: CostThread): boolean {
+  return thread.events.some(
+    (e) => e.event_type === "cost_update" && e.estimated === true,
+  );
 }

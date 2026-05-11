@@ -8,7 +8,7 @@
 //!
 //! Two special cases the translator owns:
 //! - **Text coalescing**: `agent_message_chunk` arrives in tiny pieces. We
-//!   buffer chunks that arrive within 50ms of each other into a single
+//!   buffer chunks that arrive close together in time into a single
 //!   `AgentEvent::Text` to keep the UI from exploding.
 //! - **Permission request bookkeeping**: when `session/request_permission`
 //!   arrives, we record `tool_call_id → acp_request_id` so the adapter's
@@ -20,16 +20,66 @@ use std::time::Instant;
 use panes_events::{AgentEvent, RiskLevel};
 use serde_json::Value;
 
+use super::cost::CostEstimator;
 use super::transport::JsonRpcMessage;
 
-/// Text chunks arriving within this gap are coalesced into a single `Text` event.
-const COALESCE_GAP_MS: u128 = 50;
+/// Text chunks arriving within this gap are coalesced into a single `Text`
+/// event. kiro-cli streams tokens 50-175ms apart, so 50ms (the original
+/// Claude-tuned value) splits almost every chunk into its own event. We
+/// raise to 300ms: large enough that normal token streaming accumulates,
+/// small enough that distinct pauses (LLM thinking mid-turn) still become
+/// separate events. The UI additionally merges adjacent Text events into
+/// a single card — see `groupToolEvents.ts`.
+const COALESCE_GAP_MS: u128 = 300;
 
 /// Pending tool info tracked across a `tool_call` → `tool_call_update` pair.
 #[derive(Debug, Clone)]
 struct PendingTool {
     tool_name: String,
     started_at: Instant,
+    /// If this tool_call represents an orchestrator delegating to a
+    /// sub-agent, the name/kind of that sub-agent. A corresponding
+    /// `SubAgentComplete` is emitted when the tool_call_update arrives.
+    sub_agent: Option<String>,
+}
+
+/// Returns true if a tool call's name/kind looks like an agent dispatch —
+/// orchestrator modes (e.g. tsuki-orchestrator) invoke sub-agents as tool
+/// calls. We recognise the common naming conventions seen in kiro-cli
+/// traffic and in Claude's Task tool. Extend this list when new backends
+/// surface new delegation tools.
+///
+/// Extracts the child agent's name from either:
+/// - `rawInput.subagent_type` / `rawInput.agent` / `rawInput.agent_type`
+///   — the pattern Claude's Task tool uses
+/// - the tool name itself when it embeds the target (e.g. `dispatch:foo`)
+/// Returns `None` if the call doesn't look like delegation.
+fn detect_sub_agent_dispatch(kind: &str, raw_input: &Value) -> Option<String> {
+    let lower = kind.to_ascii_lowercase();
+    let is_dispatch = lower == "task"
+        || lower == "agent"
+        || lower == "dispatch_agent"
+        || lower == "dispatch"
+        || lower == "run_agent"
+        || lower == "call_agent"
+        || lower.starts_with("agent_")
+        || lower.contains("_agent")
+        || lower.contains("subagent");
+    if !is_dispatch {
+        return None;
+    }
+    // Try to extract the sub-agent's identity from rawInput.
+    if let Some(obj) = raw_input.as_object() {
+        for field in ["subagent_type", "agent", "agent_type", "name", "mode"] {
+            if let Some(v) = obj.get(field).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    // Fall back to the kind itself so the UI at least shows *something*.
+    Some(kind.to_string())
 }
 
 /// One option offered by the backend in `session/request_permission`.
@@ -67,6 +117,10 @@ pub(crate) struct TranslationContext {
     accumulated_summary: String,
     /// Turn counter for Complete.turns.
     turns: u32,
+    /// Running local cost estimator. The backend doesn't report real token
+    /// counts for ACP, so we tokenize everything we see ourselves. Emits
+    /// CostUpdate with `estimated: true` so the UI can badge it as "est."
+    pub(crate) cost: CostEstimator,
 }
 
 impl TranslationContext {
@@ -75,13 +129,16 @@ impl TranslationContext {
     }
 
     /// Records that a prompt has just been sent with the given request id.
-    /// The next matching response will emit Complete.
-    pub fn begin_prompt(&mut self, req_id: u64) {
+    /// The next matching response will emit Complete. `prompt_text` is the
+    /// full text (including any prepended briefing / memories) so the cost
+    /// estimator can count the input tokens.
+    pub fn begin_prompt(&mut self, req_id: u64, prompt_text: &str) {
         self.prompt_req_id = Some(req_id);
         self.prompt_started_at = Some(Instant::now());
         self.accumulated_summary.clear();
         self.last_text = None;
         self.turns = self.turns.saturating_add(1);
+        self.cost.record_input(prompt_text);
     }
 
     /// Take the pending permission record for a tool-use id so the adapter
@@ -119,8 +176,17 @@ impl TranslationContext {
             return self.handle_session_update(msg);
         }
 
-        // _kiro.dev/metadata — silently consumed
+        // _kiro.dev/metadata carries context-window usage as a percentage.
+        // Translate to ContextUsage so the UI can render a fill bar.
         if msg.is_method("_kiro.dev/metadata") {
+            if let Some(pct) = msg
+                .params
+                .as_ref()
+                .and_then(|p| p.get("contextUsagePercentage"))
+                .and_then(|v| v.as_f64())
+            {
+                return vec![AgentEvent::ContextUsage { percentage: pct }];
+            }
             return Vec::new();
         }
 
@@ -170,10 +236,20 @@ impl TranslationContext {
             summary.push_str(&format!("[stop reason: {stop_reason}]"));
         }
 
+        // Emit a CostUpdate snapshot before Complete so the UI can settle
+        // final numbers. Marked estimated — real cost lives in the user's
+        // Bedrock bill, our number is a rough char/4 approximation.
+        let snapshot = self.cost.snapshot();
+        let total_cost_usd = match &snapshot {
+            AgentEvent::CostUpdate { total_usd, .. } => *total_usd,
+            _ => 0.0,
+        };
+        events.push(snapshot);
+
         self.prompt_req_id = None;
         events.push(AgentEvent::Complete {
             summary,
-            total_cost_usd: 0.0,
+            total_cost_usd,
             duration_ms,
             turns: self.turns,
         });
@@ -241,11 +317,13 @@ impl TranslationContext {
 
         // Also record this as a pending tool so a subsequent tool_call_update
         // can emit a ToolResult with proper duration.
+        let sub_agent = detect_sub_agent_dispatch(&kind, &raw_input);
         self.pending_tools.insert(
             tool_call_id.clone(),
             PendingTool {
                 tool_name: kind.clone(),
                 started_at: Instant::now(),
+                sub_agent: sub_agent.clone(),
             },
         );
 
@@ -290,6 +368,10 @@ impl TranslationContext {
         if text.is_empty() {
             return Vec::new();
         }
+
+        // Every character the model emits counts toward output tokens. We
+        // record thinking chunks too — internal reasoning is billed.
+        self.cost.record_output(&text);
 
         // Thinking chunks are emitted immediately and never coalesced — they
         // typically arrive less frequently and callers want to render them
@@ -344,11 +426,13 @@ impl TranslationContext {
             .cloned()
             .unwrap_or(Value::Null);
 
+        let sub_agent = detect_sub_agent_dispatch(&kind, &raw_input);
         self.pending_tools.insert(
             tool_call_id.clone(),
             PendingTool {
                 tool_name: kind.clone(),
                 started_at: Instant::now(),
+                sub_agent: sub_agent.clone(),
             },
         );
 
@@ -357,13 +441,25 @@ impl TranslationContext {
             events.push(AgentEvent::Text { text });
         }
         events.push(AgentEvent::ToolRequest {
-            id: tool_call_id,
+            id: tool_call_id.clone(),
             tool_name: kind.clone(),
-            description: title,
+            description: title.clone(),
             input: raw_input.clone(),
             needs_approval: false,
             risk_level: classify_acp_risk(&kind, &raw_input),
         });
+        // Sub-agent dispatch tools get a parallel SubAgentSpawned event so
+        // the timeline can render them as a collapsible nested branch.
+        if sub_agent.is_some() {
+            events.push(AgentEvent::SubAgentSpawned {
+                parent_tool_use_id: tool_call_id,
+                description: if title.is_empty() {
+                    sub_agent.unwrap_or_default()
+                } else {
+                    title
+                },
+            });
+        }
         events
     }
 
@@ -405,10 +501,18 @@ impl TranslationContext {
                 other => Some(other.to_string()),
             });
 
+        // Tool output becomes context the model consumes on the next turn,
+        // so it counts toward input tokens. Prefer rawOutput when present
+        // since that's what the backend will actually re-inject.
+        self.cost.record_input(raw_output.as_deref().unwrap_or(&output));
+
         let mut events = Vec::new();
         if let Some((text, _)) = self.last_text.take() {
             events.push(AgentEvent::Text { text });
         }
+        let sub_agent_parent = tool_call_id.clone();
+        let was_sub_agent = pending.sub_agent.is_some();
+        let sub_agent_summary = output.clone();
         events.push(AgentEvent::ToolResult {
             id: tool_call_id,
             tool_name: pending.tool_name,
@@ -417,6 +521,14 @@ impl TranslationContext {
             raw_output,
             duration_ms,
         });
+        if was_sub_agent {
+            // Close the sub-agent branch the timeline opened on tool_call.
+            events.push(AgentEvent::SubAgentComplete {
+                parent_tool_use_id: sub_agent_parent,
+                summary: sub_agent_summary,
+                cost_usd: 0.0, // backend doesn't report per-sub-agent cost today
+            });
+        }
         events
     }
 }
@@ -538,7 +650,7 @@ mod tests {
             }}"#,
         );
         assert!(ctx.translate(&c1).is_empty());
-        assert!(ctx.translate(&c2).is_empty(), "chunks within 50ms should coalesce silently");
+        assert!(ctx.translate(&c2).is_empty(), "chunks within the gap should coalesce silently");
 
         // Trigger a flush by emitting a tool_call (non-text event).
         let tc = msg(
@@ -827,23 +939,30 @@ mod tests {
     // ─── prompt completion ────────────────────────────────────────────────
 
     #[test]
-    fn prompt_response_with_end_turn_emits_complete() {
+    fn prompt_response_with_end_turn_emits_cost_then_complete() {
+        // end_turn now produces CostUpdate (estimated) immediately before
+        // Complete so the UI can settle final numbers at the same moment.
         let mut ctx = TranslationContext::new();
-        ctx.begin_prompt(1);
+        ctx.begin_prompt(1, "test prompt");
         let done = msg(r#"{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}"#);
-        let e = single(ctx.translate(&done));
-        match e {
-            AgentEvent::Complete { turns, .. } => {
-                assert_eq!(turns, 1);
+        let events = ctx.translate(&done);
+        assert_eq!(events.len(), 2, "expected CostUpdate + Complete, got: {events:?}");
+        match &events[0] {
+            AgentEvent::CostUpdate { estimated, .. } => {
+                assert!(*estimated, "ACP cost snapshots must be marked estimated");
             }
-            other => panic!("expected Complete, got {other:?}"),
+            other => panic!("expected CostUpdate first, got {other:?}"),
+        }
+        match &events[1] {
+            AgentEvent::Complete { turns, .. } => assert_eq!(*turns, 1),
+            other => panic!("expected Complete second, got {other:?}"),
         }
     }
 
     #[test]
     fn prompt_response_non_end_turn_annotates_summary() {
         let mut ctx = TranslationContext::new();
-        ctx.begin_prompt(1);
+        ctx.begin_prompt(1, "test prompt");
         let chunk = msg(
             r#"{"jsonrpc":"2.0","method":"session/update","params":{
                 "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}
@@ -852,21 +971,23 @@ mod tests {
         let _ = ctx.translate(&chunk);
         let done = msg(r#"{"jsonrpc":"2.0","id":1,"result":{"stopReason":"max_tokens"}}"#);
         let events = ctx.translate(&done);
-        // We expect a flushed text event, then a Complete.
-        assert_eq!(events.len(), 2);
-        match &events[1] {
+        // Flushed Text, then CostUpdate, then Complete.
+        assert_eq!(events.len(), 3, "got: {events:?}");
+        assert!(matches!(events[0], AgentEvent::Text { .. }));
+        assert!(matches!(events[1], AgentEvent::CostUpdate { .. }));
+        match &events[2] {
             AgentEvent::Complete { summary, .. } => {
                 assert!(summary.contains("hi"));
                 assert!(summary.contains("max_tokens"));
             }
-            other => panic!("expected Complete, got {other:?}"),
+            other => panic!("expected Complete last, got {other:?}"),
         }
     }
 
     #[test]
     fn prompt_response_with_error_emits_error_event() {
         let mut ctx = TranslationContext::new();
-        ctx.begin_prompt(1);
+        ctx.begin_prompt(1, "test prompt");
         let done = msg(
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"context overflow"}}"#,
         );
@@ -883,7 +1004,7 @@ mod tests {
     #[test]
     fn mismatched_response_id_is_not_treated_as_complete() {
         let mut ctx = TranslationContext::new();
-        ctx.begin_prompt(5);
+        ctx.begin_prompt(5, "test prompt");
         let stray = msg(r#"{"jsonrpc":"2.0","id":99,"result":{"stopReason":"end_turn"}}"#);
         assert!(ctx.translate(&stray).is_empty());
     }
@@ -891,9 +1012,20 @@ mod tests {
     // ─── metadata + unknown ───────────────────────────────────────────────
 
     #[test]
-    fn metadata_notification_is_silently_consumed() {
+    fn metadata_with_context_usage_emits_context_usage_event() {
         let mut ctx = TranslationContext::new();
         let meta = msg(r#"{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"contextUsagePercentage":42.0}}"#);
+        let e = single(ctx.translate(&meta));
+        match e {
+            AgentEvent::ContextUsage { percentage } => assert!((percentage - 42.0).abs() < f64::EPSILON),
+            other => panic!("expected ContextUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_without_context_usage_is_silently_consumed() {
+        let mut ctx = TranslationContext::new();
+        let meta = msg(r#"{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{}}"#);
         assert!(ctx.translate(&meta).is_empty());
     }
 
@@ -1014,16 +1146,128 @@ mod tests {
         assert_eq!(classify_acp_risk("delete", &Value::Null), RiskLevel::High);
     }
 
+    // ─── sub-agent dispatch detection ─────────────────────────────────────
+
+    #[test]
+    fn detect_sub_agent_catches_task_tool_with_subagent_type() {
+        // Claude's Task tool uses subagent_type in rawInput.
+        let raw = serde_json::json!({"subagent_type": "codebase-analyzer", "prompt": "..."});
+        assert_eq!(
+            detect_sub_agent_dispatch("task", &raw).as_deref(),
+            Some("codebase-analyzer")
+        );
+    }
+
+    #[test]
+    fn detect_sub_agent_catches_dispatch_agent_variants() {
+        let raw = serde_json::json!({"agent": "tsuki-executor"});
+        assert_eq!(
+            detect_sub_agent_dispatch("dispatch_agent", &raw).as_deref(),
+            Some("tsuki-executor")
+        );
+    }
+
+    #[test]
+    fn detect_sub_agent_falls_back_to_kind_when_input_lacks_name() {
+        let raw = serde_json::json!({});
+        assert_eq!(
+            detect_sub_agent_dispatch("run_agent", &raw).as_deref(),
+            Some("run_agent")
+        );
+    }
+
+    #[test]
+    fn detect_sub_agent_none_for_regular_tools() {
+        assert!(detect_sub_agent_dispatch("read", &Value::Null).is_none());
+        assert!(detect_sub_agent_dispatch("edit", &Value::Null).is_none());
+        assert!(detect_sub_agent_dispatch("execute", &Value::Null).is_none());
+        // Word-boundary-like: "agent_mode_tool" is a real concern but we
+        // currently accept `_agent` as evidence of delegation. That's OK
+        // unless a backend names a non-dispatch tool like "set_agent_hat"
+        // — if that happens, tighten the heuristic.
+    }
+
+    #[test]
+    fn tool_call_with_sub_agent_dispatch_emits_spawn_event() {
+        let mut ctx = TranslationContext::new();
+        let tc = msg(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{
+                "update":{"sessionUpdate":"tool_call","toolCallId":"tc-9",
+                          "kind":"task","title":"Research the API",
+                          "rawInput":{"subagent_type":"codebase-analyzer","prompt":"how does X work?"}}
+            }}"#,
+        );
+        let events = ctx.translate(&tc);
+        assert_eq!(events.len(), 2, "expected ToolRequest + SubAgentSpawned");
+        match &events[0] {
+            AgentEvent::ToolRequest { tool_name, .. } => assert_eq!(tool_name, "task"),
+            other => panic!("expected ToolRequest first, got {other:?}"),
+        }
+        match &events[1] {
+            AgentEvent::SubAgentSpawned { parent_tool_use_id, description } => {
+                assert_eq!(parent_tool_use_id, "tc-9");
+                assert!(description.contains("Research the API"));
+            }
+            other => panic!("expected SubAgentSpawned second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sub_agent_dispatch_emits_complete_event_on_tool_result() {
+        let mut ctx = TranslationContext::new();
+        let tc = msg(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{
+                "update":{"sessionUpdate":"tool_call","toolCallId":"tc-9","kind":"task",
+                          "title":"research","rawInput":{"subagent_type":"analyzer"}}
+            }}"#,
+        );
+        let _ = ctx.translate(&tc);
+        let done = msg(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{
+                "update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-9",
+                          "status":"completed","output":"Analyzer findings go here"}
+            }}"#,
+        );
+        let events = ctx.translate(&done);
+        assert_eq!(events.len(), 2, "expected ToolResult + SubAgentComplete");
+        match &events[1] {
+            AgentEvent::SubAgentComplete { parent_tool_use_id, summary, .. } => {
+                assert_eq!(parent_tool_use_id, "tc-9");
+                assert!(summary.contains("Analyzer findings"));
+            }
+            other => panic!("expected SubAgentComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_dispatch_tool_call_does_not_emit_sub_agent_events() {
+        let mut ctx = TranslationContext::new();
+        let tc = msg(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{
+                "update":{"sessionUpdate":"tool_call","toolCallId":"tc-read","kind":"read",
+                          "title":"read main.rs","rawInput":{"path":"main.rs"}}
+            }}"#,
+        );
+        let events = ctx.translate(&tc);
+        assert_eq!(events.len(), 1, "regular read tool is single ToolRequest");
+        assert!(matches!(events[0], AgentEvent::ToolRequest { .. }));
+    }
+
     // ─── begin_prompt semantics ───────────────────────────────────────────
 
     #[test]
     fn begin_prompt_increments_turns() {
         let mut ctx = TranslationContext::new();
-        ctx.begin_prompt(1);
-        ctx.begin_prompt(2);
-        ctx.begin_prompt(3);
+        ctx.begin_prompt(1, "test prompt");
+        ctx.begin_prompt(2, "test prompt");
+        ctx.begin_prompt(3, "test prompt");
         let done = msg(r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#);
-        let e = single(ctx.translate(&done));
+        // Now emits CostUpdate + Complete.
+        let events = ctx.translate(&done);
+        let e = events
+            .into_iter()
+            .find(|ev| matches!(ev, AgentEvent::Complete { .. }))
+            .expect("should emit Complete");
         match e {
             AgentEvent::Complete { turns, .. } => assert_eq!(turns, 3),
             other => panic!("expected Complete, got {other:?}"),

@@ -26,11 +26,18 @@ export interface ContextUsage {
 }
 
 export function calculateContextUsage(events: AgentEvent[]): ContextUsage | null {
+  // Prefer an explicit ContextUsage event if the adapter emitted one —
+  // ACP/kiro-cli sends _kiro.dev/metadata { contextUsagePercentage } which
+  // the Rust translator maps to ContextUsageEvent. The backend knows its
+  // own window size better than we can infer from token counts.
+  let latestExplicit: number | null = null;
   let latestTotal = 0;
   let model: string | undefined;
 
   for (const e of events) {
-    if (e.event_type === "cost_update") {
+    if (e.event_type === "context_usage") {
+      latestExplicit = e.percentage;
+    } else if (e.event_type === "cost_update") {
       const total =
         (e.input_tokens ?? 0) +
         (e.cache_read_tokens ?? 0) +
@@ -42,6 +49,14 @@ export function calculateContextUsage(events: AgentEvent[]): ContextUsage | null
         model = e.model;
       }
     }
+  }
+
+  if (latestExplicit !== null) {
+    const level =
+      latestExplicit >= 80 ? "danger" : latestExplicit >= 40 ? "warning" : "ok";
+    // No token count available in this path — display 0 so the tooltip
+    // doesn't show a misleading number.
+    return { inputTokens: 0, percentage: latestExplicit, level };
   }
 
   if (latestTotal === 0) return null;

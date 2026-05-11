@@ -331,9 +331,13 @@ interface MockThread {
 
 const mockThreads: MockThread[] = [];
 const activeThreadMeta = new Map<string, { workspaceId: string; prompt: string; events: Array<Record<string, unknown>>; adapter?: string }>();
-// Test-only: record the adapter of the most recent start_thread call so E2E
-// tests can verify the frontend routed a prompt through the expected backend.
+// Test-only: record the adapter of the most recent start_thread / resume_thread
+// call so E2E tests can verify the frontend routed a prompt through the expected
+// backend. `lastResumeThreadAdapter` captures the *effective* adapter the mock
+// used (stored-adapter > frontend-hint > default), mirroring the production
+// backend's DB lookup in resume_thread.
 let lastStartThreadAdapter: string | null = null;
+let lastResumeThreadAdapter: string | null = null;
 const workspacePathsWithEdits = new Set<string>();
 
 interface PausedThread {
@@ -452,12 +456,20 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     case "resume_thread": {
       const threadId = args?.threadId as string;
       const prompt = args?.prompt as string;
-      const adapter = (args?.adapter as string)
+      // Mirror the production backend: the adapter the thread was spawned
+      // with (stored in activeThreadMeta, analogous to threads.agent_type
+      // on the server) wins. The frontend-supplied hint is only a fallback
+      // for the case where the row is missing. Without this, kiro-cli
+      // follow-ups get routed to claude-code and fail.
+      const storedAdapter = activeThreadMeta.get(threadId)?.adapter;
+      const adapter = storedAdapter
+        || (args?.adapter as string)
         || (args?.agent as string)
         || "claude-code";
       if (adapter !== "claude-code" && adapter !== "kiro-cli") {
         throw new Error(`unknown adapter: ${adapter}`);
       }
+      lastResumeThreadAdapter = adapter;
       const events = buildEvents(prompt);
       activeThreadMeta.set(threadId, {
         workspaceId: args?.workspaceId as string,
@@ -537,6 +549,10 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       }
       return null;
     }
+
+    case "set_thread_model":
+      // Mock accepts any model switch. Real behavior differs per adapter.
+      return null;
 
     case "commit_changes":
       return "mock-commit-hash";
@@ -753,6 +769,13 @@ diff --git a/src/lib.rs b/src/lib.rs
     case "__test_last_start_thread_adapter":
       return lastStartThreadAdapter;
 
+    // Test-only: returns the effective adapter used by the most recent
+    // resume_thread call. Covers the regression where kiro-cli follow-ups
+    // were routed through claude-code because the frontend didn't supply
+    // a hint and the backend defaulted to claude-code.
+    case "__test_last_resume_thread_adapter":
+      return lastResumeThreadAdapter;
+
     case "list_agents":
       if ((args?.adapter as string) === "claude-code") {
         return [
@@ -767,9 +790,12 @@ diff --git a/src/lib.rs b/src/lib.rs
         ];
       }
       if ((args?.adapter as string) === "kiro-cli") {
+        // Neutral fake modes — the real list comes from the backend via
+        // discovery. These two are just enough to exercise the picker in
+        // E2E tests.
         return [
-          { name: "harold", model: null, description: "Harold — default kiro-cli agent" },
-          { name: "builder", model: null, description: "Builder mode — broader tool access" },
+          { name: "mode-a", model: null, description: "Fake mode A" },
+          { name: "mode-b", model: null, description: "Fake mode B" },
         ];
       }
       return [];

@@ -155,6 +155,7 @@ mod tests {
             cache_creation_tokens: 0,
             total_usd: usd,
             model: "test-model".to_string(),
+            estimated: false,
         }
     }
 

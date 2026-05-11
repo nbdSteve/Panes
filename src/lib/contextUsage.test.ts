@@ -83,4 +83,28 @@ describe("calculateContextUsage", () => {
     expect(result!.inputTokens).toBe(20_000);
     expect(result!.percentage).toBeCloseTo(10);
   });
+
+  it("prefers an explicit context_usage event over token-derived percentage", () => {
+    // ACP/kiro-cli sends a percentage directly; the backend knows its own
+    // window better than we can infer from tokens. When both signals are
+    // present, the explicit one wins.
+    const events: AgentEvent[] = [
+      { event_type: "cost_update", total_usd: 0.01, input_tokens: 10_000 },
+      { event_type: "context_usage", percentage: 73 },
+    ];
+    const result = calculateContextUsage(events);
+    expect(result!.percentage).toBe(73);
+    expect(result!.inputTokens).toBe(0); // No token count reported for this path.
+    expect(result!.level).toBe("warning");
+  });
+
+  it("uses latest context_usage when multiple arrive", () => {
+    const events: AgentEvent[] = [
+      { event_type: "context_usage", percentage: 10 },
+      { event_type: "context_usage", percentage: 85 },
+    ];
+    const result = calculateContextUsage(events);
+    expect(result!.percentage).toBe(85);
+    expect(result!.level).toBe("danger");
+  });
 });

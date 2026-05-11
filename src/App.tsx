@@ -40,6 +40,10 @@ function App() {
   const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard" | "validators">("dashboard");
   const [adapters, setAdapters] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  // True while the backend is probing the adapter for its agent/model list.
+  // Drives the "..." loading state in the picker so the user sees that
+  // discovery is in flight rather than an empty dropdown.
+  const [agentsLoading, setAgentsLoading] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [features, setFeatures] = useState<FeatureInfo[]>([]);
   const [routines, setRoutines] = useState<RoutineInfo[]>([]);
@@ -94,10 +98,14 @@ function App() {
     api.listAdapters().then((a) => {
       setAdapters(a);
       if (a.length > 0) {
-        api.listAgents(a[0]).then((ag) => setAgents(ag as AgentInfo[])).catch(() => {});
-        api.listModels(a[0])
-          .then((m) => { const models = m as ModelInfo[]; setModels(models.length > 0 ? models : FALLBACK_MODELS); })
-          .catch(() => setModels(FALLBACK_MODELS));
+        setAgentsLoading(true);
+        refreshAdapterLists(a[0], FALLBACK_MODELS, {
+          listAgents: (name) => api.listAgents(name) as Promise<AgentInfo[]>,
+          listModels: (name) => api.listModels(name) as Promise<ModelInfo[]>,
+        }).then(({ agents, models }) => {
+          setAgents(agents);
+          setModels(models);
+        }).finally(() => setAgentsLoading(false));
       }
     }).catch(() => {});
     api.getFeatures().then(setFeatures).catch(() => {});
@@ -575,6 +583,7 @@ function App() {
             thread={currentThread ?? null}
             adapters={adapters}
             agents={agents}
+            agentsLoading={agentsLoading}
             models={models.length > 0 ? models : FALLBACK_MODELS}
             validatorTypes={validatorTypes}
             defaultConfig={wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current}
@@ -585,14 +594,17 @@ function App() {
               // Re-fetch agents/models when the adapter changes so each backend's
               // mode/model list shows in the picker. The helper swallows errors
               // on both listAgents and listModels — see adapterLists.test.ts.
+              // `agentsLoading` gates the picker on a "..." placeholder so the
+              // user sees that discovery is in flight rather than an empty list.
               if (config.adapter && config.adapter !== prev.adapter) {
+                setAgentsLoading(true);
                 refreshAdapterLists(config.adapter, FALLBACK_MODELS, {
                   listAgents: (a) => api.listAgents(a) as Promise<AgentInfo[]>,
                   listModels: (a) => api.listModels(a) as Promise<ModelInfo[]>,
                 }).then(({ agents, models }) => {
                   setAgents(agents);
                   setModels(models);
-                });
+                }).finally(() => setAgentsLoading(false));
               }
             }}
             onStartThread={(prompt, adapter, agent, model) => handleSendPrompt(activeWs, prompt, adapter, agent, model)}

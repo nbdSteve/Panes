@@ -13,6 +13,24 @@ export type RenderItem =
   | ToolGroup;
 
 export function groupToolEvents(events: AgentEvent[]): RenderItem[] {
+  // Merge adjacent text events into a single rendered event so the UI shows
+  // one streaming card per uninterrupted text block rather than N cards per
+  // chunk. Adapters like kiro-cli emit tokens every ~100ms; without this,
+  // the UI would render 30+ standalone text cards per response.
+  const merged: AgentEvent[] = [];
+  for (const e of events) {
+    const prev = merged[merged.length - 1];
+    if (
+      e.event_type === "text" &&
+      prev?.event_type === "text"
+    ) {
+      merged[merged.length - 1] = { ...prev, text: prev.text + e.text };
+    } else {
+      merged.push(e);
+    }
+  }
+  events = merged;
+
   const resultById = new Map<string, ToolResultEvent>();
   const spawnedByParent = new Map<string, SubAgentSpawnedEvent>();
   const completeByParent = new Map<string, SubAgentCompleteEvent>();

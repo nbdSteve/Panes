@@ -4,6 +4,7 @@
 //! See [`AcpAdapter::kiro_cli`] for the default kiro-cli preset.
 
 pub(crate) mod adapter;
+pub(crate) mod cost;
 pub(crate) mod events;
 pub(crate) mod session;
 pub(crate) mod transport;
@@ -23,7 +24,7 @@ pub fn replay_messages_for_tests(raw_lines: &[String], prompt_req_id: u64) -> Ve
     use crate::acp::transport::JsonRpcMessage;
 
     let mut ctx = TranslationContext::new();
-    ctx.begin_prompt(prompt_req_id);
+    ctx.begin_prompt(prompt_req_id, "");
     let mut out = Vec::new();
     for line in raw_lines {
         let trimmed = line.trim();

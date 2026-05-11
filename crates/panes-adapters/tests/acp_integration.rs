@@ -470,6 +470,101 @@ async fn missing_commands_available_notification_does_not_hang_spawn() {
     );
 }
 
+// ─── live model switching ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn set_model_on_live_acp_session_succeeds() {
+    // ACP's session/set_model works mid-flight. The fake agent acks with
+    // `{}` (see the match arm in tests/bin/fake_acp_agent.rs). The adapter
+    // must route set_model through its transport without erroring.
+    let adapter = adapter_for("slow_prompt");
+    let mut session = adapter
+        .spawn(&workspace(), "keep going", &noop_context(), None, None)
+        .await
+        .expect("spawn");
+    // Pull the first event so the transport is definitely live.
+    let mut stream = session.events();
+    let _first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("first event")
+        .expect("non-empty");
+    // Now swap models. Must not deadlock and must return Ok.
+    tokio::time::timeout(Duration::from_secs(5), session.set_model("claude-3-5-haiku"))
+        .await
+        .expect("set_model must not hang")
+        .expect("ACP set_model should succeed on a live session");
+    session.cancel().await.expect("clean up");
+}
+
+#[tokio::test]
+async fn set_model_after_cancel_errors_without_panicking() {
+    let adapter = adapter_for("text_only");
+    let session = adapter
+        .spawn(&workspace(), "hi", &noop_context(), None, None)
+        .await
+        .expect("spawn");
+    session.cancel().await.expect("cancel");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.set_model("claude-3-5-haiku"),
+    )
+    .await
+    .expect("set_model must not hang after cancel");
+    assert!(
+        result.is_err(),
+        "set_model after cancel must return Err, not silently succeed"
+    );
+}
+
+// ─── streaming UX: event-count bounds ───────────────────────────────────
+
+#[tokio::test]
+async fn realistic_streaming_response_stays_under_event_count_budget() {
+    // Regression for "ACP adapter renders text all jank":
+    // The fake emits 30 text chunks ~100ms apart (matches kiro-cli's real
+    // cadence). The translator must NOT emit one Text event per chunk —
+    // that would flood the UI with separate step cards.
+    //
+    // This caps the budget at ~15 Text events across 30 chunks: allows
+    // some flushing mid-stream (users still see tokens flowing) but
+    // guarantees coalescing kicks in regularly. The 30-chunk → 30-cards
+    // scenario observed from the original kiro-cli test would fail here.
+    let adapter = adapter_for("realistic_streaming");
+    let mut session = adapter
+        .spawn(&workspace(), "describe the repo", &noop_context(), None, None)
+        .await
+        .expect("spawn");
+    let mut stream = session.events();
+    let events = drain(&mut stream, Duration::from_secs(30)).await;
+
+    let text_count = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Text { .. }))
+        .count();
+    assert!(
+        text_count <= 15,
+        "translator emitted {text_count} Text events from 30 chunks — coalescing is broken. \
+         Events: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(AgentEvent::Complete { .. })),
+        "stream should end with Complete"
+    );
+
+    // The concatenated text across all Text events must match the original
+    // response: nothing lost, nothing duplicated.
+    let concatenated: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(concatenated.contains("Brazil"));
+    assert!(concatenated.contains("GroceryPackUWC"));
+    assert!(concatenated.contains("TypeScript"));
+}
+
 // ─── race conditions / idempotency ──────────────────────────────────────
 
 #[tokio::test]

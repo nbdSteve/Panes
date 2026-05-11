@@ -18,6 +18,87 @@ describe("groupToolEvents", () => {
     expect(result.every((r) => r.type === "standalone")).toBe(true);
   });
 
+  it("merges adjacent text events into one rendered card", () => {
+    // Regression: kiro-cli streams tokens every ~100ms. Without merging, the
+    // UI renders one step-card per chunk and the output looks jammed together
+    // because the card padding hides the natural text flow.
+    const events: AgentEvent[] = [
+      { event_type: "text", text: "This is a **Brazil workspace" },
+      { event_type: "text", text: "** containing the" },
+      { event_type: "text", text: " **GroceryPackUWC**" },
+      { event_type: "text", text: " fleet." },
+    ];
+    const result = groupToolEvents(events);
+    expect(result).toHaveLength(1);
+    const merged = (result[0] as { type: "standalone"; event: AgentEvent }).event;
+    expect(merged.event_type).toBe("text");
+    if (merged.event_type === "text") {
+      expect(merged.text).toBe("This is a **Brazil workspace** containing the **GroceryPackUWC** fleet.");
+    }
+  });
+
+  it("does not merge text across non-text events", () => {
+    // A tool call between two text chunks must preserve the boundary so the
+    // narrative reads "...before..." / tool / "...after..." in the timeline.
+    const events: AgentEvent[] = [
+      { event_type: "text", text: "About to " },
+      { event_type: "text", text: "read the file." },
+      { event_type: "tool_request", id: "t1", tool_name: "Read", description: "reading", risk_level: "low", needs_approval: false },
+      { event_type: "tool_result", id: "t1", success: true, output: "contents", duration_ms: 10 },
+      { event_type: "text", text: "Now I understand " },
+      { event_type: "text", text: "the issue." },
+    ];
+    const result = groupToolEvents(events);
+    expect(result).toHaveLength(3);
+    // First: merged text
+    const first = (result[0] as { type: "standalone"; event: AgentEvent }).event;
+    expect(first.event_type === "text" && first.text).toBe("About to read the file.");
+    // Second: tool group
+    expect(result[1].type).toBe("tool_group");
+    // Third: merged text after the tool
+    const third = (result[2] as { type: "standalone"; event: AgentEvent }).event;
+    expect(third.event_type === "text" && third.text).toBe("Now I understand the issue.");
+  });
+
+  it("does not merge text with thinking", () => {
+    // Thinking and text are semantically different — the UI renders them with
+    // different styling. Merging would hide thinking inside a text card.
+    const events: AgentEvent[] = [
+      { event_type: "thinking", text: "considering options" },
+      { event_type: "text", text: "here is the answer" },
+    ];
+    const result = groupToolEvents(events);
+    expect(result).toHaveLength(2);
+  });
+
+  it("collapses a 30-chunk streaming response to a single card", () => {
+    // Regression for "ACP adapter renders text all jank": kiro-cli streams
+    // tokens every ~100ms so the translator can emit dozens of Text events
+    // per response. Without merging, the UI renders 30+ step-cards in a
+    // column, each with its own padding. End-to-end assertion: however many
+    // chunks the translator emits, the UI-facing output is one text item.
+    const chunks = [
+      "This ", "is ", "a ", "**Brazil ", "workspace** ",
+      "containing ", "the ", "**GroceryPackUWC** ", "fleet ",
+      "— ", "a ", "UWC ", "(Universal ", "Workc", "ell) ",
+      "project ", "for ", "grocery ", "automation. ",
+      "It ", "has ", "3 ", "packages:\n\n",
+      "1. ", "**GroceryPackUWCCDK** ", "— ", "CDK ",
+      "infrastructure ", "(Type", "Script).",
+    ];
+    const events: AgentEvent[] = chunks.map((text) => ({
+      event_type: "text" as const,
+      text,
+    }));
+    const result = groupToolEvents(events);
+    expect(result).toHaveLength(1);
+    const merged = (result[0] as { type: "standalone"; event: AgentEvent }).event;
+    expect(merged.event_type).toBe("text");
+    if (merged.event_type === "text") {
+      expect(merged.text).toBe(chunks.join(""));
+    }
+  });
+
   it("pairs tool_request with matching tool_result", () => {
     const events: AgentEvent[] = [
       { event_type: "tool_request", id: "t1", tool_name: "Bash", description: "ls", risk_level: "low", needs_approval: false },

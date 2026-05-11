@@ -6,11 +6,10 @@ import type { WorkspaceInfo, ThreadInfo, AgentEvent, AgentInfo, ConfigPrefs, Mod
 import type { ValidatorTypeInfo } from "../types";
 import type { RepoFileStatus, CommentThread } from "../types/diff";
 import GateCard from "./GateCard";
-import ValidationResultCard from "./ValidationResultCard";
 import CompletionCard from "./CompletionCard";
 import DiffView from "./DiffView";
 import CostBadge from "./CostBadge";
-import { threadDisplayCost } from "../lib/cost";
+import { threadDisplayCost, threadCostIsEstimated } from "../lib/cost";
 import { calculateContextUsage } from "../lib/contextUsage";
 import { normalizeModelId } from "../lib/utils";
 import { parseDiff } from "../lib/diffParser";
@@ -26,6 +25,8 @@ interface ThreadViewProps {
   thread: ThreadInfo | null;
   adapters: string[];
   agents: AgentInfo[];
+  /** True while the backend is probing the adapter for its agent list. */
+  agentsLoading?: boolean;
   models: ModelInfo[];
   validatorTypes?: ValidatorTypeInfo[];
   defaultConfig: ConfigPrefs;
@@ -42,7 +43,7 @@ interface ThreadViewProps {
   showCost?: boolean;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, models, validatorTypes, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, agentsLoading, models, validatorTypes, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
@@ -192,6 +193,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
   };
 
   const runningCost = thread ? threadDisplayCost(thread) : 0;
+  const costEstimated = thread ? threadCostIsEstimated(thread) : false;
   const contextUsage = calculateContextUsage(events);
 
   const visibleEvents = events.filter(
@@ -224,11 +226,18 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
             </button>
           )}
           {contextUsage && (
-            <span className={`context-usage context-usage-${contextUsage.level}`} title={`${contextUsage.inputTokens.toLocaleString()} tokens`}>
+            <span
+              className={`context-usage context-usage-${contextUsage.level}`}
+              title={
+                contextUsage.inputTokens > 0
+                  ? `${contextUsage.inputTokens.toLocaleString()} tokens`
+                  : "Context usage reported by the agent"
+              }
+            >
               {Math.round(contextUsage.percentage)}%
             </span>
           )}
-          {showCost !== false && runningCost > 0 && <CostBadge cost={runningCost} label="Cost" budgetCap={workspace.budgetCap ?? undefined} />}
+          {showCost !== false && runningCost > 0 && <CostBadge cost={runningCost} label="Cost" budgetCap={workspace.budgetCap ?? undefined} estimated={costEstimated} />}
         </div>
       </div>
 
@@ -468,7 +477,9 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
                     <path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z" />
                     <path d="M16 14H8a4 4 0 0 0-4 4v2h16v-2a4 4 0 0 0-4-4z" />
                   </svg>
-                  <span className="config-dropdown-value">{selectedAgent || "Default"}</span>
+                  <span className="config-dropdown-value">
+                    {agentsLoading && agents.length === 0 ? "…" : (selectedAgent || "Default")}
+                  </span>
                   <svg className="config-dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="6 9 12 15 18 9" /></svg>
                 </button>
                 {agentOpen && (
@@ -485,6 +496,17 @@ export default function ThreadView({ workspace, thread, adapters, agents, models
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
                       )}
                     </button>
+                    {agentsLoading && agents.length === 0 && (
+                      // Shown while we're probing the backend for its agent list.
+                      // kiro-cli's MCP servers take 1-3s to initialize; without this
+                      // the picker looks empty and broken.
+                      <div className="config-dropdown-item config-dropdown-item-loading" aria-busy="true">
+                        <span className="config-dropdown-item-content">
+                          <span className="config-dropdown-item-label">Discovering agents…</span>
+                          <span className="config-dropdown-item-desc">Querying the backend</span>
+                        </span>
+                      </div>
+                    )}
                     {agents.map(a => (
                       <button
                         key={a.name}
@@ -1013,28 +1035,14 @@ function renderEvents(
           (e) => (eventToOrigIdx.get(e) ?? 0) > afterIdx,
         );
         const mode = classifyValidationResult(event, laterEvents, validatorTypes);
-        if (mode.kind === "pass") {
-          return (
-            <ValidationResultCard
-              key={i}
-              validator={event.validator}
-              outcome="pass"
-              findings={event.findings}
-              durationMs={event.duration_ms}
-            />
-          );
-        }
-        if (mode.kind === "failResolved" || mode.kind === "failSteered") {
-          return (
-            <ValidationResultCard
-              key={i}
-              validator={event.validator}
-              outcome="fail"
-              findings={event.findings}
-              durationMs={event.duration_ms}
-              resolution={mode.kind === "failSteered" ? "steered" : undefined}
-            />
-          );
+        if (mode.kind === "pass" || mode.kind === "failResolved" || mode.kind === "failSteered") {
+          // Silent for any validator result that doesn't need user action:
+          // - pass: nothing went wrong, no reason to take a row
+          // - failResolved: a later turn fixed it
+          // - failSteered: the user already steered a correction
+          // Only unresolved failures remain — those render a GateCard below.
+          // The transcript view keeps the full audit trail regardless.
+          return null;
         }
         const correctionPrompt = buildCorrectionPrompt(event.findings);
         return (

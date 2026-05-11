@@ -33,6 +33,11 @@ pub enum AgentEvent {
         cache_creation_tokens: u64,
         total_usd: f64,
         model: String,
+        /// True when the numbers are locally estimated because the backend
+        /// doesn't report real token counts (e.g. ACP). The UI badges these
+        /// values as "est." so users don't treat them as billing-grade.
+        #[serde(default)]
+        estimated: bool,
     },
     Error {
         message: String,
@@ -59,6 +64,14 @@ pub enum AgentEvent {
         outcome: ValidationOutcome,
         findings: Vec<ValidationFinding>,
         duration_ms: u64,
+    },
+    /// Fraction of the context window currently used by the session,
+    /// expressed as a percentage (0-100). Emitted opportunistically by
+    /// adapters whose backend reports it — ACP's `_kiro.dev/metadata` is
+    /// the only current source. The UI renders a compaction-progress bar
+    /// so the user knows when the agent is approaching its context limit.
+    ContextUsage {
+        percentage: f64,
     },
 }
 
@@ -264,6 +277,7 @@ mod tests {
             cache_creation_tokens: 10,
             total_usd: 0.003,
             model: "claude-sonnet".to_string(),
+            estimated: false,
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
@@ -275,6 +289,7 @@ mod tests {
                 cache_creation_tokens,
                 total_usd,
                 model,
+                estimated,
             } => {
                 assert_eq!(input_tokens, 100);
                 assert_eq!(output_tokens, 200);
@@ -282,7 +297,20 @@ mod tests {
                 assert_eq!(cache_creation_tokens, 10);
                 assert!((total_usd - 0.003).abs() < f64::EPSILON);
                 assert_eq!(model, "claude-sonnet");
+                assert!(!estimated);
             }
+            other => panic!("expected CostUpdate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cost_update_deserializes_without_estimated_field() {
+        // serde(default) — old events missing the `estimated` field must
+        // still deserialize, with estimated=false.
+        let json = r#"{"event_type":"cost_update","input_tokens":1,"output_tokens":2,"cache_read_tokens":0,"cache_creation_tokens":0,"total_usd":0.001,"model":"m"}"#;
+        let event: AgentEvent = serde_json::from_str(json).unwrap();
+        match event {
+            AgentEvent::CostUpdate { estimated, .. } => assert!(!estimated),
             other => panic!("expected CostUpdate, got {:?}", other),
         }
     }

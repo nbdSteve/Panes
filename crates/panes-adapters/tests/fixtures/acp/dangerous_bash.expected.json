@@ -1,4 +1,5 @@
 [
   { "type": "ToolRequest", "tool_name": "execute", "needs_approval": true, "risk_level": "critical" },
+  { "type": "CostUpdate" },
   { "type": "Complete" }
 ]

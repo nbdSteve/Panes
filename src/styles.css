@@ -1197,6 +1197,19 @@ body {
   flex-shrink: 0;
 }
 
+.config-dropdown-item-loading {
+  color: var(--text-muted);
+  font-style: italic;
+  cursor: default;
+  pointer-events: none;
+  animation: panes-dropdown-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes panes-dropdown-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
 .config-dropdown-item-content {
   display: flex;
   flex-direction: column;
@@ -2621,6 +2634,16 @@ body {
 
 .cost-badge.cost-danger {
   color: var(--error);
+}
+
+.cost-badge.cost-estimated {
+  /* Slightly muted so the "est." prefix reads as not-authoritative. */
+  font-style: italic;
+}
+.cost-badge .cost-est-prefix {
+  opacity: 0.7;
+  font-size: 0.85em;
+  margin-right: 1px;
 }
 
 .config-budget {

@@ -3,5 +3,6 @@
   { "type": "ToolRequest", "tool_name": "read", "needs_approval": false, "id": "tc-b" },
   { "type": "ToolResult", "id": "tc-b", "success": true, "output_contains": "contents of b" },
   { "type": "ToolResult", "id": "tc-a", "success": true, "output_contains": "contents of a" },
+  { "type": "CostUpdate" },
   { "type": "Complete" }
 ]

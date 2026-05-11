@@ -21,6 +21,17 @@ pub struct ModelInfo {
     pub description: String,
 }
 
+/// One agent/mode/subagent surface an adapter exposes to the picker.
+/// Distinct from `ModelInfo` — an `AgentInfo` selects the *behavior profile*
+/// (claude-code subagent, kiro-cli mode), not the underlying LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    pub name: String,
+    pub model: Option<String>,
+    pub description: Option<String>,
+}
+
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     fn name(&self) -> &str;
@@ -46,6 +57,14 @@ pub trait AgentAdapter: Send + Sync {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         Ok(vec![])
     }
+
+    /// Agent/mode/subagent options shown in the picker. Default empty so
+    /// adapters that don't have a concept of sub-agents don't need to
+    /// override. ACP adapters populate this from their discovered-metadata
+    /// cache; the Claude adapter scans `~/.claude/agents`.
+    async fn list_agents(&self) -> Result<Vec<AgentInfo>> {
+        Ok(vec![])
+    }
 }
 
 #[async_trait]
@@ -60,6 +79,18 @@ pub trait AgentSession: Send + Sync {
     async fn reject(&self, tool_use_id: &str, reason: &str) -> Result<()>;
 
     async fn cancel(&self) -> Result<()>;
+
+    /// Switch the active model on a live session without restarting. Adapters
+    /// that can't do this mid-flight (e.g. Claude's stream-json has `--model`
+    /// only at spawn) should return `Err` with a clear message; the session
+    /// manager surfaces that to the UI so the user sees why it didn't change.
+    ///
+    /// Default returns "unsupported" so adapters opt in by overriding.
+    async fn set_model(&self, _model: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "this adapter does not support live model switching — start a new thread to change models"
+        ))
+    }
 }
 
 #[cfg(test)]

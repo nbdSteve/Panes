@@ -62,13 +62,25 @@ pub struct InitResult {
     pub protocol_version: String,
 }
 
-/// Response from `session/new`: the newly-minted session id plus the list of
-/// model ids the agent reports as available. kiro-cli puts this at
-/// `/models/availableModels/*/modelId`.
+/// One agent mode reported by the backend. `id` is what gets sent back via
+/// `session/set_mode { modeId }`; `name` is the friendly label (optional —
+/// some backends omit it, in which case we surface the id); `description`
+/// is a longer blurb shown in the picker.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AcpMode {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Response from `session/new`: the newly-minted session id plus the lists
+/// of models and modes the agent reports as available. kiro-cli puts models
+/// at `/models/availableModels/*/modelId` and modes at `/modes/*`.
 #[derive(Debug, Clone)]
 pub struct NewSessionResult {
     pub session_id: String,
     pub available_models: Vec<String>,
+    pub available_modes: Vec<AcpMode>,
 }
 
 /// Send `initialize`. Returns the agent's echoed protocol version.
@@ -115,24 +127,38 @@ pub async fn new_session(transport: &mut AcpTransport, cwd: &Path) -> Result<New
         .ok_or_else(|| anyhow!("session/new response missing sessionId: {resp}"))?
         .to_string();
     let available_models = extract_models(&resp);
+    let available_modes = extract_modes(&resp);
     Ok(NewSessionResult {
         session_id,
         available_models,
+        available_modes,
     })
+}
+
+/// Response from a successful `session/load`. kiro-cli signals success via
+/// the presence of a `modes` array (possibly empty); other fields mirror
+/// `NewSessionResult`.
+#[derive(Debug, Clone, Default)]
+pub struct LoadSessionResult {
+    pub resumed: bool,
+    pub available_models: Vec<String>,
+    pub available_modes: Vec<AcpMode>,
 }
 
 /// Send `session/load` to resume an existing session.
 ///
-/// Returns `Ok(true)` if the agent confirmed the load (presence of `modes`
-/// in the response is how kiro-cli signals success), `Ok(false)` if the agent
-/// responded but didn't recognise the session, `Err(_)` on transport failure.
+/// Returns a `LoadSessionResult` — `resumed: true` means the agent confirmed
+/// the load (presence of `modes` in the response is how kiro-cli signals
+/// success), `resumed: false` means the agent responded but didn't
+/// recognise the session, `Err(_)` only on transport failure (which the
+/// caller downgrades to `resumed: false` anyway).
 ///
-/// Callers should fall back to [`new_session`] on `Ok(false)` or `Err(_)`.
+/// Callers should fall back to [`new_session`] when `resumed` is false.
 pub async fn load_session(
     transport: &mut AcpTransport,
     session_id: &str,
     cwd: &Path,
-) -> Result<bool> {
+) -> Result<LoadSessionResult> {
     let id = transport
         .send_request(
             "session/load",
@@ -146,10 +172,17 @@ pub async fn load_session(
     // We don't use `?` on the wait — an error response here is a load failure,
     // not a transport failure. Same rationale as HaroldCLI's fallback logic.
     match transport.wait_for_response(id, SESSION_CREATE_TIMEOUT).await {
-        Ok(resp) => Ok(resp.get("modes").is_some()),
+        Ok(resp) => {
+            let resumed = resp.get("modes").is_some();
+            Ok(LoadSessionResult {
+                resumed,
+                available_models: extract_models(&resp),
+                available_modes: extract_modes(&resp),
+            })
+        }
         Err(e) => {
             tracing::warn!(error = %e, session_id, "session/load failed — caller should fall back");
-            Ok(false)
+            Ok(LoadSessionResult::default())
         }
     }
 }
@@ -300,6 +333,50 @@ fn extract_models(resp: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Extract the mode list from a session/new or session/load response.
+///
+/// kiro-cli returns modes at `/modes/availableModes`, same envelope as
+/// `/models/availableModels`. Each entry has `id`, `name`, and often a
+/// `description`. Older HaroldCLI test fixtures showed the list at the
+/// top-level `modes` key — we accept both shapes so we stay compatible
+/// with any backend that uses the flatter form.
+pub(crate) fn extract_modes(resp: &Value) -> Vec<AcpMode> {
+    // Preferred shape (current kiro-cli): /modes/availableModes
+    if let Some(arr) = resp
+        .pointer("/modes/availableModes")
+        .and_then(|v| v.as_array())
+    {
+        return parse_mode_array(arr);
+    }
+    // Fallback shape: top-level `modes` is directly an array.
+    if let Some(arr) = resp.get("modes").and_then(|v| v.as_array()) {
+        return parse_mode_array(arr);
+    }
+    Vec::new()
+}
+
+fn parse_mode_array(arr: &[Value]) -> Vec<AcpMode> {
+    arr.iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+            let name = m
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let description = m
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            Some(AcpMode {
+                id,
+                name,
+                description,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +493,102 @@ mod tests {
         let r = new_session(&mut transport, &cwd()).await.expect("ok");
         assert_eq!(r.session_id, "s");
         assert!(r.available_models.is_empty());
+        assert!(r.available_modes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_session_parses_modes_array_flat_shape() {
+        // Fallback shape: `modes` is a top-level array. Supported so the
+        // adapter works against backends that match older test fixtures.
+        let mut transport = AcpTransport::mock(queue(&[
+            r#"{
+                "jsonrpc":"2.0","id":1,
+                "result":{
+                    "sessionId":"sess-1",
+                    "modes":[
+                        {"id":"mode-a","name":"Mode A"},
+                        {"id":"mode-b","name":"Mode B","description":"does things"},
+                        {"id":"mode-c"}
+                    ]
+                }
+            }"#,
+        ]));
+        let r = new_session(&mut transport, &cwd()).await.expect("ok");
+        assert_eq!(r.available_modes.len(), 3);
+        assert_eq!(r.available_modes[0].id, "mode-a");
+        assert_eq!(r.available_modes[0].name.as_deref(), Some("Mode A"));
+        assert_eq!(r.available_modes[1].description.as_deref(), Some("does things"));
+        assert_eq!(r.available_modes[2].id, "mode-c");
+        assert!(r.available_modes[2].name.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_session_parses_modes_array_kiro_shape() {
+        // Actual kiro-cli shape (verified 2026-05): `/modes/availableModes`
+        // nested under a `modes` object alongside `currentModeId`.
+        let mut transport = AcpTransport::mock(queue(&[
+            r#"{
+                "jsonrpc":"2.0","id":1,
+                "result":{
+                    "sessionId":"sess-1",
+                    "modes":{
+                        "availableModes":[
+                            {"id":"mode-a","name":"Mode A","description":"Does the A things"},
+                            {"id":"mode-b","name":"Mode B"}
+                        ],
+                        "currentModeId":"mode-a"
+                    }
+                }
+            }"#,
+        ]));
+        let r = new_session(&mut transport, &cwd()).await.expect("ok");
+        assert_eq!(r.available_modes.len(), 2);
+        assert_eq!(r.available_modes[0].id, "mode-a");
+        assert_eq!(r.available_modes[0].name.as_deref(), Some("Mode A"));
+        assert_eq!(r.available_modes[0].description.as_deref(), Some("Does the A things"));
+        assert_eq!(r.available_modes[1].id, "mode-b");
+        assert!(r.available_modes[1].description.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_session_skips_malformed_modes_entries() {
+        // If a mode entry has no id, drop it rather than panic or emit an
+        // empty-id entry. Missing name is fine — that stays None.
+        let mut transport = AcpTransport::mock(queue(&[
+            r#"{
+                "jsonrpc":"2.0","id":1,
+                "result":{
+                    "sessionId":"sess-1",
+                    "modes":[
+                        {"id":"mode-a"},
+                        {"name":"Orphaned"},
+                        "not-an-object",
+                        {"id":"mode-b","name":"Mode B"}
+                    ]
+                }
+            }"#,
+        ]));
+        let r = new_session(&mut transport, &cwd()).await.expect("ok");
+        assert_eq!(r.available_modes.len(), 2, "malformed entries dropped");
+        assert_eq!(r.available_modes[0].id, "mode-a");
+        assert_eq!(r.available_modes[1].id, "mode-b");
+    }
+
+    #[tokio::test]
+    async fn new_session_treats_empty_description_as_none() {
+        // kiro-cli ships some modes with `description: ""`. Surface them
+        // as None so the UI doesn't render an empty blurb line.
+        let mut transport = AcpTransport::mock(queue(&[
+            r#"{
+                "jsonrpc":"2.0","id":1,
+                "result":{
+                    "sessionId":"sess-1",
+                    "modes":[{"id":"mode-a","name":"Mode A","description":""}]
+                }
+            }"#,
+        ]));
+        let r = new_session(&mut transport, &cwd()).await.expect("ok");
+        assert!(r.available_modes[0].description.is_none());
     }
 
     // ─── load_session ─────────────────────────────────────────────────────
@@ -425,10 +598,33 @@ mod tests {
         let mut transport = AcpTransport::mock(queue(&[
             r#"{"jsonrpc":"2.0","id":1,"result":{"modes":[]}}"#,
         ]));
-        let ok = load_session(&mut transport, "sess-1", &cwd())
+        let out = load_session(&mut transport, "sess-1", &cwd())
             .await
             .expect("ok");
-        assert!(ok);
+        assert!(out.resumed);
+    }
+
+    #[tokio::test]
+    async fn load_session_surfaces_modes_and_models_when_resumed() {
+        let mut transport = AcpTransport::mock(queue(&[
+            r#"{
+                "jsonrpc":"2.0","id":1,
+                "result":{
+                    "modes":[{"id":"mode-a","name":"Mode A"},{"id":"mode-b"}],
+                    "models":{"availableModels":[{"modelId":"claude-3-5-sonnet"}]}
+                }
+            }"#,
+        ]));
+        let out = load_session(&mut transport, "sess-1", &cwd())
+            .await
+            .expect("ok");
+        assert!(out.resumed);
+        assert_eq!(out.available_models, vec!["claude-3-5-sonnet"]);
+        assert_eq!(out.available_modes.len(), 2);
+        assert_eq!(out.available_modes[0].id, "mode-a");
+        assert_eq!(out.available_modes[0].name.as_deref(), Some("Mode A"));
+        assert_eq!(out.available_modes[1].id, "mode-b");
+        assert!(out.available_modes[1].name.is_none());
     }
 
     #[tokio::test]
@@ -436,10 +632,10 @@ mod tests {
         let mut transport = AcpTransport::mock(queue(&[
             r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
         ]));
-        let ok = load_session(&mut transport, "sess-1", &cwd())
+        let out = load_session(&mut transport, "sess-1", &cwd())
             .await
             .expect("ok");
-        assert!(!ok, "missing `modes` field → caller falls back");
+        assert!(!out.resumed, "missing `modes` field → caller falls back");
     }
 
     #[tokio::test]
@@ -447,10 +643,10 @@ mod tests {
         let mut transport = AcpTransport::mock(queue(&[
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"not found"}}"#,
         ]));
-        let ok = load_session(&mut transport, "sess-missing", &cwd())
+        let out = load_session(&mut transport, "sess-missing", &cwd())
             .await
             .expect("error response should be downgraded to Ok(false)");
-        assert!(!ok);
+        assert!(!out.resumed);
     }
 
     // ─── set_mode ─────────────────────────────────────────────────────────
@@ -463,7 +659,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"_kiro.dev/commands/available","params":{}}"#,
         ]));
         let start = std::time::Instant::now();
-        set_mode(&mut transport, "sess", "harold")
+        set_mode(&mut transport, "sess", "mode-a")
             .await
             .expect("set_mode should succeed");
         assert!(
@@ -479,7 +675,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"_kiro.dev/commands/available","params":{}}"#,
             r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
         ]));
-        set_mode(&mut transport, "sess", "harold")
+        set_mode(&mut transport, "sess", "mode-a")
             .await
             .expect("set_mode should succeed");
     }
@@ -492,7 +688,7 @@ mod tests {
         // this file), so this test runs quickly.
         let mut transport = AcpTransport::mock(VecDeque::new());
         let start = std::time::Instant::now();
-        set_mode(&mut transport, "sess", "harold")
+        set_mode(&mut transport, "sess", "mode-a")
             .await
             .expect("set_mode must tolerate missing commands/available notification");
         let elapsed = start.elapsed();
@@ -521,7 +717,7 @@ mod tests {
         );
         transport.unread(permission.clone());
 
-        set_mode(&mut transport, "sess", "harold")
+        set_mode(&mut transport, "sess", "mode-a")
             .await
             .expect("set_mode should succeed even with a permission in flight");
 
