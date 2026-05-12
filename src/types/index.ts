@@ -40,6 +40,13 @@ export interface ThreadInfo {
   hasBriefing?: boolean;
   isRoutine?: boolean;
   routineId?: string;
+  /**
+   * Which version tracker the backend is using for this thread's file edits.
+   * "git" for git-backed workspaces, "shadow" for Panes-managed snapshots in
+   * non-git workspaces. Drives whether the UI shows git-only actions like
+   * commit vs. revert-only flows.
+   */
+  trackerKind?: "git" | "shadow";
   createdAt: number;
 }
 

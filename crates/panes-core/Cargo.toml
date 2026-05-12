@@ -3,6 +3,14 @@ name = "panes-core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Enables helpers for constructing panes-core state in test scaffolding
+# of downstream crates (panes-app, integration tests). Never enable in
+# production binaries — the helpers bypass the usual `db::initialize`
+# bootstrap path (WAL mode, stale-thread recovery) and are tuned for
+# fast isolated test setup only.
+test-utils = ["dep:tempfile"]
+
 [dependencies]
 panes-events = { workspace = true }
 panes-adapters = { workspace = true }
@@ -20,6 +28,10 @@ rusqlite = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 regex = "1"
+similar = "2"
+sha2 = "0.10"
+hex = "0.4"
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

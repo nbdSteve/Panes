@@ -17,7 +17,10 @@ test.describe("Full-Stack: Git Revert", () => {
     await sendPrompt(page, "edit some files");
 
     await waitForCompletion(page);
-    expect(isClean(wsPath)).toBe(false);
+    // Fake adapter writes files in a background task that may land after
+    // Complete fires. Poll until the workspace is actually dirty before
+    // asserting the revert restores it.
+    await expect.poll(() => isClean(wsPath), { timeout: 5000 }).toBe(false);
 
     await page.click("button:has-text('Revert all')");
     const confirmBtn = page.locator(".revert-confirm button:has-text('Revert')");

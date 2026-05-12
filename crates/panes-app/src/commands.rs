@@ -105,8 +105,34 @@ pub async fn list_workspaces(
 #[tauri::command]
 pub async fn remove_workspace(
     db: tauri::State<'_, DbState>,
+    session: tauri::State<'_, SessionState>,
     workspace_id: String,
 ) -> Result<(), PanesError> {
+    // GC shadow data for each thread in this workspace before the cascade
+    // DELETE removes their rows.
+    let ws_for_gc = workspace_id.clone();
+    let thread_ids: Vec<String> = db
+        .execute(move |conn| {
+            let mut stmt = conn.prepare("SELECT id FROM threads WHERE workspace_id = ?1")?;
+            let ids = stmt
+                .query_map(rusqlite::params![ws_for_gc], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(ids)
+        })
+        .await
+        .map_err(PanesError::from)?;
+    let shadow = session.lock().await.shadow_tracker();
+    for tid in thread_ids {
+        if let Err(e) = shadow.delete_thread_data(&tid).await {
+            tracing::warn!(
+                error = %e,
+                thread_id = %tid,
+                "failed to GC shadow data during workspace removal"
+            );
+        }
+    }
+
     db.execute(move |conn| {
         let tx = conn.unchecked_transaction()?;
         if panes_core::db::routine_tables_exist(conn) {
@@ -154,6 +180,12 @@ pub struct ThreadInfo {
     pub events: Vec<serde_json::Value>,
     pub is_routine: bool,
     pub routine_id: Option<String>,
+    /// Which version tracker was used for this thread's file edits.
+    /// "git" for git-backed workspaces, "shadow" for Panes-managed
+    /// blob snapshots in non-git workspaces. The UI uses this to
+    /// decide whether to show git-only actions like "Commit".
+    #[serde(default)]
+    pub tracker_kind: String,
 }
 
 #[tauri::command]
@@ -163,7 +195,7 @@ pub async fn list_threads(
 ) -> Result<Vec<ThreadInfo>, PanesError> {
     db.execute(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id
+            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id, tracker_kind
              FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
         )?;
 
@@ -180,6 +212,7 @@ pub async fn list_threads(
                 events: vec![],
                 is_routine: row.get::<_, i32>(8).unwrap_or(0) != 0,
                 routine_id: row.get(9)?,
+                tracker_kind: row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "git".to_string()),
             })
         })?
         .filter_map(|r| r.ok())
@@ -217,7 +250,7 @@ pub async fn list_all_threads(
     let limit = limit.unwrap_or(100);
     db.execute(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id
+            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id, tracker_kind
              FROM threads ORDER BY created_at DESC LIMIT ?1"
         )?;
 
@@ -234,6 +267,7 @@ pub async fn list_all_threads(
                 events: vec![],
                 is_routine: row.get::<_, i32>(8).unwrap_or(0) != 0,
                 routine_id: row.get(9)?,
+                tracker_kind: row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "git".to_string()),
             })
         })?
         .filter_map(|r| r.ok())
@@ -266,21 +300,35 @@ pub async fn list_all_threads(
 #[tauri::command]
 pub async fn delete_thread(
     db: tauri::State<'_, DbState>,
+    session: tauri::State<'_, SessionState>,
     thread_id: String,
 ) -> Result<(), PanesError> {
+    // Garbage-collect shadow state before dropping the thread row.
+    // Shadow tracking is no-op for git threads, so it's cheap to run
+    // unconditionally rather than branching on tracker_kind.
+    let shadow = session.lock().await.shadow_tracker();
+    if let Err(e) = shadow.delete_thread_data(&thread_id).await {
+        tracing::warn!(
+            error = %e,
+            thread_id = %thread_id,
+            "failed to GC shadow data for deleted thread"
+        );
+    }
+
+    let tid_for_db = thread_id.clone();
     db.execute(move |conn| {
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM events WHERE thread_id = ?1",
-            rusqlite::params![thread_id],
+            rusqlite::params![tid_for_db],
         )?;
         tx.execute(
             "DELETE FROM costs WHERE thread_id = ?1",
-            rusqlite::params![thread_id],
+            rusqlite::params![tid_for_db],
         )?;
         tx.execute(
             "DELETE FROM threads WHERE id = ?1",
-            rusqlite::params![thread_id],
+            rusqlite::params![tid_for_db],
         )?;
         tx.commit()?;
         Ok(())
@@ -479,68 +527,179 @@ pub async fn commit_changes(
         .map_err(PanesError::from)
 }
 
-#[tauri::command]
-pub async fn revert_changes(
-    db: tauri::State<'_, DbState>,
-    workspace_path: String,
-    thread_id: String,
+/// Inner implementation of `revert_changes`. Split from the tauri
+/// command so unit tests can drive it with an `Arc<Mutex<SessionManager>>`
+/// without needing a live Tauri `State`. Routes through the
+/// thread's recorded tracker — git or shadow.
+pub(crate) async fn revert_changes_inner(
+    session: &SessionState,
+    workspace_path: &str,
+    thread_id: &str,
 ) -> Result<(), PanesError> {
-    let tid = thread_id.clone();
-    let snapshot_hash: String = db.execute(move |conn| {
-        Ok(conn.query_row(
-            "SELECT snapshot_ref FROM threads WHERE id = ?1",
-            rusqlite::params![tid],
-            |row| row.get(0),
-        )?)
-    }).await.map_err(|e| PanesError::GitError {
-        message: format!("no snapshot for thread: {e}"),
-    })?;
-    let expanded = expand_tilde(&workspace_path);
+    let mgr = session.lock().await;
+    let tracker = mgr.tracker_for_thread(thread_id).await?;
+    drop(mgr);
+
+    let expanded = expand_tilde(workspace_path);
     let path = PathBuf::from(&expanded);
-    git::revert(&path, &git::SnapshotRef { commit_hash: snapshot_hash })
+    tracker
+        .revert(thread_id, &path)
         .await
-        .map_err(PanesError::from)
+        .map_err(|e| PanesError::GitError {
+            message: format!("revert failed: {e}"),
+        })
 }
 
 #[tauri::command]
-pub async fn get_changed_files(
+pub async fn revert_changes(
+    session: tauri::State<'_, SessionState>,
     workspace_path: String,
+    thread_id: String,
+) -> Result<(), PanesError> {
+    revert_changes_inner(session.inner(), &workspace_path, &thread_id).await
+}
+
+/// Inner impl — see `revert_changes_inner` rationale.
+pub(crate) async fn get_changed_files_inner(
+    session: &SessionState,
+    workspace_path: &str,
+    thread_id: Option<&str>,
 ) -> Result<Vec<String>, PanesError> {
-    let expanded = expand_tilde(&workspace_path);
+    let expanded = expand_tilde(workspace_path);
     let path = PathBuf::from(&expanded);
+
+    // When a thread_id is supplied, route via the tracker so non-git
+    // workspaces get their shadow-tracked changes. Otherwise fall through
+    // to the original git-only porcelain — preserves compatibility for
+    // callers that haven't adopted the new signature yet.
+    if let Some(tid) = thread_id {
+        let mgr = session.lock().await;
+        let tracker = mgr.tracker_for_thread(tid).await?;
+        drop(mgr);
+        let changed = tracker
+            .list_changed_files(tid, &path)
+            .await
+            .map_err(|e| PanesError::GitError {
+                message: format!("list_changed_files failed: {e}"),
+            })?;
+        // Preserve the "<status> <path>" porcelain string shape that existing
+        // callers expect.
+        return Ok(changed
+            .into_iter()
+            .map(|c| {
+                let code = match c.action {
+                    panes_core::version_tracker::FileAction::Created => " A",
+                    panes_core::version_tracker::FileAction::Modified => " M",
+                    panes_core::version_tracker::FileAction::Deleted => " D",
+                };
+                format!("{} {}", code, c.relative_path)
+            })
+            .collect());
+    }
+
     git::get_changed_files(&path)
         .await
         .map_err(PanesError::from)
 }
 
 #[tauri::command]
+pub async fn get_changed_files(
+    session: tauri::State<'_, SessionState>,
+    workspace_path: String,
+    thread_id: Option<String>,
+) -> Result<Vec<String>, PanesError> {
+    get_changed_files_inner(session.inner(), &workspace_path, thread_id.as_deref()).await
+}
+
+pub(crate) async fn get_file_diff_inner(
+    session: &SessionState,
+    workspace_path: &str,
+    file_path: &str,
+    thread_id: Option<&str>,
+) -> Result<String, PanesError> {
+    let expanded = expand_tilde(workspace_path);
+    let path = PathBuf::from(&expanded);
+
+    if let Some(tid) = thread_id {
+        let mgr = session.lock().await;
+        let tracker = mgr.tracker_for_thread(tid).await?;
+        drop(mgr);
+        let file = PathBuf::from(file_path);
+        return tracker
+            .diff(tid, &path, Some(&[file]))
+            .await
+            .map_err(|e| PanesError::GitError {
+                message: format!("diff failed: {e}"),
+            });
+    }
+
+    git::get_file_diff(&path, file_path)
+        .await
+        .map_err(PanesError::from)
+}
+
+#[tauri::command]
 pub async fn get_file_diff(
+    session: tauri::State<'_, SessionState>,
     workspace_path: String,
     file_path: String,
+    thread_id: Option<String>,
 ) -> Result<String, PanesError> {
-    let expanded = expand_tilde(&workspace_path);
+    get_file_diff_inner(session.inner(), &workspace_path, &file_path, thread_id.as_deref()).await
+}
+
+pub(crate) async fn get_workspace_diff_inner(
+    session: &SessionState,
+    workspace_path: &str,
+    files: Option<&[String]>,
+    thread_id: Option<&str>,
+) -> Result<String, PanesError> {
+    let expanded = expand_tilde(workspace_path);
     let path = PathBuf::from(&expanded);
-    git::get_file_diff(&path, &file_path)
+
+    if let Some(tid) = thread_id {
+        let mgr = session.lock().await;
+        let tracker = mgr.tracker_for_thread(tid).await?;
+        drop(mgr);
+        let file_bufs: Option<Vec<PathBuf>> =
+            files.map(|fs| fs.iter().map(PathBuf::from).collect());
+        return tracker
+            .diff(tid, &path, file_bufs.as_deref())
+            .await
+            .map_err(|e| PanesError::GitError {
+                message: format!("diff failed: {e}"),
+            });
+    }
+
+    git::get_workspace_diff(&path, files)
         .await
         .map_err(PanesError::from)
 }
 
 #[tauri::command]
 pub async fn get_workspace_diff(
+    session: tauri::State<'_, SessionState>,
     workspace_path: String,
     files: Option<Vec<String>>,
+    thread_id: Option<String>,
 ) -> Result<String, PanesError> {
-    let expanded = expand_tilde(&workspace_path);
-    let path = PathBuf::from(&expanded);
-    git::get_workspace_diff(&path, files.as_deref())
-        .await
-        .map_err(PanesError::from)
+    get_workspace_diff_inner(
+        session.inner(),
+        &workspace_path,
+        files.as_deref(),
+        thread_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn get_files_git_status(
     file_paths: Vec<String>,
 ) -> Result<Vec<git::RepoFileStatus>, PanesError> {
+    // Intentionally unchanged: this command is only useful in git-backed
+    // workspaces (it groups files by their owning repo for the Commit
+    // UI). In shadow-tracked workspaces the frontend will short-circuit
+    // via `trackerKind` and never issue this call.
     git::get_files_git_status(&file_paths)
         .await
         .map_err(PanesError::from)
@@ -1880,12 +2039,14 @@ Body text here
             events: vec![],
             is_routine: false,
             routine_id: None,
+            tracker_kind: "git".to_string(),
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(json.contains("\"workspaceId\""));
         assert!(json.contains("\"costUsd\""));
         assert!(json.contains("\"durationMs\""));
         assert!(json.contains("\"createdAt\""));
+        assert!(json.contains("\"trackerKind\""));
     }
 
     #[test]
@@ -2297,5 +2458,209 @@ Body text here
         // Frontend wrongly hints claude-code; stored kiro-cli must win.
         let resolved = resolve_agent_name(stored.or(Some("claude-code".to_string())));
         assert_eq!(resolved, "kiro-cli");
+    }
+
+    // -----------------------------------------------------------------
+    // Cov2: IPC tracker-routing unit tests. These exercise the branching
+    // inside revert_changes / get_workspace_diff / get_changed_files /
+    // get_file_diff — in particular the Option<thread_id> dispatch and
+    // the tracker-vs-git fallback. They complement the E2E spec by
+    // failing fast when the routing logic drifts.
+    // -----------------------------------------------------------------
+
+    use panes_core::db::DbHandle;
+    use panes_core::test_support;
+    use panes_core::version_tracker::VersionTracker;
+    use std::sync::Arc as StdArc;
+
+    struct IpcHarness {
+        _tmp: tempfile::TempDir,
+        workspace_path: std::path::PathBuf,
+        session: SessionState,
+        db: DbHandle,
+        thread_id: String,
+    }
+
+    async fn make_ipc_harness(tracker_kind: &str) -> IpcHarness {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_path = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+
+        let (mgr, db, _rx) = test_support::test_session_manager().await;
+        let session: SessionState = StdArc::new(Mutex::new(mgr));
+
+        // Seed workspace + thread rows directly in the DB so the
+        // commands can resolve tracker_for_thread.
+        let ws_path_s = workspace_path.to_string_lossy().to_string();
+        let kind = tracker_kind.to_string();
+        db.execute(move |conn| {
+            conn.execute(
+                "INSERT INTO workspaces (id, path, name, created_at) VALUES ('ws', ?1, 'ws', '2024-01-01')",
+                rusqlite::params![ws_path_s],
+            )?;
+            conn.execute(
+                "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, tracker_kind, created_at) \
+                 VALUES ('t1', 'ws', 'claude-code', 'completed', 'p', ?1, '2024-01-01')",
+                rusqlite::params![kind],
+            )?;
+            Ok(())
+        }).await.unwrap();
+
+        IpcHarness {
+            _tmp: tmp,
+            workspace_path,
+            session,
+            db,
+            thread_id: "t1".to_string(),
+        }
+    }
+
+    async fn shadow_row_count(db: &DbHandle, thread_id: &str) -> i64 {
+        let tid = thread_id.to_string();
+        db.execute(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM shadow_edits WHERE thread_id = ?1",
+                rusqlite::params![tid],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn revert_changes_routes_shadow_tracker_in_non_git_workspace() {
+        let h = make_ipc_harness("shadow").await;
+
+        // Arrange shadow state: pre-edit tombstone for a file that the
+        // test will "write", then revert must delete it.
+        let file = h.workspace_path.join("created.txt");
+        let shadow = h.session.lock().await.shadow_tracker();
+        shadow
+            .record_pre_edit(&h.thread_id, &h.workspace_path, &file)
+            .await
+            .unwrap();
+        std::fs::write(&file, b"agent-produced").unwrap();
+        assert!(file.exists());
+        assert_eq!(shadow_row_count(&h.db, &h.thread_id).await, 1);
+
+        revert_changes_inner(
+            &h.session,
+            &h.workspace_path.to_string_lossy(),
+            &h.thread_id,
+        )
+        .await
+        .unwrap();
+
+        assert!(!file.exists(), "shadow revert should delete the created file");
+    }
+
+    #[tokio::test]
+    async fn revert_changes_errors_for_unknown_thread() {
+        let h = make_ipc_harness("shadow").await;
+        let err = revert_changes_inner(
+            &h.session,
+            &h.workspace_path.to_string_lossy(),
+            "nonexistent",
+        )
+        .await;
+        assert!(err.is_err(), "unknown thread should surface an error");
+    }
+
+    #[tokio::test]
+    async fn get_workspace_diff_with_thread_id_routes_shadow() {
+        let h = make_ipc_harness("shadow").await;
+        let file = h.workspace_path.join("a.txt");
+        std::fs::write(&file, "before\n").unwrap();
+
+        let shadow = h.session.lock().await.shadow_tracker();
+        shadow
+            .record_pre_edit(&h.thread_id, &h.workspace_path, &file)
+            .await
+            .unwrap();
+        std::fs::write(&file, "after\n").unwrap();
+
+        let diff = get_workspace_diff_inner(
+            &h.session,
+            &h.workspace_path.to_string_lossy(),
+            None,
+            Some(&h.thread_id),
+        )
+        .await
+        .unwrap();
+
+        assert!(diff.contains("a/a.txt"), "shadow diff should appear: {diff}");
+        assert!(diff.contains("-before"), "shadow diff should show removed: {diff}");
+        assert!(diff.contains("+after"), "shadow diff should show added: {diff}");
+    }
+
+    #[tokio::test]
+    async fn get_workspace_diff_without_thread_id_falls_back_to_git() {
+        // No thread_id → use the git fallback path. In a non-git dir
+        // that fallback returns empty (not an error) because
+        // `git::get_workspace_diff` silently handles non-repos.
+        let h = make_ipc_harness("shadow").await;
+        let diff = get_workspace_diff_inner(
+            &h.session,
+            &h.workspace_path.to_string_lossy(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(diff.is_empty(), "git fallback in non-git dir should be empty");
+    }
+
+    #[tokio::test]
+    async fn get_changed_files_with_thread_id_returns_porcelain_shape() {
+        let h = make_ipc_harness("shadow").await;
+        let file = h.workspace_path.join("new.txt");
+        let shadow = h.session.lock().await.shadow_tracker();
+        shadow
+            .record_pre_edit(&h.thread_id, &h.workspace_path, &file)
+            .await
+            .unwrap();
+        std::fs::write(&file, b"fresh").unwrap();
+
+        let files = get_changed_files_inner(
+            &h.session,
+            &h.workspace_path.to_string_lossy(),
+            Some(&h.thread_id),
+        )
+        .await
+        .unwrap();
+
+        // Expect a single " A new.txt" entry — porcelain shape the
+        // frontend consumes via parseGitStatus.
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], " A new.txt");
+    }
+
+    #[tokio::test]
+    async fn get_file_diff_with_thread_id_scopes_to_one_file() {
+        let h = make_ipc_harness("shadow").await;
+        let a = h.workspace_path.join("a.txt");
+        let b = h.workspace_path.join("b.txt");
+        std::fs::write(&a, "old-a\n").unwrap();
+        std::fs::write(&b, "old-b\n").unwrap();
+
+        let shadow = h.session.lock().await.shadow_tracker();
+        shadow.record_pre_edit(&h.thread_id, &h.workspace_path, &a).await.unwrap();
+        shadow.record_pre_edit(&h.thread_id, &h.workspace_path, &b).await.unwrap();
+        std::fs::write(&a, "new-a\n").unwrap();
+        std::fs::write(&b, "new-b\n").unwrap();
+
+        let diff = get_file_diff_inner(
+            &h.session,
+            &h.workspace_path.to_string_lossy(),
+            &a.to_string_lossy(),
+            Some(&h.thread_id),
+        )
+        .await
+        .unwrap();
+
+        // Scoped filter should include a.txt but exclude b.txt.
+        assert!(diff.contains("a/a.txt"), "should include a.txt: {diff}");
+        assert!(!diff.contains("a/b.txt"), "should not include b.txt: {diff}");
     }
 }

@@ -260,18 +260,17 @@ async fn dispatch_command(
         }
         "revert_changes" => {
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
-            let thread_id = args["threadId"].as_str().ok_or("missing threadId")?;
-            let tid = thread_id.to_string();
-            let snapshot_hash: String = state.db.execute(move |conn| {
-                Ok(conn.query_row(
-                    "SELECT snapshot_ref FROM threads WHERE id = ?1",
-                    rusqlite::params![tid],
-                    |row| row.get(0),
-                )?)
-            }).await.map_err(|e| format!("no snapshot for thread: {e}"))?;
+            let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();
             let expanded = crate::commands::expand_tilde(workspace_path);
             let path = std::path::PathBuf::from(&expanded);
-            panes_core::git::revert(&path, &panes_core::git::SnapshotRef { commit_hash: snapshot_hash })
+            let mgr = state.session_manager.lock().await;
+            let tracker = mgr
+                .tracker_for_thread(&thread_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            drop(mgr);
+            tracker
+                .revert(&thread_id, &path)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
@@ -280,7 +279,7 @@ async fn dispatch_command(
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
             state.db.execute(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, workspace_id, prompt, status, cost_usd, created_at, is_routine, routine_id FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
+                    "SELECT id, workspace_id, prompt, status, cost_usd, created_at, is_routine, routine_id, tracker_kind FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
                 )?;
                 let rows: Vec<Value> = stmt.query_map(rusqlite::params![workspace_id], |row| {
                     Ok(serde_json::json!({
@@ -292,6 +291,7 @@ async fn dispatch_command(
                         "createdAt": row.get::<_, String>(5)?,
                         "isRoutine": row.get::<_, i32>(6).unwrap_or(0) != 0,
                         "routineId": row.get::<_, Option<String>>(7).unwrap_or(None),
+                        "trackerKind": row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "git".to_string()),
                         "events": [],
                     }))
                 })?
@@ -327,11 +327,20 @@ async fn dispatch_command(
         }
         "delete_thread" => {
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();
+            let shadow = state.session_manager.lock().await.shadow_tracker();
+            if let Err(e) = shadow.delete_thread_data(&thread_id).await {
+                tracing::warn!(
+                    error = %e,
+                    thread_id = %thread_id,
+                    "failed to GC shadow data for deleted thread"
+                );
+            }
+            let tid_for_db = thread_id.clone();
             state.db.execute(move |conn| {
                 let tx = conn.unchecked_transaction()?;
-                tx.execute("DELETE FROM events WHERE thread_id = ?1", rusqlite::params![thread_id])?;
-                tx.execute("DELETE FROM costs WHERE thread_id = ?1", rusqlite::params![thread_id])?;
-                tx.execute("DELETE FROM threads WHERE id = ?1", rusqlite::params![thread_id])?;
+                tx.execute("DELETE FROM events WHERE thread_id = ?1", rusqlite::params![tid_for_db])?;
+                tx.execute("DELETE FROM costs WHERE thread_id = ?1", rusqlite::params![tid_for_db])?;
+                tx.execute("DELETE FROM threads WHERE id = ?1", rusqlite::params![tid_for_db])?;
                 tx.commit()?;
                 Ok(())
             }).await.map_err(|e| e.to_string())?;
@@ -339,6 +348,26 @@ async fn dispatch_command(
         }
         "remove_workspace" => {
             let workspace_id = args["workspaceId"].as_str().ok_or("missing workspaceId")?.to_string();
+            // GC shadow state for every thread in this workspace before
+            // the cascade DELETE wipes their rows.
+            let ws_for_gc = workspace_id.clone();
+            let thread_ids: Vec<String> = state.db.execute(move |conn| {
+                let mut stmt = conn.prepare("SELECT id FROM threads WHERE workspace_id = ?1")?;
+                let ids = stmt.query_map(rusqlite::params![ws_for_gc], |row| row.get::<_, String>(0))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Ok(ids)
+            }).await.map_err(|e| e.to_string())?;
+            let shadow = state.session_manager.lock().await.shadow_tracker();
+            for tid in thread_ids {
+                if let Err(e) = shadow.delete_thread_data(&tid).await {
+                    tracing::warn!(
+                        error = %e,
+                        thread_id = %tid,
+                        "failed to GC shadow data during workspace removal"
+                    );
+                }
+            }
             state.db.execute(move |conn| {
                 let tx = conn.unchecked_transaction()?;
                 if panes_core::db::routine_tables_exist(conn) {
@@ -401,6 +430,31 @@ async fn dispatch_command(
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
             let expanded = crate::commands::expand_tilde(workspace_path);
             let path = std::path::PathBuf::from(&expanded);
+            let thread_id = args.get("threadId").and_then(|v| v.as_str()).map(String::from);
+            if let Some(tid) = thread_id {
+                let mgr = state.session_manager.lock().await;
+                let tracker = mgr
+                    .tracker_for_thread(&tid)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                drop(mgr);
+                let changed = tracker
+                    .list_changed_files(&tid, &path)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let lines: Vec<String> = changed
+                    .into_iter()
+                    .map(|c| {
+                        let code = match c.action {
+                            panes_core::version_tracker::FileAction::Created => " A",
+                            panes_core::version_tracker::FileAction::Modified => " M",
+                            panes_core::version_tracker::FileAction::Deleted => " D",
+                        };
+                        format!("{} {}", code, c.relative_path)
+                    })
+                    .collect();
+                return Ok(serde_json::to_value(lines).unwrap_or(Value::Array(vec![])));
+            }
             let files = panes_core::git::get_changed_files(&path)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -411,6 +465,21 @@ async fn dispatch_command(
             let file_path = args["filePath"].as_str().ok_or("missing filePath")?;
             let expanded = crate::commands::expand_tilde(workspace_path);
             let path = std::path::PathBuf::from(&expanded);
+            let thread_id = args.get("threadId").and_then(|v| v.as_str()).map(String::from);
+            if let Some(tid) = thread_id {
+                let mgr = state.session_manager.lock().await;
+                let tracker = mgr
+                    .tracker_for_thread(&tid)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                drop(mgr);
+                let file = std::path::PathBuf::from(file_path);
+                let diff = tracker
+                    .diff(&tid, &path, Some(&[file]))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(Value::String(diff));
+            }
             let diff = panes_core::git::get_file_diff(&path, file_path)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -424,6 +493,23 @@ async fn dispatch_command(
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
             let expanded = crate::commands::expand_tilde(workspace_path);
             let path = std::path::PathBuf::from(&expanded);
+            let thread_id = args.get("threadId").and_then(|v| v.as_str()).map(String::from);
+            if let Some(tid) = thread_id {
+                let mgr = state.session_manager.lock().await;
+                let tracker = mgr
+                    .tracker_for_thread(&tid)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                drop(mgr);
+                let file_bufs: Option<Vec<std::path::PathBuf>> = files
+                    .as_ref()
+                    .map(|fs| fs.iter().map(std::path::PathBuf::from).collect());
+                let diff = tracker
+                    .diff(&tid, &path, file_bufs.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(Value::String(diff));
+            }
             let diff = panes_core::git::get_workspace_diff(&path, files.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;

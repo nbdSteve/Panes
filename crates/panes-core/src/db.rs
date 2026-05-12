@@ -150,11 +150,34 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // Incremental migrations
     add_column_if_missing(conn, "threads", "session_id", "TEXT")?;
     add_column_if_missing(conn, "threads", "routine_id", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "threads",
+        "tracker_kind",
+        "TEXT NOT NULL DEFAULT 'git'",
+    )?;
 
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp);",
+        "CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp);
+
+        CREATE TABLE IF NOT EXISTS shadow_edits (
+            thread_id    TEXT    NOT NULL,
+            file_path    TEXT    NOT NULL,
+            pre_existed  INTEGER NOT NULL,
+            content_hash TEXT,
+            recorded_at  TEXT    NOT NULL,
+            PRIMARY KEY (thread_id, file_path)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shadow_edits_thread ON shadow_edits(thread_id);",
     )
-    .context("failed to create costs timestamp index")?;
+    .context("failed to create costs timestamp index / shadow_edits table")?;
+
+    // mode captures permissions bits from `Metadata::permissions().mode()`.
+    // macOS-only product, so unix extension semantics are safe to assume.
+    // NULL on tombstone rows (no pre-existing file). Must come AFTER the
+    // CREATE TABLE IF NOT EXISTS for shadow_edits above.
+    add_column_if_missing(conn, "shadow_edits", "mode", "INTEGER")?;
 
     conn.execute_batch(
         "

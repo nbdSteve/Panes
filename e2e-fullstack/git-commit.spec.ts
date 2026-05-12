@@ -15,7 +15,7 @@ test.describe("Full-Stack: Git Commit", () => {
     await sendPrompt(page, "edit some files");
 
     await waitForCompletion(page);
-    expect(isClean(wsPath)).toBe(false);
+    await expect.poll(() => isClean(wsPath), { timeout: 5000 }).toBe(false);
 
     // Open the diff viewer via Inspect
     await page.click("button:has-text('Inspect')");

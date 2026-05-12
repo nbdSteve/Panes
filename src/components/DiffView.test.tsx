@@ -473,6 +473,53 @@ describe("DiffView", () => {
       expect(screen.getByText("frontend")).toBeInTheDocument();
       expect(screen.getByText("backend")).toBeInTheDocument();
     });
+
+    // --- trackerKind gating ---
+    // Regression guard for G2: the Commit flow makes sense only for
+    // git-tracked threads. A shadow-tracked thread has no repo to commit
+    // into, so the button must stay hidden even if the frontend
+    // accidentally receives non-empty repoFiles. Today the belt-and-
+    // braces check ("repoFiles populated") catches this incidentally;
+    // these tests lock in the explicit trackerKind gate so refactors
+    // can't re-expose the Commit button in shadow mode.
+
+    it("shadow trackerKind hides commit button even with repoFiles", () => {
+      render(
+        <DiffView
+          {...baseProps}
+          repoFiles={repoFiles}
+          onCommit={vi.fn()}
+          trackerKind="shadow"
+        />,
+      );
+      expect(screen.queryByText("Commit")).not.toBeInTheDocument();
+    });
+
+    it("git trackerKind with repoFiles shows commit button", () => {
+      render(
+        <DiffView
+          {...baseProps}
+          repoFiles={repoFiles}
+          onCommit={vi.fn()}
+          trackerKind="git"
+        />,
+      );
+      expect(screen.getByText("Commit")).toBeInTheDocument();
+    });
+
+    it("missing trackerKind defaults to git (legacy threads)", () => {
+      // Legacy threads that pre-date the trackerKind field should
+      // continue behaving like git-tracked threads — no regression for
+      // existing users when the frontend upgrades.
+      render(
+        <DiffView
+          {...baseProps}
+          repoFiles={repoFiles}
+          onCommit={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("Commit")).toBeInTheDocument();
+    });
   });
 
   describe("close behavior", () => {

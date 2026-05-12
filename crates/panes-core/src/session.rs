@@ -17,6 +17,10 @@ use crate::error::PanesError;
 use crate::features::{is_feature_enabled, FEATURE_VALIDATORS};
 use crate::git;
 use crate::validation::{ValidationContext, ValidatorRegistry};
+use crate::version_tracker::{
+    extract_file_path, is_file_write_tool, GitVersionTracker, ShadowVersionTracker, TrackerKind,
+    VersionTracker,
+};
 
 #[derive(Debug)]
 pub enum GateDecision {
@@ -124,6 +128,8 @@ pub struct SessionManager {
     event_tx: mpsc::UnboundedSender<ThreadEvent>,
     pub(crate) db: DbHandle,
     pub validators: Arc<ValidatorRegistry>,
+    git_tracker: Arc<GitVersionTracker>,
+    shadow_tracker: Arc<ShadowVersionTracker>,
 }
 
 impl SessionManager {
@@ -131,8 +137,15 @@ impl SessionManager {
         cost_tracker: Arc<CostTracker>,
         event_tx: mpsc::UnboundedSender<ThreadEvent>,
         db: DbHandle,
+        shadow_blob_root: PathBuf,
     ) -> Self {
         let session_ids = Self::load_session_ids(&db).await;
+
+        let git_tracker = Arc::new(GitVersionTracker::new(db.clone()));
+        let shadow_tracker = Arc::new(
+            ShadowVersionTracker::new(db.clone(), shadow_blob_root)
+                .expect("failed to initialise shadow version tracker"),
+        );
 
         Self {
             active_threads: Arc::new(Mutex::new(HashMap::new())),
@@ -143,7 +156,52 @@ impl SessionManager {
             event_tx,
             db,
             validators: Arc::new(ValidatorRegistry::with_builtins()),
+            git_tracker,
+            shadow_tracker,
         }
+    }
+
+    /// Resolve the tracker to use for a given thread by reading the
+    /// `tracker_kind` column persisted at thread start. Falls back to the
+    /// Git tracker when the column is missing (legacy threads predating
+    /// the shadow store).
+    pub async fn tracker_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Arc<dyn VersionTracker>, PanesError> {
+        let tid = thread_id.to_string();
+        let kind_str: String = self
+            .db
+            .execute(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT tracker_kind FROM threads WHERE id = ?1",
+                        rusqlite::params![tid],
+                        |row| row.get::<_, Option<String>>(0),
+                    )?
+                    .unwrap_or_else(|| "git".to_string()))
+            })
+            .await
+            .map_err(|e| PanesError::GitError {
+                message: format!("tracker lookup failed: {e}"),
+            })?;
+        Ok(match TrackerKind::parse(&kind_str) {
+            TrackerKind::Git => self.git_tracker.clone() as Arc<dyn VersionTracker>,
+            TrackerKind::Shadow => self.shadow_tracker.clone() as Arc<dyn VersionTracker>,
+        })
+    }
+
+    /// Direct access to the git tracker for commit/branch commands that
+    /// are meaningful only in git-backed workspaces.
+    pub fn git_tracker(&self) -> Arc<GitVersionTracker> {
+        self.git_tracker.clone()
+    }
+
+    /// Direct handle to the shadow tracker so callers outside the tracker
+    /// abstraction (e.g. `delete_thread`, which garbage-collects shadow
+    /// state when a thread is removed) can invoke shadow-only methods.
+    pub fn shadow_tracker(&self) -> Arc<ShadowVersionTracker> {
+        self.shadow_tracker.clone()
     }
 
     async fn load_session_ids(db: &DbHandle) -> HashMap<String, String> {
@@ -232,8 +290,16 @@ impl SessionManager {
         model: Option<&str>,
         cli_agent: Option<&str>,
     ) -> Result<String> {
-        // Git snapshot
-        let snapshot = if git::is_git_repo(&workspace.path).await {
+        // Detect tracker kind — git if the workspace resolves to a repo
+        // root, shadow otherwise. Pinned for the lifetime of the thread so
+        // a mid-thread `git init` can't rug-pull an active run.
+        let tracker_kind = if git::find_repo_root(&workspace.path).await.is_some() {
+            TrackerKind::Git
+        } else {
+            TrackerKind::Shadow
+        };
+
+        let snapshot = if tracker_kind == TrackerKind::Git {
             match git::snapshot(&workspace.path).await {
                 Ok(s) => Some(s),
                 Err(e) => {
@@ -242,8 +308,13 @@ impl SessionManager {
                 }
             }
         } else {
-            warn!(workspace = %workspace.path.display(), "not a git repo — rollback unavailable");
+            info!(workspace = %workspace.path.display(), "non-git workspace — using shadow version tracker");
             None
+        };
+
+        let tracker: Arc<dyn VersionTracker> = match tracker_kind {
+            TrackerKind::Git => self.git_tracker.clone() as Arc<dyn VersionTracker>,
+            TrackerKind::Shadow => self.shadow_tracker.clone() as Arc<dyn VersionTracker>,
         };
 
         let thread_id = Uuid::new_v4().to_string();
@@ -271,11 +342,12 @@ impl SessionManager {
             let agent = agent_name.to_string();
             let p = prompt.to_string();
             let sid = session_id.clone();
+            let kind = tracker_kind.as_str().to_string();
             let _ = self.db.execute(move |conn| {
                 conn.execute(
-                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, started_at, created_at)
-                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?7)",
-                    rusqlite::params![tid, wid, agent, p, sid, snapshot_hash, now],
+                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, tracker_kind, started_at, created_at)
+                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?8)",
+                    rusqlite::params![tid, wid, agent, p, sid, snapshot_hash, kind, now],
                 )?;
                 Ok(())
             }).await;
@@ -314,6 +386,7 @@ impl SessionManager {
         let validators = self.validators.clone();
         let workspace_id_owned = workspace.id.clone();
         let workspace_path_owned = workspace.path.clone();
+        let tracker_for_task = tracker.clone();
 
         tokio::spawn(async move {
             Self::consume_events(
@@ -328,6 +401,7 @@ impl SessionManager {
                 validators,
                 workspace_id_owned,
                 workspace_path_owned,
+                tracker_for_task,
             )
             .await;
         });
@@ -401,6 +475,11 @@ impl SessionManager {
         model: Option<&str>,
         cli_agent: Option<&str>,
     ) -> Result<()> {
+        let tracker = self
+            .tracker_for_thread(thread_id)
+            .await
+            .unwrap_or_else(|_| self.git_tracker.clone() as Arc<dyn VersionTracker>);
+
         let claude_session_id = {
             let sids = self.session_ids.lock().await;
             sids.get(thread_id)
@@ -464,6 +543,7 @@ impl SessionManager {
         let validators = self.validators.clone();
         let workspace_id_owned = workspace.id.clone();
         let workspace_path_owned = workspace.path.clone();
+        let tracker_for_task = tracker.clone();
 
         tokio::spawn(async move {
             Self::consume_events(
@@ -478,6 +558,7 @@ impl SessionManager {
                 validators,
                 workspace_id_owned,
                 workspace_path_owned,
+                tracker_for_task,
             )
             .await;
         });
@@ -498,6 +579,7 @@ impl SessionManager {
         validators: Arc<ValidatorRegistry>,
         workspace_id: String,
         workspace_path: PathBuf,
+        version_tracker: Arc<dyn VersionTracker>,
     ) {
         let _cost_guard = CostFinalizer {
             thread_id: thread_id.clone(),
@@ -536,6 +618,31 @@ impl SessionManager {
             }
 
             Self::persist_event(&db, &thread_id, &event).await;
+
+            // Record pre-edit state for file-write tools before the agent
+            // executes them. Claude stream-json guarantees tool_use arrives
+            // before tool_result, and ACP delivers tool_call before any
+            // tool_call_update with the content written — so this runs
+            // before the file actually hits disk in either transport.
+            if let AgentEvent::ToolRequest {
+                tool_name, input, ..
+            } = &event
+            {
+                if is_file_write_tool(tool_name) {
+                    if let Some(fp) = extract_file_path(tool_name, input, &workspace_path) {
+                        if let Err(e) = version_tracker
+                            .record_pre_edit(&thread_id, &workspace_path, &fp)
+                            .await
+                        {
+                            warn!(
+                                error = %e,
+                                file = %fp.display(),
+                                "version tracker failed to record pre-edit — continuing"
+                            );
+                        }
+                    }
+                }
+            }
 
             let gate_tool_id = match &event {
                 AgentEvent::ToolRequest { id, needs_approval: true, .. } => Some(id.clone()),
@@ -980,13 +1087,8 @@ mod tests {
     use panes_adapters::fake::{FakeAdapter, FakeScenario};
 
     async fn setup_session_manager() -> (SessionManager, mpsc::UnboundedReceiver<ThreadEvent>) {
-        let conn = rusqlite::Connection::open(":memory:").unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::run_migrations(&conn).unwrap();
-        let db = crate::db::DbHandle::new(conn);
-        let cost_tracker = Arc::new(CostTracker::new());
-        let (tx, rx) = mpsc::unbounded_channel();
-        (SessionManager::new(cost_tracker, tx, db).await, rx)
+        let (mgr, _db, rx) = crate::test_support::test_session_manager().await;
+        (mgr, rx)
     }
 
     fn make_workspace() -> Workspace {
@@ -1365,6 +1467,138 @@ mod tests {
 
         #[async_trait]
         impl AgentSession for GateTestSession {
+            fn init(&self) -> &SessionInit { &self.init_data }
+
+            fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>> {
+                let rx = self.rx.get_mut().take().expect("events() called twice");
+                Box::pin(unfold(rx, |mut rx| async move {
+                    rx.recv().await.map(|event| (event, rx))
+                }))
+            }
+
+            async fn approve(&self, _tool_use_id: &str) -> Result<()> {
+                self.resume_notify.notify_one();
+                Ok(())
+            }
+
+            async fn reject(&self, _tool_use_id: &str, _reason: &str) -> Result<()> {
+                self.cancelled.store(true, Ordering::Relaxed);
+                self.resume_notify.notify_one();
+                Ok(())
+            }
+
+            async fn cancel(&self) -> Result<()> {
+                self.cancelled.store(true, Ordering::Relaxed);
+                self.resume_notify.notify_one();
+                Ok(())
+            }
+        }
+
+        /// Emits a single gated Write ToolRequest with a well-formed
+        /// `file_path` input so SessionManager's version-tracker hook
+        /// runs against it. On approve, yields a ToolResult + Complete;
+        /// on reject the stream ends immediately (no ToolResult, no
+        /// file write — consistent with how a real rejected agent
+        /// behaves).
+        pub struct GatedWriteAdapter {
+            pub file_path: String,
+        }
+
+        #[async_trait]
+        impl AgentAdapter for GatedWriteAdapter {
+            fn name(&self) -> &str { "gated-write-test" }
+
+            async fn spawn(
+                &self,
+                _workspace_path: &Path,
+                _prompt: &str,
+                _context: &SessionContext,
+                _model: Option<&str>,
+                _agent: Option<&str>,
+            ) -> Result<Box<dyn AgentSession>> {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let resume_notify = Arc::new(Notify::new());
+
+                let (tx, rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+                let c = cancelled.clone();
+                let n = resume_notify.clone();
+                let fp = self.file_path.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(AgentEvent::ToolRequest {
+                        id: "gw_0".to_string(),
+                        tool_name: "Write".to_string(),
+                        description: format!("Write file: {fp}"),
+                        input: serde_json::json!({
+                            "file_path": fp,
+                            "content": "potentially-dangerous content",
+                        }),
+                        needs_approval: true,
+                        risk_level: RiskLevel::High,
+                    }).await;
+
+                    n.notified().await;
+
+                    if c.load(Ordering::Relaxed) {
+                        return; // rejected — stream ends without any write
+                    }
+
+                    let _ = tx.send(AgentEvent::ToolResult {
+                        id: "gw_0".to_string(),
+                        tool_name: "Write".to_string(),
+                        success: true,
+                        output: "File written".to_string(),
+                        raw_output: None,
+                        duration_ms: 50,
+                    }).await;
+
+                    let _ = tx.send(AgentEvent::Complete {
+                        summary: "done".to_string(),
+                        total_cost_usd: 0.01,
+                        duration_ms: 1000,
+                        turns: 1,
+                    }).await;
+                });
+
+                Ok(Box::new(GatedWriteSession {
+                    init_data: SessionInit {
+                        session_id: uuid::Uuid::new_v4().to_string(),
+                        model: "gated-write-test-model".to_string(),
+                        cwd: "/tmp".to_string(),
+                        tools: vec!["Write".into()],
+                    },
+                    cancelled,
+                    resume_notify,
+                    rx: tokio::sync::Mutex::new(Some(rx)),
+                }))
+            }
+
+            async fn resume(
+                &self,
+                workspace_path: &Path,
+                _session_id: &str,
+                prompt: &str,
+                model: Option<&str>,
+                agent: Option<&str>,
+            ) -> Result<Box<dyn AgentSession>> {
+                self.spawn(
+                    workspace_path,
+                    prompt,
+                    &SessionContext { briefing: None, memories: vec![], budget_cap: None },
+                    model,
+                    agent,
+                ).await
+            }
+        }
+
+        struct GatedWriteSession {
+            init_data: SessionInit,
+            cancelled: Arc<AtomicBool>,
+            resume_notify: Arc<Notify>,
+            rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<AgentEvent>>>,
+        }
+
+        #[async_trait]
+        impl AgentSession for GatedWriteSession {
             fn init(&self) -> &SessionInit { &self.init_data }
 
             fn events(&mut self) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>> {
@@ -2416,6 +2650,381 @@ mod tests {
                 .iter()
                 .any(|te| matches!(&te.event, AgentEvent::Complete { .. })),
             "thread should complete normally"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // version_tracker integration — pre-edit recording in non-git workspaces
+    // ---------------------------------------------------------------------
+
+    async fn shadow_edit_count(mgr: &SessionManager, thread_id: &str) -> i64 {
+        let tid = thread_id.to_string();
+        mgr.db
+            .execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM shadow_edits WHERE thread_id = ?1",
+                    rusqlite::params![tid],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn thread_tracker_kind(mgr: &SessionManager, thread_id: &str) -> String {
+        let tid = thread_id.to_string();
+        mgr.db
+            .execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT tracker_kind FROM threads WHERE id = ?1",
+                    rusqlite::params![tid],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn thread_records_pre_edit_on_write_tool_in_non_git_workspace() {
+        let (mut mgr, mut rx) = setup_session_manager().await;
+
+        // Non-git workspace under a fresh tmpdir.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().to_path_buf();
+        std::fs::write(ws_path.join("existing.txt"), b"original").unwrap();
+
+        let ws = Workspace {
+            id: "ws-nongit".to_string(),
+            path: ws_path.clone(),
+            name: "nongit".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
+        insert_workspace_row(&mgr, &ws).await;
+
+        let edited = ws_path.join("existing.txt").to_string_lossy().to_string();
+        let created = ws_path.join("fresh.txt").to_string_lossy().to_string();
+        let adapter = FakeAdapter::new(FakeScenario::FileEdit {
+            files: vec![edited.clone(), created.clone()],
+            response: "done".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ctx = SessionContext {
+            briefing: None,
+            memories: vec![],
+            budget_cap: None,
+        };
+        let thread_id = mgr
+            .start_thread(&ws, "edit", "fake", ctx, None)
+            .await
+            .unwrap();
+
+        // Drain until Complete so persist_event + hook has run for all tool
+        // requests before we query.
+        while let Some(te) = rx.recv().await {
+            if matches!(te.event, AgentEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        assert_eq!(thread_tracker_kind(&mgr, &thread_id).await, "shadow");
+        assert_eq!(shadow_edit_count(&mgr, &thread_id).await, 2);
+
+        // Sanity: the tracker resolves to a shadow tracker.
+        let tracker = mgr.tracker_for_thread(&thread_id).await.unwrap();
+        assert_eq!(tracker.kind(), TrackerKind::Shadow);
+    }
+
+    #[tokio::test]
+    async fn thread_in_git_workspace_skips_shadow_recording() {
+        use tokio::process::Command;
+        let (mut mgr, mut rx) = setup_session_manager().await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().to_path_buf();
+        // Minimal git repo so find_repo_root succeeds.
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&ws_path)
+            .status()
+            .await
+            .unwrap();
+        Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"])
+            .current_dir(&ws_path)
+            .status()
+            .await
+            .unwrap();
+        std::fs::write(ws_path.join("existing.txt"), b"original").unwrap();
+
+        let ws = Workspace {
+            id: "ws-git".to_string(),
+            path: ws_path.clone(),
+            name: "git".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
+        insert_workspace_row(&mgr, &ws).await;
+
+        let edited = ws_path.join("existing.txt").to_string_lossy().to_string();
+        let adapter = FakeAdapter::new(FakeScenario::FileEdit {
+            files: vec![edited],
+            response: "done".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ctx = SessionContext {
+            briefing: None,
+            memories: vec![],
+            budget_cap: None,
+        };
+        let thread_id = mgr
+            .start_thread(&ws, "edit", "fake", ctx, None)
+            .await
+            .unwrap();
+
+        while let Some(te) = rx.recv().await {
+            if matches!(te.event, AgentEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        assert_eq!(thread_tracker_kind(&mgr, &thread_id).await, "git");
+        assert_eq!(
+            shadow_edit_count(&mgr, &thread_id).await,
+            0,
+            "git-backed threads must not populate shadow_edits"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_threads_default_to_git_tracker() {
+        // Simulates a thread row that pre-dates the `tracker_kind`
+        // migration: inserted without supplying the column so sqlite's
+        // NOT NULL DEFAULT 'git' kicks in. Proves we continue to route
+        // such threads through the git tracker (pre-existing snapshot
+        // flow) rather than silently falling back to a shadow tracker
+        // that has no recorded state for them.
+        let (mgr, _rx) = setup_session_manager().await;
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws).await;
+        mgr.db
+            .execute(|conn| {
+                conn.execute(
+                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, created_at) \
+                     VALUES ('legacy-t1', 'ws-test', 'claude-code', 'completed', 'p', '2024-01-01')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // Column picks up the default.
+        let kind: String = mgr
+            .db
+            .execute(|conn| {
+                Ok(conn.query_row(
+                    "SELECT tracker_kind FROM threads WHERE id = 'legacy-t1'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(kind, "git");
+
+        let tracker = mgr.tracker_for_thread("legacy-t1").await.unwrap();
+        assert_eq!(tracker.kind(), TrackerKind::Git);
+    }
+
+    #[tokio::test]
+    async fn tracker_for_thread_defaults_to_git_for_unknown_value() {
+        // Defence-in-depth: if somehow a junk value gets into the column
+        // (hand-edited DB, future migration bug), we still land on git
+        // rather than panicking or returning the wrong tracker.
+        let (mgr, _rx) = setup_session_manager().await;
+        let ws = make_workspace();
+        insert_workspace_row(&mgr, &ws).await;
+        mgr.db
+            .execute(|conn| {
+                conn.execute(
+                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, tracker_kind, created_at) \
+                     VALUES ('junk-t1', 'ws-test', 'claude-code', 'completed', 'p', 'gibberish', '2024-01-01')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let tracker = mgr.tracker_for_thread("junk-t1").await.unwrap();
+        assert_eq!(tracker.kind(), TrackerKind::Git);
+    }
+
+    #[tokio::test]
+    async fn tracker_for_thread_errors_for_unknown_thread() {
+        // Unknown thread id is a caller bug — we return an error rather
+        // than silently picking a tracker. The IPC layer surfaces this
+        // to the UI.
+        let (mgr, _rx) = setup_session_manager().await;
+        let err = mgr.tracker_for_thread("does-not-exist").await;
+        assert!(err.is_err(), "expected error for unknown thread");
+    }
+
+    #[tokio::test]
+    async fn resumed_thread_continues_shadow_recording() {
+        // start_thread and resume_thread run through different code paths
+        // (start constructs the tracker from workspace detection; resume
+        // looks it up from the DB via tracker_for_thread). Regressions in
+        // the resume path would silently stop recording pre-edits for
+        // continued threads — invisible until a user hits Revert. This
+        // test starts a thread in a non-git workspace, lets it run to
+        // completion (recording 2 shadow_edits rows), resumes it, and
+        // verifies the second run adds its own shadow_edits rows.
+        let (mut mgr, mut rx) = setup_session_manager().await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().to_path_buf();
+        let ws = Workspace {
+            id: "ws-resume".to_string(),
+            path: ws_path.clone(),
+            name: "resume".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
+        insert_workspace_row(&mgr, &ws).await;
+
+        let first_files = vec![
+            ws_path.join("first_a.txt").to_string_lossy().to_string(),
+            ws_path.join("first_b.txt").to_string_lossy().to_string(),
+        ];
+        let adapter = FakeAdapter::new(FakeScenario::FileEdit {
+            files: first_files,
+            response: "first".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let thread_id = mgr
+            .start_thread(&ws, "edit first batch", "fake", ctx, None)
+            .await
+            .unwrap();
+
+        let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
+
+        assert_eq!(
+            shadow_edit_count(&mgr, &thread_id).await,
+            2,
+            "first run should record two rows"
+        );
+
+        // Re-register the adapter with a new scenario for the second
+        // run — FakeAdapter is single-scenario, so we swap out the
+        // registration. tracker_for_thread still returns shadow (the
+        // thread row pins that at start).
+        let second_files = vec![
+            ws_path.join("second_c.txt").to_string_lossy().to_string(),
+        ];
+        let adapter = FakeAdapter::new(FakeScenario::FileEdit {
+            files: second_files.clone(),
+            response: "second".to_string(),
+        })
+        .with_delay(0);
+        mgr.register_adapter(Arc::new(adapter));
+
+        mgr.resume_thread(&thread_id, &ws, "edit second batch", "fake", None)
+            .await
+            .unwrap();
+        let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
+
+        // Now 3 rows total: 2 from first run + 1 from resumed run.
+        assert_eq!(
+            shadow_edit_count(&mgr, &thread_id).await,
+            3,
+            "resumed run should add a third row"
+        );
+
+        // And the new file's row is specifically present.
+        let tid = thread_id.clone();
+        let second_rel = second_files[0].clone();
+        let has_row: i64 = mgr
+            .db
+            .execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM shadow_edits WHERE thread_id = ?1 AND file_path = ?2",
+                    rusqlite::params![tid, second_rel],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(has_row, 1, "resumed-run file should be recorded");
+    }
+
+    #[tokio::test]
+    async fn rejected_gated_write_does_not_appear_as_changed_file() {
+        // Pre-edit recording happens on ToolRequest, BEFORE the user's
+        // gate decision. For a gated write that the user rejects, the
+        // shadow row exists (tombstone) but the file on disk never
+        // changes — so `list_changed_files` must filter it out
+        // (pre == current == empty) and the UI's post-thread "changes
+        // detected" banner stays correct. Regressions here produce
+        // phantom entries in the diff pane after rejected gates.
+        let (mut mgr, mut rx) = setup_session_manager().await;
+
+        // Non-git workspace — we want the shadow tracker.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().to_path_buf();
+        let target_file = ws_path.join("doomed.txt");
+
+        let ws = Workspace {
+            id: "ws-gated".to_string(),
+            path: ws_path.clone(),
+            name: "gated".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
+        insert_workspace_row(&mgr, &ws).await;
+
+        mgr.register_adapter(Arc::new(gate_test_adapter::GatedWriteAdapter {
+            file_path: target_file.to_string_lossy().to_string(),
+        }));
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let thread_id = mgr
+            .start_thread(&ws, "write dangerous", "gated-write-test", ctx, None)
+            .await
+            .unwrap();
+
+        // Wait for the gate event, then reject it.
+        let tool_id = wait_for_gate_event(&mut rx).await;
+        mgr.reject(&thread_id, &tool_id, "not today").await.unwrap();
+        let _ = collect_events_until_done(&mut rx).await;
+        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
+
+        // The hook ran on ToolRequest — a row must exist.
+        assert_eq!(
+            shadow_edit_count(&mgr, &thread_id).await,
+            1,
+            "pre-edit hook should have recorded the tombstone"
+        );
+
+        // File was never actually written (we rejected). The tracker
+        // must NOT surface this as a change.
+        assert!(!target_file.exists(), "rejected write should not touch disk");
+        let tracker = mgr.tracker_for_thread(&thread_id).await.unwrap();
+        let changed = tracker.list_changed_files(&thread_id, &ws_path).await.unwrap();
+        assert!(
+            changed.is_empty(),
+            "rejected gated write must not appear in list_changed_files, got {changed:?}"
         );
     }
 }

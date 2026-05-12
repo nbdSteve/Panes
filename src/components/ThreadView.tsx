@@ -122,11 +122,11 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
   useEffect(() => {
     if (diffView && diffRaw === null) {
       const files = (cardFiles[diffView.completionIdx] ?? []).flatMap((r) => r.files.map((f) => f.absolutePath));
-      api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined)
+      api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined, thread?.id)
         .then(setDiffRaw)
         .catch(() => setDiffRaw(""));
     }
-  }, [diffView, diffRaw, cardFiles, workspace.path]);
+  }, [diffView, diffRaw, cardFiles, workspace.path, thread?.id]);
 
   useEffect(() => {
     onConfigChange({ adapter: selectedAdapter, agent: selectedAgent, model: selectedModel });
@@ -287,7 +287,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
                 if (diffRaw === null || diffView?.completionIdx !== completionIdx) {
                   setDiffRaw(null);
                   const files = (cardFiles[completionIdx] ?? []).flatMap((r) => r.files.map((f) => f.absolutePath));
-                  api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined)
+                  api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined, thread.id)
                     .then(setDiffRaw)
                     .catch(() => setDiffRaw(""));
                 }
@@ -303,7 +303,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
                 if (diffRaw === null || diffView?.completionIdx !== completionIdx) {
                   setDiffRaw(null);
                   const files = (cardFiles[completionIdx] ?? []).flatMap((r) => r.files.map((f) => f.absolutePath));
-                  api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined)
+                  api.getWorkspaceDiff(workspace.path, files.length > 0 ? files : undefined, thread.id)
                     .then(setDiffRaw)
                     .catch(() => setDiffRaw(""));
                 }
@@ -368,6 +368,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
             }
           }}
           onClose={() => setDiffView(null)}
+          trackerKind={thread.trackerKind}
           repoFiles={!thread.completionActions?.[diffView.completionIdx] ? cardFiles[diffView.completionIdx] : undefined}
           commitError={commitError}
           suggestedMessage={suggestedMessage}

@@ -17,9 +17,16 @@ interface DiffViewProps {
   onGenerateMessage?: () => void;
   generatingMessage?: boolean;
   onSendFeedback?: () => void;
+  /**
+   * Which version tracker owns the thread's edits. "git" enables the
+   * Commit flow (makes sense in git-backed workspaces only). "shadow"
+   * always hides it — there's no repo to commit into. Optional for
+   * backward compat; missing is treated as "git".
+   */
+  trackerKind?: "git" | "shadow";
 }
 
-export default function DiffView({ diff, selectedFile, comments, onAddComment, onActiveFileChange, onClose, repoFiles, onCommit, commitError, suggestedMessage, onGenerateMessage, generatingMessage, onSendFeedback }: DiffViewProps) {
+export default function DiffView({ diff, selectedFile, comments, onAddComment, onActiveFileChange, onClose, repoFiles, onCommit, commitError, suggestedMessage, onGenerateMessage, generatingMessage, onSendFeedback, trackerKind }: DiffViewProps) {
   const [pendingSelection, setPendingSelection] = useState<LineSelection | null>(null);
   const matchedFile = selectedFile ? diff.files.find((f) => f.newPath === selectedFile || selectedFile.endsWith("/" + f.newPath)) : undefined;
   const [activeFile, setActiveFileLocal] = useState<string>(matchedFile?.newPath ?? diff.files[0]?.newPath ?? "");
@@ -125,7 +132,12 @@ export default function DiffView({ diff, selectedFile, comments, onAddComment, o
     }
   }, [onCommit, repoFiles, selectedFiles, commitMessage, amend]);
 
-  const hasCommitSupport = !!onCommit && !!repoFiles && repoFiles.length > 0;
+  // Commit is git-only: a "shadow" tracker workspace has no repo to
+  // commit into. Default to git when trackerKind is absent (legacy threads
+  // pre-dating the tracker abstraction) — the `repoFiles` check still
+  // gates on actual git-tracked content being present.
+  const isGitTracker = trackerKind !== "shadow";
+  const hasCommitSupport = isGitTracker && !!onCommit && !!repoFiles && repoFiles.length > 0;
 
   if (viewMode === "commit" && hasCommitSupport) {
     return (

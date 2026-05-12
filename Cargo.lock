@@ -2805,6 +2805,7 @@ name = "panes-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "axum",
  "chrono",
@@ -2823,6 +2824,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-notification",
+ "tempfile",
  "tokio",
  "tower-http",
  "tracing",
@@ -2838,6 +2840,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "hex",
  "panes-adapters",
  "panes-cost",
  "panes-events",
@@ -2846,6 +2849,8 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "similar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

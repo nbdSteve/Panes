@@ -119,12 +119,16 @@ export const api = {
     call<string>("commit_changes", { workspacePath, message, files: files ?? null }),
   revertChanges: (workspacePath: string, threadId: string) =>
     call<void>("revert_changes", { workspacePath, threadId }),
-  getChangedFiles: (workspacePath: string) =>
-    call<string[]>("get_changed_files", { workspacePath }),
-  getFileDiff: (workspacePath: string, filePath: string) =>
-    call<string>("get_file_diff", { workspacePath, filePath }),
-  getWorkspaceDiff: (workspacePath: string, files?: string[]) =>
-    call<string>("get_workspace_diff", { workspacePath, files: files ?? null }),
+  getChangedFiles: (workspacePath: string, threadId?: string) =>
+    call<string[]>("get_changed_files", { workspacePath, threadId: threadId ?? null }),
+  getFileDiff: (workspacePath: string, filePath: string, threadId?: string) =>
+    call<string>("get_file_diff", { workspacePath, filePath, threadId: threadId ?? null }),
+  getWorkspaceDiff: (workspacePath: string, files?: string[], threadId?: string) =>
+    call<string>("get_workspace_diff", {
+      workspacePath,
+      files: files ?? null,
+      threadId: threadId ?? null,
+    }),
   getFilesGitStatus: (filePaths: string[]) =>
     call<RepoFileStatus[]>("get_files_git_status", { filePaths }),
   listGitRepos: (workspacePath: string) =>

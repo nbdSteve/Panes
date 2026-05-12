@@ -390,7 +390,7 @@ pub async fn get_files_git_status(file_paths: &[String]) -> Result<Vec<RepoFileS
     Ok(results)
 }
 
-async fn find_repo_root(start: &Path) -> Option<PathBuf> {
+pub(crate) async fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(start)

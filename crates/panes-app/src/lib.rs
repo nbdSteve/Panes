@@ -83,8 +83,9 @@ pub fn run() {
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ThreadEvent>();
     let cost_tracker = Arc::new(CostTracker::new());
 
+    let shadow_blob_root = data_dir().join("shadow-blobs");
     let mut session_manager = tauri::async_runtime::block_on(
-        SessionManager::new(cost_tracker.clone(), event_tx, db.clone()),
+        SessionManager::new(cost_tracker.clone(), event_tx, db.clone(), shadow_blob_root),
     );
 
     let (broadcast_tx, _) = broadcast::channel::<ThreadEvent>(256);
@@ -258,6 +259,90 @@ fn register_fake_adapters(session_manager: &mut SessionManager) {
     }));
 }
 
+/// Wraps a fake AgentSession and performs the actual on-disk file write
+/// AFTER each write-tool ToolRequest is yielded to the consumer. The
+/// write happens inline in the stream (before the next event is polled),
+/// which matches real agents: a tool_use is announced, then the tool
+/// executes, then tool_result arrives. Since SessionManager's version
+/// tracker hook runs between consecutive `stream.next()` calls, the hook
+/// captures the pre-edit state (tombstone for missing files) strictly
+/// before the write lands on disk.
+struct WriteInjectingSession {
+    inner: Box<dyn panes_adapters::AgentSession>,
+    workspace_path: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl panes_adapters::AgentSession for WriteInjectingSession {
+    fn init(&self) -> &panes_events::SessionInit {
+        self.inner.init()
+    }
+
+    fn events(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = panes_events::AgentEvent> + Send>> {
+        use futures::StreamExt;
+        use panes_events::AgentEvent;
+        let inner_stream = self.inner.events();
+        let workspace_path = self.workspace_path.clone();
+        Box::pin(async_stream::stream! {
+            let mut s = inner_stream;
+            while let Some(event) = s.next().await {
+                let maybe_write = if let AgentEvent::ToolRequest {
+                    ref tool_name,
+                    ref input,
+                    ..
+                } = event
+                {
+                    if matches!(tool_name.as_str(), "Write" | "Edit" | "MultiEdit" | "NotebookEdit") {
+                        input
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                yield event;
+                // After the consumer has processed the ToolRequest (and
+                // the version-tracker hook has tombstoned the path), land
+                // the write on disk. A brief yield ensures the consumer
+                // task has actually polled the stream again before we
+                // produce the next event.
+                if let Some(rel) = maybe_write {
+                    tokio::task::yield_now().await;
+                    let path = workspace_path.join(&rel);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    let _ = std::fs::write(
+                        &path,
+                        format!("// modified by panes test\n// file: {rel}\n"),
+                    );
+                }
+            }
+        })
+    }
+
+    async fn approve(&self, tool_use_id: &str) -> anyhow::Result<()> {
+        self.inner.approve(tool_use_id).await
+    }
+
+    async fn reject(&self, tool_use_id: &str, reason: &str) -> anyhow::Result<()> {
+        self.inner.reject(tool_use_id, reason).await
+    }
+
+    async fn cancel(&self) -> anyhow::Result<()> {
+        self.inner.cancel().await
+    }
+
+    async fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        self.inner.set_model(model).await
+    }
+}
+
 struct PromptRoutedFakeAdapter {
     /// Adapter id surfaced to the UI. Same scenario logic for every name —
     /// the only difference is which adapter the frontend picker shows.
@@ -285,18 +370,25 @@ impl panes_adapters::AgentAdapter for PromptRoutedFakeAdapter {
             (route_prompt(prompt), 80)
         };
 
-        if let FakeScenario::FileEdit { ref files, .. } = scenario {
-            for file in files {
-                let path = workspace_path.join(file);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                std::fs::write(&path, format!("// modified by panes test\n// file: {file}\n")).ok();
-            }
-        }
+        let adapter = FakeAdapter::new(scenario.clone()).with_delay(delay);
+        let session = adapter.spawn(workspace_path, prompt, context, model, None).await?;
 
-        let adapter = FakeAdapter::new(scenario).with_delay(delay);
-        adapter.spawn(workspace_path, prompt, context, model, None).await
+        // For FileEdit scenarios, wrap the session's event stream so each
+        // ToolRequest for a write tool performs the on-disk write *after*
+        // the event is yielded. SessionManager's version-tracker hook runs
+        // synchronously on ToolRequest before the next event is pulled, so
+        // by the time we write, the hook has already captured the pre-edit
+        // state (a tombstone for files that didn't exist). This mirrors how
+        // real agents behave — tool_use announced before the write hits
+        // disk — without the ordering hazards of an unrelated sleep task.
+        if let FakeScenario::FileEdit { .. } = &scenario {
+            Ok(Box::new(WriteInjectingSession {
+                inner: session,
+                workspace_path: workspace_path.to_path_buf(),
+            }))
+        } else {
+            Ok(session)
+        }
     }
 
     async fn resume(
