@@ -24,8 +24,8 @@ export interface StartThreadParams {
 
 export interface StartThreadResult {
   threadId: string;
-  memoryCount: number;
-  hasBriefing: boolean;
+  injectedMemories: MemoryInfo[];
+  briefingPreview: string | null;
 }
 
 export interface ResumeThreadParams {

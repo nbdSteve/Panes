@@ -450,7 +450,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       });
       lastStartThreadAdapter = adapter;
       setTimeout(() => emitThreadEvents(threadId, events), 300);
-      return { threadId, memoryCount: 0, hasBriefing: false };
+      return { threadId, injectedMemories: [], briefingPreview: null };
     }
 
     case "resume_thread": {

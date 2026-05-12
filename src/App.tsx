@@ -11,6 +11,7 @@ import RoutinePanel from "./components/RoutinePanel";
 import WorkspaceValidatorsPanel from "./components/WorkspaceValidatorsPanel";
 import { mapBackendEvent } from "./lib/eventMapper";
 import { shouldFirePendingResume } from "./lib/pendingResume";
+import { shouldExtractOnComplete } from "./lib/memoryExtractDedupe";
 import { api } from "./lib/api";
 import { AdapterCache, type AdapterCacheMap } from "./lib/adapterCache";
 import { deriveConfig } from "./lib/deriveConfig";
@@ -39,6 +40,9 @@ function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<string | null>(null);
   const [activeThread, setActiveThread] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard" | "validators">("dashboard");
+  // Memory id to scroll to + highlight when the Memory panel opens.
+  // Cleared once the MemoryPanel consumes it.
+  const [memoryHighlightId, setMemoryHighlightId] = useState<string | null>(null);
   const [adapters, setAdapters] = useState<string[]>([]);
   // Per-adapter cache of agent + model lists. Keyed by adapter name so
   // switching workspaces or changing the Settings default adapter picks up
@@ -95,6 +99,9 @@ function App() {
         events: AgentEvent[];
         isRoutine?: boolean;
         routineId?: string;
+        injectedMemories?: import("./lib/api").MemoryInfo[];
+        injectedBriefing?: string | null;
+        extractedMemories?: import("./lib/api").MemoryInfo[];
       }[];
 
       setThreads((prev) => {
@@ -110,6 +117,9 @@ function App() {
             events: p.events,
             isRoutine: p.isRoutine,
             routineId: p.routineId,
+            injectedMemories: p.injectedMemories,
+            injectedBriefing: p.injectedBriefing ?? null,
+            extractedMemories: p.extractedMemories,
             createdAt: new Date(p.createdAt).getTime(),
           }));
         return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
@@ -211,6 +221,13 @@ function App() {
   );
 
   const pendingResumeRef = useRef<{ threadId: string; prompt: string } | null>(null);
+  // Per-thread count of `complete` events we've already scheduled extraction
+  // for in this session. Each new `complete` (e.g. a follow-up) bumps the
+  // thread's count and triggers a fresh extraction that overwrites the
+  // previous result. Reopening a completed thread from SQLite does NOT add
+  // an entry here — we gate on whether the *next* complete goes beyond the
+  // count of completes already present in the persisted event stream.
+  const extractedCompletesRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     let cancelled = false;
@@ -243,7 +260,18 @@ function App() {
                     : "running" as const;
 
           if (newStatus === "complete" && mapped.event_type === "complete") {
-            toExtract.push(t);
+            const decision = shouldExtractOnComplete(
+              t.events,
+              extractedCompletesRef.current.get(t.id) ?? 0,
+              t.extractedMemories !== undefined,
+            );
+            if (decision.extract) {
+              extractedCompletesRef.current.set(t.id, decision.newExtractedCount);
+              toExtract.push({
+                ...t,
+                events: [...t.events, mapped],
+              });
+            }
           }
 
           if ((newStatus === "complete" || newStatus === "error") && t.queuedFollowUp) {
@@ -329,7 +357,13 @@ function App() {
         const threadId = result.threadId;
         setThreads((prev) =>
           prev.map((t) =>
-            t.id === tempId ? { ...t, id: threadId, status: "running", memoryCount: result.memoryCount, hasBriefing: result.hasBriefing } : t
+            t.id === tempId ? {
+              ...t,
+              id: threadId,
+              status: "running",
+              injectedMemories: result.injectedMemories,
+              injectedBriefing: result.briefingPreview,
+            } : t
           )
         );
         setActiveThread(threadId);
@@ -490,19 +524,48 @@ function App() {
   const handleDeleteThread = useCallback(async (id: string) => {
     try { await api.deleteThread(id); } catch {}
     setThreads((prev) => prev.filter((t) => t.id !== id));
+    extractedCompletesRef.current.delete(id);
     if (activeThread === id) {
       setActiveThread(null);
     }
   }, [activeThread]);
 
   const extractMemoriesFromThread = useCallback((thread: ThreadInfo) => {
-    const textEvents = thread.events
-      .filter((e): e is import("./types").TextEvent => e.event_type === "text" && !!e.text)
-      .map((e) => `Assistant: ${e.text}`)
-      .join("\n");
-    const transcript = `User: ${thread.prompt}\n${textEvents}`;
-    api.extractMemories(thread.workspaceId, thread.id, transcript)
-      .catch((e) => console.error("extract_memories failed:", e));
+    // Build a transcript that interleaves user turns (initial prompt +
+    // follow-ups) with assistant text in chronological order. This gives
+    // the extractor on a multi-turn thread the context of what the user
+    // actually asked in later turns, not just the opening prompt.
+    const lines: string[] = [`User: ${thread.prompt}`];
+    for (const e of thread.events) {
+      if (e.event_type === "text" && e.text) {
+        lines.push(`Assistant: ${e.text}`);
+      } else if (e.event_type === "follow_up" && e.text) {
+        lines.push(`User: ${e.text}`);
+      }
+    }
+    const transcript = lines.join("\n");
+    const threadId = thread.id;
+    api.extractMemories(thread.workspaceId, threadId, transcript)
+      .then((extracted) => {
+        setThreads((prev) =>
+          prev.map((t) =>
+            t.id === threadId
+              ? { ...t, extractedMemories: extracted, extractedMemoriesError: undefined }
+              : t
+          )
+        );
+      })
+      .catch((e) => {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error("extract_memories failed:", e);
+        setThreads((prev) =>
+          prev.map((t) =>
+            t.id === threadId
+              ? { ...t, extractedMemories: undefined, extractedMemoriesError: message }
+              : t
+          )
+        );
+      });
   }, []);
 
   const handleToggleFeature = useCallback(async (featureId: string, enabled: boolean) => {
@@ -702,12 +765,20 @@ function App() {
             onDiffViewChange={handleDiffViewChange}
             onMarkFeedbackSent={handleMarkFeedbackSent}
             onSetBudgetCap={handleSetBudgetCap}
+            onViewMemories={(memoryId) => {
+              setMemoryHighlightId(memoryId ?? null);
+              setActiveView("memory");
+            }}
             showCost={costTrackingEnabled}
           />
         )}
 
         {activeView === "memory" && activeWs && (
-          <MemoryPanel workspaceId={activeWs.id} />
+          <MemoryPanel
+            workspaceId={activeWs.id}
+            highlightMemoryId={memoryHighlightId}
+            onHighlightConsumed={() => setMemoryHighlightId(null)}
+          />
         )}
 
         {activeView === "routines" && activeWs && (

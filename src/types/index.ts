@@ -43,8 +43,10 @@ export interface ThreadInfo {
   activeDiffView?: { completionIdx: number; activeFile?: string };
   queuedFollowUp?: string;
   events: AgentEvent[];
-  memoryCount?: number;
-  hasBriefing?: boolean;
+  injectedMemories?: import("../lib/api").MemoryInfo[];
+  injectedBriefing?: string | null;
+  extractedMemories?: import("../lib/api").MemoryInfo[];
+  extractedMemoriesError?: string;
   isRoutine?: boolean;
   routineId?: string;
   /**

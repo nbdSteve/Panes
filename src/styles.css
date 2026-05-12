@@ -2537,15 +2537,131 @@ body {
   gap: 8px;
 }
 
-/* ─── Context indicator ─── */
+/* ─── Memory chip ─── */
 
-.context-indicator {
+.memory-chip {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 14px;
   font-size: 11px;
   color: var(--text-muted);
-  padding: 2px 14px 6px;
-  display: flex;
+}
+
+.memory-chip-summary {
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  color: inherit;
+  font-size: inherit;
+  font-family: inherit;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.memory-chip-summary:hover {
+  background: var(--bg-card);
+  border-color: var(--border-hover);
+  color: var(--text-secondary);
+}
+
+.memory-chip-summary:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+  color: var(--text-secondary);
+}
+
+.memory-chip-caret {
+  transition: transform var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.memory-chip-label {
+  white-space: nowrap;
+}
+
+.memory-chip-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-chip-item,
+.memory-chip-briefing {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.memory-chip-item-type {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.memory-chip-item-content {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-chip-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.memory-chip-link,
+.memory-chip-item-link {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.memory-chip-link:hover,
+.memory-chip-item-link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.memory-chip-item-link {
+  margin-top: 2px;
+  opacity: 0.85;
+}
+
+.memory-chip-extracted .memory-chip-summary {
+  color: var(--text-muted);
+}
+
+.memory-chip-error .memory-chip-summary {
+  color: var(--warning);
+  border-color: var(--warning-bg);
+}
+
+.memory-chip-error .memory-chip-summary:hover {
+  border-color: var(--warning);
+}
+
+.memory-chip-error-message {
+  color: var(--warning);
 }
 
 /* ─── Context usage badge ─── */
@@ -2968,6 +3084,23 @@ body {
 
 .memory-card.pinned {
   border-left: 3px solid var(--accent);
+}
+
+@keyframes memory-card-flash {
+  0%, 20% {
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+  100% {
+    background: transparent;
+    border-color: var(--border);
+    box-shadow: none;
+  }
+}
+
+.memory-card-flash {
+  animation: memory-card-flash 2.2s ease-out;
 }
 
 .memory-content {

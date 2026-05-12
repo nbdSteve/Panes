@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import MemoryPanel from "./MemoryPanel";
@@ -170,6 +170,54 @@ describe("MemoryPanel", () => {
 
     await waitFor(() => {
       expect(screen.queryByText("Pinned")).not.toBeInTheDocument();
+    });
+  });
+
+  it("highlightMemoryId flashes the matching card and consumes the request", async () => {
+    // Seed a memory so the panel has something to scroll to.
+    const extracted = await mockInvoke("extract_memories", {
+      workspaceId: "test-ws-highlight",
+      threadId: "t1",
+      transcript: "User: hi\nAssistant: hello",
+    });
+    const targetId = (extracted as { id: string }[])[0].id;
+
+    const consumed = vi.fn();
+    const { container } = render(
+      <MemoryPanel
+        workspaceId="test-ws-highlight"
+        highlightMemoryId={targetId}
+        onHighlightConsumed={consumed}
+      />,
+    );
+
+    // Wait for the card to render.
+    await waitFor(() => {
+      expect(container.querySelector(`[data-memory-id="${targetId}"]`)).not.toBeNull();
+    });
+
+    // The effect runs after paint; waitFor for the flash class + consume
+    // callback.
+    await waitFor(() => {
+      const card = container.querySelector(`[data-memory-id="${targetId}"]`);
+      expect(card?.className).toContain("memory-card-flash");
+    });
+    expect(consumed).toHaveBeenCalled();
+  });
+
+  it("highlightMemoryId that doesn't match still consumes the request", async () => {
+    const consumed = vi.fn();
+    render(
+      <MemoryPanel
+        workspaceId="test-ws-nomatch"
+        highlightMemoryId="memory-that-never-existed"
+        onHighlightConsumed={consumed}
+      />,
+    );
+    // Panel finishes loading (empty memories) — the highlight effect runs
+    // and the callback fires even though there was nothing to scroll to.
+    await waitFor(() => {
+      expect(consumed).toHaveBeenCalled();
     });
   });
 });

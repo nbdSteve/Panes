@@ -156,6 +156,14 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         "tracker_kind",
         "TEXT NOT NULL DEFAULT 'git'",
     )?;
+    // Memory visibility: what was injected at thread start and what was
+    // extracted at thread end. Stored as JSON so the camelCase
+    // MemoryInfo shape the frontend already consumes survives a round
+    // trip. Null on rows that predate this migration — the UI tolerates
+    // undefined and simply hides the chip.
+    add_column_if_missing(conn, "threads", "injected_memories", "TEXT")?;
+    add_column_if_missing(conn, "threads", "injected_briefing", "TEXT")?;
+    add_column_if_missing(conn, "threads", "extracted_memories", "TEXT")?;
 
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp);
@@ -717,6 +725,37 @@ mod tests {
         let empty_ws = result.iter().find(|r| r.workspace_id == "ws-empty").unwrap();
         assert!((empty_ws.total_usd - 0.0).abs() < 0.001);
         assert_eq!(empty_ws.thread_count, 0);
+    }
+
+    #[test]
+    fn test_memory_columns_added_by_migration() {
+        let conn = setup_db();
+        // Sanity: the three memory columns from the incremental migration
+        // must exist on the threads table. pragma_table_info returns one
+        // row per column.
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('threads')")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for expected in ["injected_memories", "injected_briefing", "extracted_memories"] {
+            assert!(
+                cols.contains(&expected.to_string()),
+                "expected column `{expected}` on threads table, got {cols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_memory_columns_migration_is_idempotent() {
+        let conn = setup_db();
+        // Running migrations a second time on the same connection should
+        // not error (add_column_if_missing checks pragma before ALTER).
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
     }
 
     #[test]

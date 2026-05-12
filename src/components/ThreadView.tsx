@@ -19,6 +19,7 @@ import { buildCorrectionPrompt } from "../lib/validationPrompt";
 import { classifyValidationResult } from "../lib/validationResultView";
 import TranscriptView from "./TranscriptView";
 import RoutineBadge from "./RoutineBadge";
+import MemoryChip from "./MemoryChip";
 
 interface ThreadViewProps {
   workspace: WorkspaceInfo;
@@ -44,10 +45,11 @@ interface ThreadViewProps {
   onDiffViewChange: (threadId: string, view: { completionIdx: number; activeFile?: string } | null) => void;
   onMarkFeedbackSent: (threadId: string, completionIdx: number, commentCount: number) => void;
   onSetBudgetCap: (workspaceId: string, budgetCap: number | null) => void;
+  onViewMemories?: (memoryId?: string) => void;
   showCost?: boolean;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, listsLoading, models, validatorTypes, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, listsLoading, models, validatorTypes, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, onViewMemories, showCost }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
@@ -289,7 +291,17 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
         )}
 
         {thread && showTranscript && (
-          <TranscriptView events={visibleEvents} prompt={thread.prompt} showCost={showCost} />
+          <TranscriptView
+            events={visibleEvents}
+            prompt={thread.prompt}
+            showCost={showCost}
+            status={thread.status}
+            injectedMemories={thread.injectedMemories}
+            injectedBriefing={thread.injectedBriefing}
+            extractedMemories={thread.extractedMemories}
+            extractedMemoriesError={thread.extractedMemoriesError}
+            onViewMemories={onViewMemories}
+          />
         )}
 
         {thread && !showTranscript && (
@@ -299,12 +311,12 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
               <span className="thread-prompt-text">{thread.prompt}</span>
             </div>
 
-            {(thread.memoryCount != null && thread.memoryCount > 0 || thread.hasBriefing) && (
-              <div className="context-indicator">
-                Using {thread.memoryCount || 0} {thread.memoryCount === 1 ? "memory" : "memories"}
-                {thread.hasBriefing && " · 1 briefing"}
-              </div>
-            )}
+            <MemoryChip
+              variant="injected"
+              memories={thread.injectedMemories ?? []}
+              briefing={thread.injectedBriefing}
+              onViewMemories={onViewMemories}
+            />
 
             {isRunning && visibleEvents.length === 0 && (
               <div className="step-card">
@@ -350,6 +362,16 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
                 onMarkFeedbackSent(thread.id, completionIdx, comments.length);
               },
             }, showCost)}
+
+            {(thread.status === "complete" || thread.status === "error" || thread.status === "interrupted") &&
+              (thread.extractedMemories !== undefined || thread.extractedMemoriesError !== undefined) && (
+              <MemoryChip
+                variant="extracted"
+                memories={thread.extractedMemories ?? []}
+                error={thread.extractedMemoriesError}
+                onViewMemories={onViewMemories}
+              />
+            )}
 
             {isRunning && visibleEvents.length > 0 && (
               <div className="step-card">

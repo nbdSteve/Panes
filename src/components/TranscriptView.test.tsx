@@ -123,6 +123,125 @@ describe("TranscriptView", () => {
     expect(screen.getByText(/3 turns/)).toBeInTheDocument();
   });
 
+  it("renders injected memory chip between prompt and first event when memories are present", () => {
+    const { container } = render(
+      <TranscriptView
+        events={[{ event_type: "text", text: "hi" }]}
+        prompt="do the thing"
+        injectedMemories={[{
+          id: "m1",
+          workspaceId: "ws-1",
+          memoryType: "decision",
+          content: "always use pnpm",
+          sourceThreadId: "t0",
+          pinned: false,
+          createdAt: "2026-01-01T00:00:00Z",
+        }]}
+      />,
+    );
+    expect(screen.getByText("1 memory injected")).toBeInTheDocument();
+    const children = Array.from(container.querySelector(".transcript-view")!.children);
+    const promptIdx = children.findIndex((c) => c.classList.contains("transcript-user"));
+    const chipIdx = children.findIndex((c) => c.classList.contains("memory-chip-injected"));
+    const firstAssistantIdx = children.findIndex((c) => c.classList.contains("transcript-assistant"));
+    expect(promptIdx).toBeLessThan(chipIdx);
+    expect(chipIdx).toBeLessThan(firstAssistantIdx);
+  });
+
+  it("does not render injected chip when no memories and no briefing", () => {
+    const { container } = render(<TranscriptView events={[]} prompt="x" injectedMemories={[]} />);
+    expect(container.querySelector(".memory-chip")).toBeNull();
+  });
+
+  it("extracted chip only appears after a complete event", () => {
+    const notYetComplete = render(
+      <TranscriptView
+        events={[{ event_type: "text", text: "still working" }]}
+        prompt="x"
+        extractedMemories={[]}
+      />,
+    );
+    expect(notYetComplete.container.querySelector(".memory-chip-extracted")).toBeNull();
+
+    const done = render(
+      <TranscriptView
+        events={[{ event_type: "complete", summary: "done", total_cost_usd: 0, duration_ms: 1, turns: 1 }]}
+        prompt="x"
+        extractedMemories={[]}
+      />,
+    );
+    expect(done.container.querySelector(".memory-chip-extracted")).not.toBeNull();
+  });
+
+  it("extracted chip renders error state when extraction fails", () => {
+    render(
+      <TranscriptView
+        events={[{ event_type: "complete", summary: "done", total_cost_usd: 0, duration_ms: 1, turns: 1 }]}
+        prompt="x"
+        extractedMemoriesError="mem0 unreachable"
+      />,
+    );
+    expect(screen.getByText("memory extraction failed")).toBeInTheDocument();
+  });
+
+  it("extracted chip is hidden while a follow-up run is in flight (status=running)", () => {
+    // Prior run completed + extraction returned. User sends a follow-up,
+    // thread.status flips back to running. The chip's content reflects the
+    // stale run and would mislead, so it should hide until the new run
+    // completes and a fresh extraction overwrites the state.
+    const { container } = render(
+      <TranscriptView
+        events={[
+          { event_type: "text", text: "first answer" },
+          { event_type: "complete", summary: "first done", total_cost_usd: 0, duration_ms: 1, turns: 1 },
+          { event_type: "follow_up", text: "one more thing" },
+          { event_type: "thinking", text: "working..." },
+        ]}
+        prompt="x"
+        status="running"
+        extractedMemories={[
+          {
+            id: "stale",
+            workspaceId: "w",
+            memoryType: "pattern",
+            content: "prev run",
+            sourceThreadId: "t",
+            pinned: false,
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ]}
+      />,
+    );
+    expect(container.querySelector(".memory-chip-extracted")).toBeNull();
+  });
+
+  it("extracted chip reappears when status flips back to complete", () => {
+    const { container } = render(
+      <TranscriptView
+        events={[
+          { event_type: "complete", summary: "first", total_cost_usd: 0, duration_ms: 1, turns: 1 },
+          { event_type: "follow_up", text: "and this" },
+          { event_type: "complete", summary: "second", total_cost_usd: 0, duration_ms: 1, turns: 1 },
+        ]}
+        prompt="x"
+        status="complete"
+        extractedMemories={[]}
+      />,
+    );
+    expect(container.querySelector(".memory-chip-extracted")).not.toBeNull();
+  });
+
+  it("extracted chip renders when no status prop is provided (legacy callers)", () => {
+    const { container } = render(
+      <TranscriptView
+        events={[{ event_type: "complete", summary: "ok", total_cost_usd: 0, duration_ms: 1, turns: 1 }]}
+        prompt="x"
+        extractedMemories={[]}
+      />,
+    );
+    expect(container.querySelector(".memory-chip-extracted")).not.toBeNull();
+  });
+
   it("hides cost when showCost is false", () => {
     const events: AgentEvent[] = [
       { event_type: "sub_agent_complete", parent_tool_use_id: "t1", summary: "found the answer", cost_usd: 0.012 },

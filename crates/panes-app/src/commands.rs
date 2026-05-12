@@ -186,6 +186,46 @@ pub struct ThreadInfo {
     /// decide whether to show git-only actions like "Commit".
     #[serde(default)]
     pub tracker_kind: String,
+    /// Memory snapshots persisted at thread start / end so the UI can
+    /// render the memory-context chip even after a reload. Null for
+    /// threads created before the migration that added these columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub injected_memories: Option<Vec<MemoryInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub injected_briefing: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_memories: Option<Vec<MemoryInfo>>,
+}
+
+/// Columns and row decoder shared between list_threads and list_all_threads.
+/// Keep them in sync — callers select this exact prefix.
+const THREAD_COLUMNS: &str = "id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id, tracker_kind, injected_memories, injected_briefing, extracted_memories";
+
+fn decode_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
+    let injected_json: Option<String> = row.get(11)?;
+    let briefing: Option<String> = row.get(12)?;
+    let extracted_json: Option<String> = row.get(13)?;
+    Ok(ThreadInfo {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        prompt: row.get(2)?,
+        status: row.get(3)?,
+        summary: row.get(4)?,
+        cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
+        duration_ms: row.get(6)?,
+        created_at: row.get(7)?,
+        events: vec![],
+        is_routine: row.get::<_, i32>(8).unwrap_or(0) != 0,
+        routine_id: row.get(9)?,
+        tracker_kind: row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "git".to_string()),
+        injected_memories: injected_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<MemoryInfo>>(s).ok()),
+        injected_briefing: briefing,
+        extracted_memories: extracted_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<MemoryInfo>>(s).ok()),
+    })
 }
 
 #[tauri::command]
@@ -194,27 +234,12 @@ pub async fn list_threads(
     workspace_id: String,
 ) -> Result<Vec<ThreadInfo>, PanesError> {
     db.execute(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id, tracker_kind
-             FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
-        )?;
+        let sql = format!(
+            "SELECT {THREAD_COLUMNS} FROM threads WHERE workspace_id = ?1 ORDER BY created_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
-        let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![workspace_id], |row| {
-            Ok(ThreadInfo {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                prompt: row.get(2)?,
-                status: row.get(3)?,
-                summary: row.get(4)?,
-                cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
-                duration_ms: row.get(6)?,
-                created_at: row.get(7)?,
-                events: vec![],
-                is_routine: row.get::<_, i32>(8).unwrap_or(0) != 0,
-                routine_id: row.get(9)?,
-                tracker_kind: row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "git".to_string()),
-            })
-        })?
+        let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![workspace_id], decode_thread_row)?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -249,27 +274,12 @@ pub async fn list_all_threads(
 ) -> Result<Vec<ThreadInfo>, PanesError> {
     let limit = limit.unwrap_or(100);
     db.execute(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id, tracker_kind
-             FROM threads ORDER BY created_at DESC LIMIT ?1"
-        )?;
+        let sql = format!(
+            "SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at DESC LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
-        let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![limit], |row| {
-            Ok(ThreadInfo {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                prompt: row.get(2)?,
-                status: row.get(3)?,
-                summary: row.get(4)?,
-                cost_usd: row.get::<_, f64>(5).unwrap_or(0.0),
-                duration_ms: row.get(6)?,
-                created_at: row.get(7)?,
-                events: vec![],
-                is_routine: row.get::<_, i32>(8).unwrap_or(0) != 0,
-                routine_id: row.get(9)?,
-                tracker_kind: row.get::<_, Option<String>>(10)?.unwrap_or_else(|| "git".to_string()),
-            })
-        })?
+        let threads: Vec<ThreadInfo> = stmt.query_map(rusqlite::params![limit], decode_thread_row)?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -339,8 +349,8 @@ pub async fn delete_thread(
 #[serde(rename_all = "camelCase")]
 pub struct StartThreadResult {
     pub thread_id: String,
-    pub memory_count: usize,
-    pub has_briefing: bool,
+    pub injected_memories: Vec<MemoryInfo>,
+    pub briefing_preview: Option<String>,
 }
 
 #[tauri::command]
@@ -400,8 +410,13 @@ pub async fn start_thread(
     .await
     .unwrap_or_default();
 
-    let memory_count = injected.memories.len();
-    let has_briefing = injected.briefing.is_some();
+    let briefing_preview = injected.briefing.as_ref().map(|b| truncate_briefing(b));
+    let injected_memories: Vec<MemoryInfo> = injected
+        .memories
+        .iter()
+        .cloned()
+        .map(MemoryInfo::from)
+        .collect();
 
     let context = SessionContext {
         briefing: injected.briefing,
@@ -409,15 +424,45 @@ pub async fn start_thread(
         budget_cap: None,
     };
 
+    let injected_json = serde_json::to_string(&injected_memories).unwrap_or_else(|_| "[]".into());
+    let briefing_json = briefing_preview.clone();
+
     let mgr = session_manager.lock().await;
     let thread_id = mgr.start_thread(&workspace, &prompt, &agent_for_dispatch, context, model.as_deref())
         .await?;
+    drop(mgr);
+
+    // Persist the injected context against the new thread row so reopened
+    // threads can still show what was injected.
+    let tid_for_db = thread_id.clone();
+    let _ = db.execute(move |conn| {
+        conn.execute(
+            "UPDATE threads SET injected_memories = ?1, injected_briefing = ?2 WHERE id = ?3",
+            rusqlite::params![injected_json, briefing_json, tid_for_db],
+        )?;
+        Ok(())
+    }).await;
 
     Ok(StartThreadResult {
         thread_id,
-        memory_count,
-        has_briefing,
+        injected_memories,
+        briefing_preview,
     })
+}
+
+/// Truncate a briefing to 500 chars (not bytes — briefings may contain
+/// multi-byte content) and append a horizontal ellipsis if shortened. The
+/// preview is purely UI chrome; the full briefing is still used in the
+/// prompt sent to the agent.
+fn truncate_briefing(b: &str) -> String {
+    const MAX_LEN: usize = 500;
+    if b.chars().count() <= MAX_LEN {
+        b.to_string()
+    } else {
+        let mut s: String = b.chars().take(MAX_LEN).collect();
+        s.push('…');
+        s
+    }
 }
 
 #[tauri::command]
@@ -740,6 +785,7 @@ pub async fn generate_commit_message(
 #[tauri::command]
 pub async fn extract_memories(
     memory_manager: tauri::State<'_, MemoryManagerState>,
+    db: tauri::State<'_, DbState>,
     workspace_id: String,
     thread_id: String,
     transcript: String,
@@ -749,7 +795,22 @@ pub async fn extract_memories(
         .await
         .map_err(PanesError::from)?;
 
-    Ok(memories.into_iter().map(MemoryInfo::from).collect())
+    let infos: Vec<MemoryInfo> = memories.into_iter().map(MemoryInfo::from).collect();
+
+    // Persist the extracted set on the thread row so the UI can show the
+    // "N memories written" chip after a reload. Best-effort — a DB error
+    // here must not break the IPC return.
+    let json = serde_json::to_string(&infos).unwrap_or_else(|_| "[]".into());
+    let tid = thread_id.clone();
+    let _ = db.execute(move |conn| {
+        conn.execute(
+            "UPDATE threads SET extracted_memories = ?1 WHERE id = ?2",
+            rusqlite::params![json, tid],
+        )?;
+        Ok(())
+    }).await;
+
+    Ok(infos)
 }
 
 // --- Memory CRUD ---
@@ -1671,7 +1732,12 @@ mod tests {
                 is_routine INTEGER DEFAULT 0,
                 flow_id TEXT,
                 flow_step INTEGER,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                routine_id TEXT,
+                tracker_kind TEXT,
+                injected_memories TEXT,
+                injected_briefing TEXT,
+                extracted_memories TEXT
             );
             CREATE TABLE events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2040,6 +2106,9 @@ Body text here
             is_routine: false,
             routine_id: None,
             tracker_kind: "git".to_string(),
+            injected_memories: None,
+            injected_briefing: None,
+            extracted_memories: None,
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(json.contains("\"workspaceId\""));
@@ -2662,5 +2731,138 @@ Body text here
         // Scoped filter should include a.txt but exclude b.txt.
         assert!(diff.contains("a/a.txt"), "should include a.txt: {diff}");
         assert!(!diff.contains("a/b.txt"), "should not include b.txt: {diff}");
+    }
+
+    // --- Memory visibility: persistence + decode roundtrip ---
+
+    /// Round-trip helper: writes a thread row with injected/extracted memory
+    /// JSON, then reads it back through the same decode path used by
+    /// list_threads/list_all_threads.
+    fn decoded_thread(conn: &rusqlite::Connection, tid: &str) -> ThreadInfo {
+        let sql = format!("SELECT {THREAD_COLUMNS} FROM threads WHERE id = ?1");
+        conn.query_row(&sql, rusqlite::params![tid], decode_thread_row).unwrap()
+    }
+
+    fn make_mem(id: &str, mtype: &str, content: &str) -> MemoryInfo {
+        MemoryInfo {
+            id: id.to_string(),
+            workspace_id: Some("ws1".to_string()),
+            memory_type: mtype.to_string(),
+            content: content.to_string(),
+            source_thread_id: "t1".to_string(),
+            pinned: false,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_decode_thread_row_null_memory_columns_roundtrip_as_none() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/null-mem");
+        insert_test_thread(&conn, "t1", "ws1", None);
+
+        let thread = decoded_thread(&conn, "t1");
+        assert!(thread.injected_memories.is_none());
+        assert!(thread.injected_briefing.is_none());
+        assert!(thread.extracted_memories.is_none());
+    }
+
+    #[test]
+    fn test_decode_thread_row_parses_persisted_injected_memories() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/inj-mem");
+        insert_test_thread(&conn, "t1", "ws1", None);
+
+        let mems = vec![
+            make_mem("m1", "decision", "always use rustls"),
+            make_mem("m2", "preference", "prefer async"),
+        ];
+        let json = serde_json::to_string(&mems).unwrap();
+        conn.execute(
+            "UPDATE threads SET injected_memories = ?1, injected_briefing = ?2 WHERE id = 't1'",
+            rusqlite::params![json, "be concise"],
+        )
+        .unwrap();
+
+        let thread = decoded_thread(&conn, "t1");
+        let injected = thread.injected_memories.expect("injected should decode");
+        assert_eq!(injected.len(), 2);
+        assert_eq!(injected[0].id, "m1");
+        assert_eq!(injected[0].memory_type, "decision");
+        assert_eq!(injected[1].content, "prefer async");
+        assert_eq!(thread.injected_briefing.as_deref(), Some("be concise"));
+    }
+
+    #[test]
+    fn test_decode_thread_row_parses_extracted_memories() {
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/ext-mem");
+        insert_test_thread(&conn, "t1", "ws1", None);
+
+        let mems = vec![make_mem("m1", "pattern", "remembered from this run")];
+        let json = serde_json::to_string(&mems).unwrap();
+        conn.execute(
+            "UPDATE threads SET extracted_memories = ?1 WHERE id = 't1'",
+            rusqlite::params![json],
+        )
+        .unwrap();
+
+        let thread = decoded_thread(&conn, "t1");
+        let extracted = thread.extracted_memories.expect("extracted should decode");
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].memory_type, "pattern");
+    }
+
+    #[test]
+    fn test_decode_thread_row_tolerates_malformed_json() {
+        // Future-proofing: if the column somehow contains non-array JSON or
+        // truncated bytes (e.g. from a bad migration), the UI must not crash
+        // — decode should degrade to None rather than propagating the error.
+        let conn = setup_test_db();
+        insert_test_workspace(&conn, "ws1", "/tmp/bad-mem");
+        insert_test_thread(&conn, "t1", "ws1", None);
+        conn.execute(
+            "UPDATE threads SET injected_memories = ?1 WHERE id = 't1'",
+            rusqlite::params!["{not valid"],
+        )
+        .unwrap();
+
+        let thread = decoded_thread(&conn, "t1");
+        assert!(thread.injected_memories.is_none());
+    }
+
+    // --- Briefing preview truncation ---
+
+    #[test]
+    fn test_truncate_briefing_short_is_unchanged() {
+        let s = "hello world";
+        assert_eq!(truncate_briefing(s), s);
+    }
+
+    #[test]
+    fn test_truncate_briefing_at_exact_limit_is_unchanged() {
+        let s = "a".repeat(500);
+        assert_eq!(truncate_briefing(&s), s);
+        assert!(!truncate_briefing(&s).ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_briefing_long_gets_ellipsis() {
+        let s = "a".repeat(600);
+        let out = truncate_briefing(&s);
+        assert!(out.ends_with('…'));
+        // 500 'a' chars + one '…' = 501 chars total
+        assert_eq!(out.chars().count(), 501);
+    }
+
+    #[test]
+    fn test_truncate_briefing_handles_multibyte_without_splitting() {
+        // "🚀" is a 4-byte char but one `char`. A naive `&s[..500]` byte
+        // slice would panic on multi-byte boundaries; this asserts the
+        // char-based impl stays safe.
+        let s = "🚀".repeat(600);
+        let out = truncate_briefing(&s);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 501);
     }
 }

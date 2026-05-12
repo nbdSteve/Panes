@@ -1,21 +1,62 @@
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentEvent } from "../types";
+import type { MemoryInfo } from "../lib/api";
 import { formatCost } from "../lib/utils";
+import MemoryChip from "./MemoryChip";
 
 interface TranscriptViewProps {
   events: AgentEvent[];
   prompt: string;
   showCost?: boolean;
+  /**
+   * Current thread lifecycle state. The extracted-memory chip is gated on
+   * this so it stays hidden during in-flight follow-up turns (status would
+   * be "running" / "gate") even though prior `complete` events remain in
+   * the stream. Defaults to treating the stream as quiescent when omitted
+   * — legacy callers (tests) that don't pass status still work.
+   */
+  status?: "starting" | "running" | "gate" | "complete" | "error" | "interrupted";
+  injectedMemories?: MemoryInfo[];
+  injectedBriefing?: string | null;
+  extractedMemories?: MemoryInfo[];
+  extractedMemoriesError?: string;
+  onViewMemories?: (memoryId?: string) => void;
 }
 
-export default function TranscriptView({ events, prompt, showCost }: TranscriptViewProps) {
+export default function TranscriptView({
+  events,
+  prompt,
+  showCost,
+  status,
+  injectedMemories,
+  injectedBriefing,
+  extractedMemories,
+  extractedMemoriesError,
+  onViewMemories,
+}: TranscriptViewProps) {
+  const hasCompleted = events.some((e) => e.event_type === "complete");
+  // Hide the extracted chip while a follow-up is mid-flight. Its content
+  // reflects the previous run's extraction and would mislead the user into
+  // thinking memory has already been written for the in-flight turn.
+  const isQuiescent = status === undefined || status === "complete" || status === "error" || status === "interrupted";
+  const shouldShowExtracted = hasCompleted && isQuiescent && (extractedMemories !== undefined || extractedMemoriesError !== undefined);
+
   return (
     <div className="transcript-view">
       <div className="transcript-message transcript-user">
         <span className="transcript-role">You</span>
         <div className="transcript-body">{prompt}</div>
       </div>
+
+      {(injectedMemories && injectedMemories.length > 0) || injectedBriefing ? (
+        <MemoryChip
+          variant="injected"
+          memories={injectedMemories ?? []}
+          briefing={injectedBriefing}
+          onViewMemories={onViewMemories}
+        />
+      ) : null}
 
       {events.map((event, i) => {
         switch (event.event_type) {
@@ -110,6 +151,15 @@ export default function TranscriptView({ events, prompt, showCost }: TranscriptV
             return null;
         }
       })}
+
+      {shouldShowExtracted && (
+        <MemoryChip
+          variant="extracted"
+          memories={extractedMemories ?? []}
+          error={extractedMemoriesError}
+          onViewMemories={onViewMemories}
+        />
+      )}
     </div>
   );
 }

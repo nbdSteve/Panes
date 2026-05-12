@@ -1,11 +1,19 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type MemoryInfo, type BriefingInfo } from "../lib/api";
 
 interface MemoryPanelProps {
   workspaceId: string;
+  /**
+   * When set, the panel scrolls to and briefly highlights the matching
+   * memory card after loading. Caller must clear this via
+   * `onHighlightConsumed` once navigation completes so re-entering the
+   * panel doesn't re-trigger the same highlight.
+   */
+  highlightMemoryId?: string | null;
+  onHighlightConsumed?: () => void;
 }
 
-export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
+export default function MemoryPanel({ workspaceId, highlightMemoryId, onHighlightConsumed }: MemoryPanelProps) {
   const [memories, setMemories] = useState<MemoryInfo[]>([]);
   const [briefing, setBriefing] = useState<BriefingInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -15,6 +23,8 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
   const [editingMemory, setEditingMemory] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [flashingId, setFlashingId] = useState<string | null>(null);
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const loadMemories = useCallback(async () => {
     try {
@@ -45,6 +55,27 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
     const timer = setTimeout(() => setConfirmDeleteId(null), 3000);
     return () => clearTimeout(timer);
   }, [confirmDeleteId]);
+
+  // Deep-link: when a highlightMemoryId arrives and the matching card is
+  // mounted, scroll it into view and flash it. Runs only after the memory
+  // list finishes loading so the ref map is populated.
+  useEffect(() => {
+    if (loading || !highlightMemoryId) return;
+    const el = cardRefs.current.get(highlightMemoryId);
+    // If the id doesn't match any current card (memory was deleted, or
+    // extraction returned a transient), still consume the request so we
+    // don't loop.
+    if (el) {
+      // jsdom doesn't implement scrollIntoView; guard so unit tests don't
+      // crash the effect before reaching the flash + consume steps.
+      el.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      setFlashingId(highlightMemoryId);
+      const timer = setTimeout(() => setFlashingId(null), 2200);
+      onHighlightConsumed?.();
+      return () => clearTimeout(timer);
+    }
+    onHighlightConsumed?.();
+  }, [loading, highlightMemoryId, memories, onHighlightConsumed]);
 
   const handleSaveBriefing = async () => {
     const trimmed = briefingDraft.trim();
@@ -152,7 +183,12 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
                 memory={m}
                 editing={editingMemory === m.id}
                 confirming={confirmDeleteId === m.id}
+                flashing={flashingId === m.id}
                 draft={memoryDraft}
+                cardRef={(el) => {
+                  if (el) cardRefs.current.set(m.id, el);
+                  else cardRefs.current.delete(m.id);
+                }}
                 onEdit={() => {
                   setEditingMemory(m.id);
                   setMemoryDraft(m.content);
@@ -178,7 +214,12 @@ export default function MemoryPanel({ workspaceId }: MemoryPanelProps) {
                 memory={m}
                 editing={editingMemory === m.id}
                 confirming={confirmDeleteId === m.id}
+                flashing={flashingId === m.id}
                 draft={memoryDraft}
+                cardRef={(el) => {
+                  if (el) cardRefs.current.set(m.id, el);
+                  else cardRefs.current.delete(m.id);
+                }}
                 onEdit={() => {
                   setEditingMemory(m.id);
                   setMemoryDraft(m.content);
@@ -201,7 +242,9 @@ function MemoryCard({
   memory,
   editing,
   confirming,
+  flashing,
   draft,
+  cardRef,
   onEdit,
   onSave,
   onCancel,
@@ -212,7 +255,9 @@ function MemoryCard({
   memory: MemoryInfo;
   editing: boolean;
   confirming: boolean;
+  flashing: boolean;
   draft: string;
+  cardRef?: (el: HTMLDivElement | null) => void;
   onEdit: () => void;
   onSave: () => void;
   onCancel: () => void;
@@ -221,7 +266,11 @@ function MemoryCard({
   onDelete: () => void;
 }) {
   return (
-    <div className={`memory-card ${memory.pinned ? "pinned" : ""}`}>
+    <div
+      ref={cardRef}
+      data-memory-id={memory.id}
+      className={`memory-card ${memory.pinned ? "pinned" : ""}${flashing ? " memory-card-flash" : ""}`}
+    >
       {editing ? (
         <div className="memory-edit">
           <textarea
