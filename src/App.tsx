@@ -51,7 +51,13 @@ function App() {
   const [routines, setRoutines] = useState<RoutineInfo[]>([]);
   const [validatorTypes, setValidatorTypes] = useState<ValidatorTypeInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
-  const wsConfigRef = useRef<Map<string, ConfigPrefs>>(new Map());
+  // In-session ThreadView picks, keyed by workspace id. State rather than
+  // a ref: when ThreadView broadcasts onConfigChange, we need App to
+  // re-render so derivedConfig picks up the new adapter. With a ref,
+  // dropdown switches silently mutated memory and the app kept rendering
+  // from the stale value — which is why switching back to an already-
+  // cached adapter appeared to do nothing.
+  const [wsConfig, setWsConfig] = useState<Map<string, ConfigPrefs>>(new Map());
   const globalConfigRef = useRef<ConfigPrefs>(DEFAULT_CONFIG);
 
   // Instantiate the cache once — it owns the cached/in-flight sets. React
@@ -421,7 +427,23 @@ function App() {
   }, []);
 
   const handleConfigChange = useCallback((workspaceId: string, config: ConfigPrefs) => {
-    wsConfigRef.current.set(workspaceId, config);
+    // Only commit when something actually changed to avoid a setState loop
+    // with ThreadView's broadcast effect (which fires on every local
+    // selection change — including the ones that arrive here).
+    setWsConfig((prev) => {
+      const existing = prev.get(workspaceId);
+      if (
+        existing &&
+        existing.adapter === config.adapter &&
+        existing.agent === config.agent &&
+        existing.model === config.model
+      ) {
+        return prev;
+      }
+      const next = new Map(prev);
+      next.set(workspaceId, config);
+      return next;
+    });
     globalConfigRef.current = config;
     if (config.adapter) {
       adapterCache.ensure(config.adapter);
@@ -439,7 +461,12 @@ function App() {
     // change — not the stale dropdown value — wins when we re-derive the
     // config next render. Without this, ThreadView would keep showing the
     // previous adapter's agents/models until the user clicked the dropdown.
-    wsConfigRef.current.delete(workspaceId);
+    setWsConfig((prev) => {
+      if (!prev.has(workspaceId)) return prev;
+      const next = new Map(prev);
+      next.delete(workspaceId);
+      return next;
+    });
     try {
       await api.setWorkspaceDefaultAdapter(workspaceId, adapter);
     } catch {
@@ -517,11 +544,11 @@ function App() {
   const currentThread = threads.find((t) => t.id === activeThread);
 
   // Derive the adapter/config the active workspace should render with.
-  // Precedence (see deriveConfig): ThreadView's in-session pick (wsConfigRef)
+  // Precedence (see deriveConfig): ThreadView's in-session pick (wsConfig)
   // > persisted workspace default > global fallback. handleSetDefaultAdapter
-  // clears wsConfigRef for the affected workspace so a Settings-driven
-  // change flows straight through here without requiring a dropdown click.
-  const wsPick = activeWs ? wsConfigRef.current.get(activeWs.id) : undefined;
+  // clears wsConfig[workspaceId] so a Settings-driven change flows straight
+  // through here without requiring a dropdown click.
+  const wsPick = activeWs ? wsConfig.get(activeWs.id) : undefined;
   const derivedConfig: ConfigPrefs = deriveConfig(
     wsPick,
     activeWs?.defaultAdapter,
@@ -529,11 +556,16 @@ function App() {
   );
   const derivedAdapter = derivedConfig.adapter;
   const cachedLists = adapterLists.get(derivedAdapter);
-  const viewAgents = cachedLists?.agents ?? [];
-  const viewModels = cachedLists?.models ?? FALLBACK_MODELS;
-  // "..." in the picker only while this specific adapter is being probed
+  // "..." in both pickers while this specific adapter is being probed
   // AND we have no cached list for it yet.
-  const viewAgentsLoading = loadingAdapter === derivedAdapter && !cachedLists;
+  const viewListsLoading = loadingAdapter === derivedAdapter && !cachedLists;
+  const viewAgents = cachedLists?.agents ?? [];
+  // During the loading window we pass [] so the model picker renders its
+  // "Discovering models…" placeholder instead of briefly showing claude's
+  // sonnet/opus/haiku under a kiro-cli adapter. Fallback still kicks in if
+  // discovery settles with no result (backend error, adapter doesn't
+  // expose a model list) so the picker is never permanently empty.
+  const viewModels = cachedLists?.models ?? (viewListsLoading ? [] : FALLBACK_MODELS);
 
   useEffect(() => {
     if (derivedAdapter) ensureAdapterLists(derivedAdapter);
@@ -656,7 +688,7 @@ function App() {
             thread={currentThread ?? null}
             adapters={adapters}
             agents={viewAgents}
-            agentsLoading={viewAgentsLoading}
+            listsLoading={viewListsLoading}
             models={viewModels}
             validatorTypes={validatorTypes}
             defaultConfig={derivedConfig}

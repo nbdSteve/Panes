@@ -25,8 +25,12 @@ interface ThreadViewProps {
   thread: ThreadInfo | null;
   adapters: string[];
   agents: AgentInfo[];
-  /** True while the backend is probing the adapter for its agent list. */
-  agentsLoading?: boolean;
+  /**
+   * True while the backend is probing the adapter for its agent + model
+   * lists. Both come from the same refresh call, so a single flag covers
+   * the agent and model picker placeholders.
+   */
+  listsLoading?: boolean;
   models: ModelInfo[];
   validatorTypes?: ValidatorTypeInfo[];
   defaultConfig: ConfigPrefs;
@@ -43,7 +47,7 @@ interface ThreadViewProps {
   showCost?: boolean;
 }
 
-export default function ThreadView({ workspace, thread, adapters, agents, agentsLoading, models, validatorTypes, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
+export default function ThreadView({ workspace, thread, adapters, agents, listsLoading, models, validatorTypes, defaultConfig, onConfigChange, onStartThread, onCompletionAction, onCancel, onQueueFollowUp, onResumeThread, onAddDiffComment, onDiffViewChange, onMarkFeedbackSent, onSetBudgetCap, showCost }: ThreadViewProps) {
   const [prompt, setPrompt] = useState("");
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
@@ -509,7 +513,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
                     <path d="M16 14H8a4 4 0 0 0-4 4v2h16v-2a4 4 0 0 0-4-4z" />
                   </svg>
                   <span className="config-dropdown-value">
-                    {agentsLoading && agents.length === 0 ? "…" : (selectedAgent || "Default")}
+                    {listsLoading && agents.length === 0 ? "…" : (selectedAgent || "Default")}
                   </span>
                   <svg className="config-dropdown-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="6 9 12 15 18 9" /></svg>
                 </button>
@@ -527,8 +531,8 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
                       )}
                     </button>
-                    {agentsLoading && agents.length === 0 && (
-                      // Shown while we're probing the backend for its agent list.
+                    {listsLoading && agents.length === 0 && (
+                      // Shown while we're probing the adapter for its agent list.
                       // kiro-cli's MCP servers take 1-3s to initialize; without this
                       // the picker looks empty and broken.
                       <div className="config-dropdown-item config-dropdown-item-loading" aria-busy="true">
@@ -572,7 +576,11 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
                   </svg>
-                  <span className="config-dropdown-value">{models.find(m => m.id === effectiveModel)?.label ?? effectiveModel}</span>
+                  <span className="config-dropdown-value">
+                    {listsLoading && models.length === 0
+                      ? "…"
+                      : (models.find(m => m.id === effectiveModel)?.label ?? effectiveModel ?? "Model")}
+                  </span>
                   {modelLocked ? (
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
                   ) : (
@@ -581,6 +589,14 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
                 </button>
                 {modelOpen && !modelLocked && (
                   <div className="config-dropdown-menu">
+                    {listsLoading && models.length === 0 && (
+                      <div className="config-dropdown-item config-dropdown-item-loading" aria-busy="true">
+                        <span className="config-dropdown-item-content">
+                          <span className="config-dropdown-item-label">Discovering models…</span>
+                          <span className="config-dropdown-item-desc">Querying the backend</span>
+                        </span>
+                      </div>
+                    )}
                     {models.map(m => (
                       <button
                         key={m.id}
