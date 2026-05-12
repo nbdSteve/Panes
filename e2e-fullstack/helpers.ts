@@ -18,15 +18,26 @@ export async function sendPrompt(page: Page, prompt: string) {
 }
 
 export async function waitForCompletion(page: Page, timeout = 15_000) {
-  await page.locator(".completion-card").waitFor({ timeout });
+  // Use `.first()` — strict mode is enabled by default and would fail if
+  // more than one completion card is on the page (e.g. a follow-up or
+  // queued second prompt that's already completed). The helper's contract
+  // is "at least one completion card exists", so first-match is correct.
+  await page.locator(".completion-card").first().waitFor({ timeout });
+  // The Complete event is forwarded to the frontend before the backend
+  // finishes updating `threads.status = 'completed'` in SQLite (see
+  // session.rs:763 vs 801). A small settle window avoids a downstream
+  // race where a query like `list_all_threads` runs against the still-
+  // running row and the UI appears empty. 100ms is well under typical
+  // human perception and comfortably above the observed write latency.
+  await page.waitForTimeout(100);
 }
 
 export async function waitForGate(page: Page, timeout = 15_000) {
-  await page.locator(".gate-card").waitFor({ timeout });
+  await page.locator(".gate-card").first().waitFor({ timeout });
 }
 
 export async function waitForError(page: Page, timeout = 15_000) {
-  await page.locator(".error-card").waitFor({ timeout });
+  await page.locator(".error-card").first().waitFor({ timeout });
 }
 
 export async function waitForText(page: Page, text: string, timeout = 10_000) {

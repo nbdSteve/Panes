@@ -104,9 +104,13 @@ export default function FeedView({
 
   if (error) return <div className="inline-error"><span className="inline-error-icon">!</span>{error}</div>;
 
+  // Empty state is still wrapped in `.feed-view` so callers (and E2E
+  // tests) that assert on the panel's presence don't have to special-
+  // case the empty-list branch. `.feed-empty` remains as a modifier so
+  // the existing styling keeps working.
   if (threads.length === 0) {
     return (
-      <div className="feed-empty">
+      <div className="feed-view feed-empty">
         <FluidBackground />
         <div className="feed-empty-content">
           <h2>No activity yet</h2>
