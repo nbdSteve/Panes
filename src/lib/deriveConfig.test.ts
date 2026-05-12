@@ -47,4 +47,20 @@ describe("deriveConfig", () => {
     const wsPick: ConfigPrefs = { adapter: "kiro-cli", agent: "", model: "sonnet" };
     expect(deriveConfig(wsPick, "claude-code", FALLBACK).adapter).toBe("kiro-cli");
   });
+
+  it("carries over agent/model when persisted adapter MATCHES global fallback's adapter", () => {
+    // Bug fix: new workspaces are stamped with default_agent="claude-code"
+    // at creation, matching the global fallback adapter. Resetting agent+
+    // model in that case would throw away the user's most-recent picks.
+    // When the adapters match, the global's agent/model are valid for the
+    // new workspace and should carry through — otherwise adding a new
+    // workspace after picking karen/Opus silently reverts to Default/
+    // Sonnet.
+    const global: ConfigPrefs = {
+      adapter: "claude-code",
+      agent: "karen",
+      model: "opus",
+    };
+    expect(deriveConfig(undefined, "claude-code", global)).toEqual(global);
+  });
 });
