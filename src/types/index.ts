@@ -8,7 +8,14 @@ export interface WorkspaceInfo {
   id: string;
   path: string;
   name: string;
-  defaultAgent?: string;
+  /**
+   * The adapter (claude-code / kiro-cli / ...) this workspace defaults to
+   * when starting a new thread. Stored in the backend under the column
+   * `default_agent` for historical reasons — the IPC translator in
+   * `src/lib/api.ts` maps between the backend key and this name. Treat
+   * this as "adapter", not as an agent/mode.
+   */
+  defaultAdapter?: string;
   budgetCap?: number | null;
 }
 

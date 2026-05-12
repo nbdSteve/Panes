@@ -8,10 +8,10 @@ interface SettingsPanelProps {
   workspaces: WorkspaceInfo[];
   features: FeatureInfo[];
   onToggleFeature: (featureId: string, enabled: boolean) => void;
-  onSetDefaultAgent: (workspaceId: string, agent: string) => void;
+  onSetDefaultAdapter: (workspaceId: string, adapter: string) => void;
 }
 
-export default function SettingsPanel({ workspaces, features, onToggleFeature, onSetDefaultAgent }: SettingsPanelProps) {
+export default function SettingsPanel({ workspaces, features, onToggleFeature, onSetDefaultAdapter }: SettingsPanelProps) {
   const showCost = features.some((f) => f.id === "cost_tracking" && f.enabled);
   const [backendStatus, setBackendStatus] = useState<MemoryBackendStatus | null>(null);
   const [totalCost, setTotalCost] = useState(0);
@@ -111,16 +111,16 @@ export default function SettingsPanel({ workspaces, features, onToggleFeature, o
                 <select
                   className="settings-adapter-select"
                   aria-label={`Default adapter for ${ws.name}`}
-                  value={ws.defaultAgent ?? "claude-code"}
-                  onChange={(e) => onSetDefaultAgent(ws.id, e.target.value)}
+                  value={ws.defaultAdapter ?? "claude-code"}
+                  onChange={(e) => onSetDefaultAdapter(ws.id, e.target.value)}
                 >
                   {/* Include the workspace's current value even if it's not
                       in the adapter list (e.g. the kiro-cli binary went
                       missing) so the user can see what's stored rather than
                       a silent reset to claude-code. */}
-                  {adapters.length === 0 || !adapters.includes(ws.defaultAgent ?? "claude-code") ? (
-                    <option value={ws.defaultAgent ?? "claude-code"}>
-                      {ws.defaultAgent ?? "claude-code"}
+                  {adapters.length === 0 || !adapters.includes(ws.defaultAdapter ?? "claude-code") ? (
+                    <option value={ws.defaultAdapter ?? "claude-code"}>
+                      {ws.defaultAdapter ?? "claude-code"}
                     </option>
                   ) : null}
                   {adapters.map((name) => (

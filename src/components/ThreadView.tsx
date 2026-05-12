@@ -48,6 +48,27 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
   const [selectedAdapter, setSelectedAdapter] = useState(defaultConfig.adapter || adapters[0] || "");
   const [selectedAgent, setSelectedAgent] = useState(defaultConfig.agent);
   const [selectedModel, setSelectedModel] = useState(defaultConfig.model || "sonnet");
+
+  // Re-sync local selection when the incoming defaultConfig changes for a
+  // reason other than this component's own onConfigChange — e.g. the
+  // workspace's default adapter was changed in Settings, or the user
+  // switched to a workspace with a different persisted default. Without
+  // this the picker would keep showing the initial-render value until the
+  // user manually clicked a dropdown.
+  useEffect(() => {
+    if (defaultConfig.adapter && defaultConfig.adapter !== selectedAdapter) {
+      setSelectedAdapter(defaultConfig.adapter);
+    }
+    if (defaultConfig.agent !== selectedAgent) {
+      setSelectedAgent(defaultConfig.agent);
+    }
+    if (defaultConfig.model && defaultConfig.model !== selectedModel) {
+      setSelectedModel(defaultConfig.model);
+    }
+    // Intentionally depending only on defaultConfig values — the local
+    // setters are stable and including the selected* values would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultConfig.adapter, defaultConfig.agent, defaultConfig.model]);
   const [adapterOpen, setAdapterOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
@@ -128,9 +149,18 @@ export default function ThreadView({ workspace, thread, adapters, agents, agents
     }
   }, [diffView, diffRaw, cardFiles, workspace.path, thread?.id]);
 
+  // Broadcast only when the selection actually changes. We intentionally
+  // exclude onConfigChange from the dep array — the parent inlines it as an
+  // arrow function, so including it would re-fire this effect on every App
+  // render (including ones triggered by unrelated state), re-broadcasting a
+  // stale value right after handleSetDefaultAdapter cleared wsConfigRef and
+  // racing with the re-sync effect above. A ref keeps the latest callback
+  // reachable without pulling it into the dep list.
+  const onConfigChangeRef = useRef(onConfigChange);
+  useEffect(() => { onConfigChangeRef.current = onConfigChange; }, [onConfigChange]);
   useEffect(() => {
-    onConfigChange({ adapter: selectedAdapter, agent: selectedAgent, model: selectedModel });
-  }, [selectedAdapter, selectedAgent, selectedModel, onConfigChange]);
+    onConfigChangeRef.current({ adapter: selectedAdapter, agent: selectedAgent, model: selectedModel });
+  }, [selectedAdapter, selectedAgent, selectedModel]);
 
   useEffect(() => {
     if (contentRef.current) {

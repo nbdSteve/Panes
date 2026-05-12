@@ -6,8 +6,8 @@ import type { WorkspaceInfo } from "../App";
 import type { FeatureInfo } from "../types";
 
 const workspaces: WorkspaceInfo[] = [
-  { id: "ws-1", path: "/tmp/a", name: "Alpha", defaultAgent: "claude-code" },
-  { id: "ws-2", path: "/tmp/b", name: "Beta", defaultAgent: "kiro-cli" },
+  { id: "ws-1", path: "/tmp/a", name: "Alpha", defaultAdapter: "claude-code" },
+  { id: "ws-2", path: "/tmp/b", name: "Beta", defaultAdapter: "kiro-cli" },
 ];
 
 const features: FeatureInfo[] = [];
@@ -19,7 +19,7 @@ describe("SettingsPanel — workspace default adapter", () => {
         workspaces={workspaces}
         features={features}
         onToggleFeature={() => {}}
-        onSetDefaultAgent={() => {}}
+        onSetDefaultAdapter={() => {}}
       />,
     );
 
@@ -35,14 +35,14 @@ describe("SettingsPanel — workspace default adapter", () => {
 
   it("invokes the handler with the selected adapter when changed", async () => {
     const user = userEvent.setup();
-    const onSetDefaultAgent = vi.fn();
+    const onSetDefaultAdapter = vi.fn();
 
     render(
       <SettingsPanel
         workspaces={workspaces}
         features={features}
         onToggleFeature={() => {}}
-        onSetDefaultAgent={onSetDefaultAgent}
+        onSetDefaultAdapter={onSetDefaultAdapter}
       />,
     );
 
@@ -52,7 +52,7 @@ describe("SettingsPanel — workspace default adapter", () => {
 
     await user.selectOptions(screen.getByLabelText("Default adapter for Alpha"), "kiro-cli");
 
-    expect(onSetDefaultAgent).toHaveBeenCalledWith("ws-1", "kiro-cli");
+    expect(onSetDefaultAdapter).toHaveBeenCalledWith("ws-1", "kiro-cli");
   });
 
   it("includes the stored value as an option even when it's not in the adapter list", async () => {
@@ -60,7 +60,7 @@ describe("SettingsPanel — workspace default adapter", () => {
     // missing, adapter was unregistered, etc). The UI should still show
     // what's persisted rather than silently snapping it to claude-code.
     const workspaces: WorkspaceInfo[] = [
-      { id: "ws-x", path: "/tmp/x", name: "Exo", defaultAgent: "unknown-backend" },
+      { id: "ws-x", path: "/tmp/x", name: "Exo", defaultAdapter: "unknown-backend" },
     ];
 
     render(
@@ -68,7 +68,7 @@ describe("SettingsPanel — workspace default adapter", () => {
         workspaces={workspaces}
         features={features}
         onToggleFeature={() => {}}
-        onSetDefaultAgent={() => {}}
+        onSetDefaultAdapter={() => {}}
       />,
     );
 
@@ -86,7 +86,7 @@ describe("SettingsPanel — workspace default adapter", () => {
         workspaces={[]}
         features={features}
         onToggleFeature={() => {}}
-        onSetDefaultAgent={() => {}}
+        onSetDefaultAdapter={() => {}}
       />,
     );
 

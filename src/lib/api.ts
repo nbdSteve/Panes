@@ -58,8 +58,30 @@ export interface WorkspaceInfo {
   id: string;
   path: string;
   name: string;
+  /**
+   * Adapter name (claude-code, kiro-cli, ...). The backend serializes this
+   * under `defaultAgent` / `default_agent` for historical reasons; we
+   * translate at the IPC boundary in listWorkspaces / addWorkspace so the
+   * rest of the frontend can use the accurate name.
+   */
+  defaultAdapter?: string;
+  budgetCap?: number | null;
+}
+
+// What the backend actually sends over IPC. Translated into WorkspaceInfo
+// (renaming defaultAgent → defaultAdapter) so no code past this boundary
+// has to deal with the misleading "agent" wording.
+interface WorkspaceInfoWire {
+  id: string;
+  path: string;
+  name: string;
   defaultAgent?: string;
   budgetCap?: number | null;
+}
+
+function decodeWorkspace(w: WorkspaceInfoWire): WorkspaceInfo {
+  const { defaultAgent, ...rest } = w;
+  return { ...rest, defaultAdapter: defaultAgent };
 }
 
 export interface MemoryBackendStatus {
@@ -77,13 +99,17 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 
 export const api = {
   // Workspaces
-  listWorkspaces: () => call<WorkspaceInfo[]>("list_workspaces"),
-  addWorkspace: (path: string, name: string) =>
-    call<WorkspaceInfo>("add_workspace", { path, name }),
+  listWorkspaces: async (): Promise<WorkspaceInfo[]> =>
+    (await call<WorkspaceInfoWire[]>("list_workspaces")).map(decodeWorkspace),
+  addWorkspace: async (path: string, name: string): Promise<WorkspaceInfo> =>
+    decodeWorkspace(await call<WorkspaceInfoWire>("add_workspace", { path, name })),
   removeWorkspace: (workspaceId: string) =>
     call<void>("remove_workspace", { workspaceId }),
-  setWorkspaceDefaultAgent: (workspaceId: string, agent: string) =>
-    call<void>("set_workspace_default_agent", { workspaceId, agent }),
+  // Backend IPC command kept as-is (`set_workspace_default_agent`) — same
+  // reason as the column name. The frontend-facing method reflects that
+  // this sets the default *adapter*, not an agent.
+  setWorkspaceDefaultAdapter: (workspaceId: string, adapter: string) =>
+    call<void>("set_workspace_default_agent", { workspaceId, agent: adapter }),
   setWorkspaceBudgetCap: (workspaceId: string, budgetCap: number | null) =>
     call<void>("set_workspace_budget_cap", { workspaceId, budgetCap }),
 

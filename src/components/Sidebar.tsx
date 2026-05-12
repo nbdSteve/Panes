@@ -78,7 +78,7 @@ export default function Sidebar({
       id: crypto.randomUUID(),
       path: addPath.trim(),
       name,
-      defaultAgent: "claude-code",
+      defaultAdapter: "claude-code",
     });
     setAddPath("");
     setAddName("");

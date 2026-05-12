@@ -12,7 +12,8 @@ import WorkspaceValidatorsPanel from "./components/WorkspaceValidatorsPanel";
 import { mapBackendEvent } from "./lib/eventMapper";
 import { shouldFirePendingResume } from "./lib/pendingResume";
 import { api } from "./lib/api";
-import { refreshAdapterLists } from "./lib/adapterLists";
+import { AdapterCache, type AdapterCacheMap } from "./lib/adapterCache";
+import { deriveConfig } from "./lib/deriveConfig";
 import type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo, ValidatorTypeInfo } from "./types";
 
 export type { AgentEvent, WorkspaceInfo, AgentInfo, ModelInfo, ThreadInfo, ConfigPrefs, FeatureInfo, RoutineInfo };
@@ -39,18 +40,40 @@ function App() {
   const [activeThread, setActiveThread] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "feed" | "memory" | "settings" | "routines" | "dashboard" | "validators">("dashboard");
   const [adapters, setAdapters] = useState<string[]>([]);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
-  // True while the backend is probing the adapter for its agent/model list.
-  // Drives the "..." loading state in the picker so the user sees that
-  // discovery is in flight rather than an empty dropdown.
-  const [agentsLoading, setAgentsLoading] = useState(false);
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  // Per-adapter cache of agent + model lists. Keyed by adapter name so
+  // switching workspaces or changing the Settings default adapter picks up
+  // the right list without refetching (and, crucially, without showing the
+  // previous adapter's list until the user pokes the ThreadView dropdown).
+  const [adapterLists, setAdapterLists] = useState<AdapterCacheMap>(new Map());
+  // Adapter currently being probed. Used for the "..." picker loading state.
+  const [loadingAdapter, setLoadingAdapter] = useState<string | null>(null);
   const [features, setFeatures] = useState<FeatureInfo[]>([]);
   const [routines, setRoutines] = useState<RoutineInfo[]>([]);
   const [validatorTypes, setValidatorTypes] = useState<ValidatorTypeInfo[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const wsConfigRef = useRef<Map<string, ConfigPrefs>>(new Map());
   const globalConfigRef = useRef<ConfigPrefs>(DEFAULT_CONFIG);
+
+  // Instantiate the cache once — it owns the cached/in-flight sets. React
+  // state lives in setAdapterLists/setLoadingAdapter; the cache just drives
+  // them. useRef + a lazy initializer would also work, but useState with
+  // an initializer closes over the setters cleanly at construction time.
+  const [adapterCache] = useState(() => new AdapterCache(
+    {
+      listAgents: (name) => api.listAgents(name) as Promise<AgentInfo[]>,
+      listModels: (name) => api.listModels(name) as Promise<ModelInfo[]>,
+    },
+    {
+      setLists: (updater) => setAdapterLists(updater),
+      onLoadingStart: (adapter) => setLoadingAdapter(adapter),
+      onLoadingEnd: (adapter) => setLoadingAdapter((cur) => (cur === adapter ? null : cur)),
+    },
+    FALLBACK_MODELS,
+  ));
+
+  const ensureAdapterLists = useCallback((adapter: string) => {
+    adapterCache.ensure(adapter);
+  }, [adapterCache]);
 
   const loadThreadsForWorkspace = useCallback(async (workspaceId: string) => {
     try {
@@ -90,24 +113,17 @@ function App() {
 
   useEffect(() => {
     api.listWorkspaces().then((ws) => {
-      setWorkspaces(ws as WorkspaceInfo[]);
+      setWorkspaces(ws);
       for (const w of ws) {
         loadThreadsForWorkspace(w.id);
       }
     }).catch(() => {});
-    api.listAdapters().then((a) => {
-      setAdapters(a);
-      if (a.length > 0) {
-        setAgentsLoading(true);
-        refreshAdapterLists(a[0], FALLBACK_MODELS, {
-          listAgents: (name) => api.listAgents(name) as Promise<AgentInfo[]>,
-          listModels: (name) => api.listModels(name) as Promise<ModelInfo[]>,
-        }).then(({ agents, models }) => {
-          setAgents(agents);
-          setModels(models);
-        }).finally(() => setAgentsLoading(false));
-      }
-    }).catch(() => {});
+    // Note: we don't pre-fetch lists for adapters[0] here — the
+    // derivedAdapter effect below will fetch lists for the adapter of
+    // whichever workspace is actually active. If the active workspace's
+    // adapter is not adapters[0] (common for kiro-cli workspaces), the
+    // old pre-fetch was pure waste.
+    api.listAdapters().then(setAdapters).catch(() => {});
     api.getFeatures().then(setFeatures).catch(() => {});
     api.listValidatorTypes().then(setValidatorTypes).catch(() => {});
   }, [loadThreadsForWorkspace]);
@@ -299,7 +315,7 @@ function App() {
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          adapter: adapter || workspace.defaultAgent || undefined,
+          adapter: adapter || workspace.defaultAdapter || undefined,
           agent: agent || undefined,
           model: model ?? undefined,
         });
@@ -342,13 +358,18 @@ function App() {
       );
 
       try {
+        // No `adapter`/`agent` here: resume_thread reads the adapter from
+        // the DB row (thread.agent_type) — that's the adapter the session
+        // was originally spawned with. Forwarding workspace.defaultAdapter
+        // as `agent` was a long-standing mistake (different concept, wrong
+        // field), and the backend's stored_agent fallback already masks it.
+        // Send only what the resume actually needs.
         await api.resumeThread({
           threadId,
           workspaceId: workspace.id,
           workspacePath: workspace.path,
           workspaceName: workspace.name,
           prompt,
-          agent: workspace.defaultAgent || undefined,
         });
       } catch (e) {
         setThreads((prev) =>
@@ -399,18 +420,31 @@ function App() {
     } catch {}
   }, []);
 
-  const handleSetDefaultAgent = useCallback(async (workspaceId: string, agent: string) => {
+  const handleConfigChange = useCallback((workspaceId: string, config: ConfigPrefs) => {
+    wsConfigRef.current.set(workspaceId, config);
+    globalConfigRef.current = config;
+    if (config.adapter) {
+      adapterCache.ensure(config.adapter);
+    }
+  }, [adapterCache]);
+
+  const handleSetDefaultAdapter = useCallback(async (workspaceId: string, adapter: string) => {
     // Optimistic local update so the dropdown reflects the choice immediately;
     // revert on failure so the UI doesn't drift from persisted state.
-    const prev = workspaces.find((w) => w.id === workspaceId)?.defaultAgent;
+    const prev = workspaces.find((w) => w.id === workspaceId)?.defaultAdapter;
     setWorkspaces((w) =>
-      w.map((ws) => (ws.id === workspaceId ? { ...ws, defaultAgent: agent } : ws))
+      w.map((ws) => (ws.id === workspaceId ? { ...ws, defaultAdapter: adapter } : ws))
     );
+    // Drop any in-session ThreadView pick for this workspace so the Settings
+    // change — not the stale dropdown value — wins when we re-derive the
+    // config next render. Without this, ThreadView would keep showing the
+    // previous adapter's agents/models until the user clicked the dropdown.
+    wsConfigRef.current.delete(workspaceId);
     try {
-      await api.setWorkspaceDefaultAgent(workspaceId, agent);
+      await api.setWorkspaceDefaultAdapter(workspaceId, adapter);
     } catch {
       setWorkspaces((w) =>
-        w.map((ws) => (ws.id === workspaceId ? { ...ws, defaultAgent: prev } : ws))
+        w.map((ws) => (ws.id === workspaceId ? { ...ws, defaultAdapter: prev } : ws))
       );
     }
   }, [workspaces]);
@@ -481,6 +515,29 @@ function App() {
   const activeWs = workspaces.find((w) => w.id === activeWorkspace);
   const wsThreads = threads.filter((t) => t.workspaceId === activeWorkspace);
   const currentThread = threads.find((t) => t.id === activeThread);
+
+  // Derive the adapter/config the active workspace should render with.
+  // Precedence (see deriveConfig): ThreadView's in-session pick (wsConfigRef)
+  // > persisted workspace default > global fallback. handleSetDefaultAdapter
+  // clears wsConfigRef for the affected workspace so a Settings-driven
+  // change flows straight through here without requiring a dropdown click.
+  const wsPick = activeWs ? wsConfigRef.current.get(activeWs.id) : undefined;
+  const derivedConfig: ConfigPrefs = deriveConfig(
+    wsPick,
+    activeWs?.defaultAdapter,
+    globalConfigRef.current,
+  );
+  const derivedAdapter = derivedConfig.adapter;
+  const cachedLists = adapterLists.get(derivedAdapter);
+  const viewAgents = cachedLists?.agents ?? [];
+  const viewModels = cachedLists?.models ?? FALLBACK_MODELS;
+  // "..." in the picker only while this specific adapter is being probed
+  // AND we have no cached list for it yet.
+  const viewAgentsLoading = loadingAdapter === derivedAdapter && !cachedLists;
+
+  useEffect(() => {
+    if (derivedAdapter) ensureAdapterLists(derivedAdapter);
+  }, [derivedAdapter, ensureAdapterLists]);
 
   return (
     <div className="app">
@@ -598,31 +655,12 @@ function App() {
             workspace={activeWs}
             thread={currentThread ?? null}
             adapters={adapters}
-            agents={agents}
-            agentsLoading={agentsLoading}
-            models={models.length > 0 ? models : FALLBACK_MODELS}
+            agents={viewAgents}
+            agentsLoading={viewAgentsLoading}
+            models={viewModels}
             validatorTypes={validatorTypes}
-            defaultConfig={wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current}
-            onConfigChange={(config) => {
-              const prev = wsConfigRef.current.get(activeWs.id) ?? globalConfigRef.current;
-              wsConfigRef.current.set(activeWs.id, config);
-              globalConfigRef.current = config;
-              // Re-fetch agents/models when the adapter changes so each backend's
-              // mode/model list shows in the picker. The helper swallows errors
-              // on both listAgents and listModels — see adapterLists.test.ts.
-              // `agentsLoading` gates the picker on a "..." placeholder so the
-              // user sees that discovery is in flight rather than an empty list.
-              if (config.adapter && config.adapter !== prev.adapter) {
-                setAgentsLoading(true);
-                refreshAdapterLists(config.adapter, FALLBACK_MODELS, {
-                  listAgents: (a) => api.listAgents(a) as Promise<AgentInfo[]>,
-                  listModels: (a) => api.listModels(a) as Promise<ModelInfo[]>,
-                }).then(({ agents, models }) => {
-                  setAgents(agents);
-                  setModels(models);
-                }).finally(() => setAgentsLoading(false));
-              }
-            }}
+            defaultConfig={derivedConfig}
+            onConfigChange={(config) => handleConfigChange(activeWs.id, config)}
             onStartThread={(prompt, adapter, agent, model) => handleSendPrompt(activeWs, prompt, adapter, agent, model)}
             onCompletionAction={handleCompletionAction}
             onCancel={handleCancelThread}
@@ -656,7 +694,7 @@ function App() {
             workspaces={workspaces}
             features={features}
             onToggleFeature={handleToggleFeature}
-            onSetDefaultAgent={handleSetDefaultAgent}
+            onSetDefaultAdapter={handleSetDefaultAdapter}
           />
         )}
       </main>
