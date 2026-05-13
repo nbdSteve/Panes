@@ -24,9 +24,19 @@ export interface CompletionCardProps {
   completionAction?: "committed" | "reverted" | "kept";
   commentCount?: number;
   feedbackSentCount?: number;
+  /**
+   * When "isolated", the thread ran in its own git worktree. The card
+   * swaps the Revert label to "Discard worktree" and renders a "Merge
+   * to main" action that fires `onMerge`. Any other value (or absent)
+   * keeps the Phase 1 Commit/Revert/Keep UI.
+   */
+  worktreeStatus?: "isolated" | "main";
+  /** Transient error shown inline when a merge attempt conflicted. */
+  mergeError?: { message: string; files: string[] } | null;
   onInspect: () => void;
   onRevert: () => void;
   onKeep: () => void;
+  onMerge?: () => void;
   onFileClick?: (filePath: string) => void;
   onSendFeedback?: () => void;
 }
@@ -43,12 +53,17 @@ export default function CompletionCard({
   completionAction,
   commentCount,
   feedbackSentCount,
+  worktreeStatus,
+  mergeError,
   onInspect,
   onRevert,
   onKeep,
+  onMerge,
   onFileClick,
   onSendFeedback,
 }: CompletionCardProps) {
+  const isIsolated = worktreeStatus === "isolated";
+  const revertLabel = isIsolated ? "Discard worktree" : "Revert all";
   const [showFiles, setShowFiles] = useState(false);
   const [showTests, setShowTests] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -195,15 +210,62 @@ export default function CompletionCard({
             </svg>
             Inspect
           </button>
+          {isIsolated && onMerge && (
+            <button className="btn btn-primary btn-sm" onClick={onMerge}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+                <path d="M6 21V9a9 9 0 0 0 9 9" />
+              </svg>
+              Merge to main
+            </button>
+          )}
           <button className="btn btn-danger btn-sm" onClick={onRevert}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
             </svg>
-            Revert all
+            {revertLabel}
           </button>
           <button className="btn btn-secondary btn-sm" onClick={onKeep}>
             Keep as-is
           </button>
+        </div>
+      )}
+
+      {/* Worktree-only action bar for threads that produced no file
+          changes. Without this, a text-only agent turn in a worktree
+          leaves the worktree orphaned until startup recovery because
+          the main action bar (above) requires hasFileChanges. */}
+      {isIsolated && !hasFileChanges && !completionAction && onMerge && (
+        <div className="completion-actions">
+          <button className="btn btn-primary btn-sm" onClick={onMerge}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+              <path d="M6 21V9a9 9 0 0 0 9 9" />
+            </svg>
+            Merge to main
+          </button>
+          <button className="btn btn-danger btn-sm" onClick={onRevert}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+            </svg>
+            Discard worktree
+          </button>
+        </div>
+      )}
+
+      {mergeError && mergeError.files.length > 0 && (
+        <div className="merge-conflict">
+          <div className="merge-conflict-title">
+            Merge couldn't complete — {mergeError.files.length} conflicting file{mergeError.files.length === 1 ? "" : "s"}:
+          </div>
+          <ul className="merge-conflict-files">
+            {mergeError.files.map((f) => (
+              <li key={f}>{f}</li>
+            ))}
+          </ul>
+          <div className="merge-conflict-hint">
+            Discard this worktree or resolve the conflicts manually before merging again.
+          </div>
         </div>
       )}
 

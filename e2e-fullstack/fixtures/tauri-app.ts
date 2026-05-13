@@ -1,5 +1,5 @@
 import { spawn, execSync, type ChildProcess } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { createConnection } from "net";
 import { tmpdir } from "os";
 import { resolve, dirname } from "path";
@@ -59,11 +59,18 @@ async function waitForWs(port: number, timeout = 15_000): Promise<void> {
   throw new Error(`WS port ${port} not ready after ${timeout}ms`);
 }
 
+/// Well-known path Playwright workers read to discover the fullstack
+/// backend's data dir — globalSetup runs in a different Node process so
+/// module-level state can't be shared directly.
+const DATA_DIR_MARKER = resolve(tmpdir(), "panes-e2e-datadir");
+
 export async function startBackend(): Promise<void> {
   if (backendProcess) return;
   ensureBinary();
 
   dataDir = mkdtempSync(resolve(tmpdir(), "panes-e2e-data-"));
+  // Publish the dir to the marker file so test workers can find it.
+  writeFileSync(DATA_DIR_MARKER, dataDir);
 
   backendProcess = spawn(BINARY, [], {
     env: {
@@ -108,7 +115,12 @@ export async function startVite(): Promise<void> {
 }
 
 export function getDataDir(): string {
-  return dataDir!;
+  if (dataDir) return dataDir;
+  // Test workers read the marker file that globalSetup wrote.
+  if (existsSync(DATA_DIR_MARKER)) {
+    return readFileSync(DATA_DIR_MARKER, "utf8").trim();
+  }
+  throw new Error("panes-e2e data dir not yet published — startBackend must run before test workers");
 }
 
 export async function cleanupAll(): Promise<void> {
@@ -123,5 +135,8 @@ export async function cleanupAll(): Promise<void> {
   if (dataDir) {
     rmSync(dataDir, { recursive: true, force: true });
     dataDir = null;
+  }
+  if (existsSync(DATA_DIR_MARKER)) {
+    rmSync(DATA_DIR_MARKER, { force: true });
   }
 }

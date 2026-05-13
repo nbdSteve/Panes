@@ -164,6 +164,12 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "threads", "injected_memories", "TEXT")?;
     add_column_if_missing(conn, "threads", "injected_briefing", "TEXT")?;
     add_column_if_missing(conn, "threads", "extracted_memories", "TEXT")?;
+    // Phase 2: per-thread git worktrees so concurrent threads in the same
+    // workspace have isolated file-system state. Null on shadow-tracked
+    // (non-git) workspaces and on rows predating this migration. `branch`
+    // is the `panes/<thread_id[..8]>` branch created at worktree birth.
+    add_column_if_missing(conn, "threads", "worktree_path", "TEXT")?;
+    add_column_if_missing(conn, "threads", "worktree_branch", "TEXT")?;
 
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp);
@@ -756,6 +762,25 @@ mod tests {
         // not error (add_column_if_missing checks pragma before ALTER).
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_worktree_columns_added_by_migration() {
+        let conn = setup_db();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('threads')")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for expected in ["worktree_path", "worktree_branch"] {
+            assert!(
+                cols.contains(&expected.to_string()),
+                "expected column `{expected}` on threads table, got {cols:?}"
+            );
+        }
     }
 
     #[test]

@@ -46,6 +46,10 @@ pub async fn test_session_manager() -> (
     let blob_root: PathBuf = tempfile::tempdir()
         .expect("create shadow blob tempdir")
         .keep();
-    let mgr = SessionManager::new(cost_tracker, tx, db.clone(), blob_root).await;
+    let worktrees_root: PathBuf = tempfile::tempdir()
+        .expect("create worktrees tempdir")
+        .keep();
+    let mgr =
+        SessionManager::new(cost_tracker, tx, db.clone(), blob_root, worktrees_root).await;
     (mgr, db, rx)
 }

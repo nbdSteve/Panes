@@ -87,6 +87,11 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
   const [suggestedMessage, setSuggestedMessage] = useState<string>("");
   const [generatingMessage, setGeneratingMessage] = useState(false);
   const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
+  // Phase 2 worktree merge state. `mergeError` sticks until the user
+  // clicks Merge again or Discards — it's the conflict list surfaced
+  // on the completion card. Reset on thread switch via the `key` prop
+  // `App.tsx` already sets on ThreadView.
+  const [mergeError, setMergeError] = useState<{ message: string; files: string[] } | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
   const [cardFiles, setCardFiles] = useState<Record<number, RepoFileStatus[]>>({});
   const [diffView, setDiffViewLocal] = useState<{ completionIdx: number; initialFile?: string } | null>(
@@ -137,8 +142,11 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
       // Resolve relative paths against the active workspace before asking the
       // backend for git status — get_files_git_status treats non-absolute paths
       // as relative to the backend CWD, which would point outside the workspace.
+      // For Phase 2 worktree threads, use the worktree path so status queries
+      // read the isolated checkout where the agent actually edited files.
+      const rootPath = thread?.effectivePath ?? workspace.path;
       const resolved = paths.map((p) =>
-        p.startsWith("/") ? p : `${workspace.path.replace(/\/$/, "")}/${p}`,
+        p.startsWith("/") ? p : `${rootPath.replace(/\/$/, "")}/${p}`,
       );
       api.getFilesGitStatus(resolved).then((status) => {
         setCardFiles((prev) => ({ ...prev, [idx]: status }));
@@ -340,6 +348,28 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
               },
               onRevert: () => setRevertConfirm(thread.id),
               onKeep: () => onCompletionAction(thread.id, "kept"),
+              onMerge: thread.worktreeStatus === "isolated" ? () => {
+                setMergeError(null);
+                api.mergeToMain(thread.id).then((result) => {
+                  if (result.outcome === "conflicts") {
+                    setMergeError({
+                      message: "Merge couldn't complete because of conflicts.",
+                      files: result.files,
+                    });
+                  } else {
+                    // Success — the backend removed the worktree and cleared
+                    // its bookkeeping; the thread's worktreeStatus will fall
+                    // off on the next listThreads refresh. Treat this as
+                    // equivalent to Commit for the completion-action badge.
+                    onCompletionAction(thread.id, "committed");
+                  }
+                }).catch((e) => {
+                  setMergeError({
+                    message: e instanceof Error ? e.message : String(e),
+                    files: [],
+                  });
+                });
+              } : undefined,
               onSteer: (tid, toolUseId, text) => {
                 api.rejectGate(tid, toolUseId, `Steer: ${text}`).catch(console.error);
                 onQueueFollowUp(tid, text);
@@ -361,7 +391,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
                 onResumeThread(thread.id, feedbackPrompt);
                 onMarkFeedbackSent(thread.id, completionIdx, comments.length);
               },
-            }, showCost)}
+            }, showCost, thread.worktreeStatus, mergeError)}
 
             {(thread.status === "complete" || thread.status === "error" || thread.status === "interrupted") &&
               (thread.extractedMemories !== undefined || thread.extractedMemoriesError !== undefined) && (
@@ -459,8 +489,14 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
 
       {revertConfirm && (
         <div className="revert-confirm">
-          <div className="revert-confirm-title">Undo all changes</div>
-          <p>This will revert all file changes made by the agent.</p>
+          <div className="revert-confirm-title">
+            {thread?.worktreeStatus === "isolated" ? "Discard worktree" : "Undo all changes"}
+          </div>
+          <p>
+            {thread?.worktreeStatus === "isolated"
+              ? "This removes the per-thread worktree and its branch. The main checkout is not affected."
+              : "This will revert all file changes made by the agent."}
+          </p>
           <div className="revert-confirm-actions">
             <button
               className="btn btn-danger btn-sm"
@@ -826,6 +862,12 @@ interface RenderCallbacks {
   onInspect: (completionIdx: number) => void;
   onRevert: () => void;
   onKeep: () => void;
+  /**
+   * Phase 2: merge the thread's worktree back into main. Only wired
+   * through when the thread is worktree-tracked. Undefined otherwise
+   * so CompletionCard falls back to the Commit/Revert UI.
+   */
+  onMerge?: () => void;
   onSteer: (threadId: string, toolUseId: string, text: string) => void;
   onViewDiff: (filePath: string, completionIdx: number) => void;
   onSendFeedback: (completionIdx: number) => void;
@@ -842,6 +884,8 @@ function renderEvents(
   validatorTypes: ValidatorTypeInfo[],
   callbacks: RenderCallbacks,
   showCost?: boolean,
+  worktreeStatus?: "isolated" | "main",
+  mergeError?: { message: string; files: string[] } | null,
 ) {
   let segmentHasWrites = false;
   let segmentEvents: AgentEvent[] = [];
@@ -1019,6 +1063,9 @@ function renderEvents(
             onInspect={() => callbacks.onInspect(completionIdx)}
             onRevert={callbacks.onRevert}
             onKeep={callbacks.onKeep}
+            onMerge={callbacks.onMerge}
+            worktreeStatus={worktreeStatus}
+            mergeError={mergeError ?? null}
             onFileClick={(filePath) => callbacks.onViewDiff(filePath, completionIdx)}
             onSendFeedback={commentCount > 0 ? () => callbacks.onSendFeedback(completionIdx) : undefined}
           />

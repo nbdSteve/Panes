@@ -450,7 +450,16 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       });
       lastStartThreadAdapter = adapter;
       setTimeout(() => emitThreadEvents(threadId, events), 300);
-      return { threadId, injectedMemories: [], briefingPreview: null };
+      // Simulate git-workspace worktree isolation when the workspace
+      // path opts in via a `/tmp/git-` prefix. Tests flip this to
+      // exercise the Merge / Discard UI without a real git repo.
+      const isIsolated = typeof workspacePath === "string" && workspacePath.startsWith("/tmp/git-");
+      return {
+        threadId,
+        injectedMemories: [],
+        briefingPreview: null,
+        worktreeStatus: isIsolated ? "isolated" : undefined,
+      };
     }
 
     case "resume_thread": {
@@ -559,6 +568,11 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
     case "revert_changes":
       return null;
+
+    case "merge_to_main":
+      // Default success outcome; tests that need a conflict can shadow
+      // this case via their own mock setup before invoke.
+      return { outcome: "fast_forwarded", commit: "mock-merge-commit", files: [] };
 
     case "add_workspace": {
       const ws: MockWorkspace = {

@@ -56,6 +56,21 @@ export interface ThreadInfo {
    * commit vs. revert-only flows.
    */
   trackerKind?: "git" | "shadow";
+  /**
+   * Phase 2: when the backend created a per-thread git worktree for
+   * isolated execution, this is "isolated" and the completion card
+   * offers "Merge to main" / "Discard worktree" instead of the Phase 1
+   * Commit / Revert flow. Absent for shadow threads and for legacy git
+   * threads that predate the worktrees migration.
+   */
+  worktreeStatus?: "isolated" | "main";
+  /**
+   * Absolute path the agent actually ran in (worktree path for
+   * isolated threads; workspace path otherwise). Frontend resolves
+   * relative file paths against this so Inspect / Commit / diff
+   * queries read the correct checkout.
+   */
+  effectivePath?: string;
   createdAt: number;
 }
 

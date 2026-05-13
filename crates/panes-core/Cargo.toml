@@ -32,6 +32,10 @@ similar = "2"
 sha2 = "0.10"
 hex = "0.4"
 tempfile = { version = "3", optional = true }
+# Worktree lifecycle (create/remove/merge) for Phase 2 concurrent threads.
+# Scoped narrowly: no SSH / HTTPS / OpenSSL — we only touch local paths.
+# vendored-libgit2 keeps the build hermetic (no system libgit2 needed).
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -26,6 +26,21 @@ export interface StartThreadResult {
   threadId: string;
   injectedMemories: MemoryInfo[];
   briefingPreview: string | null;
+  /**
+   * "isolated" when the backend created a per-thread git worktree for
+   * the freshly-started thread. Lets the frontend show Merge/Discard
+   * UI on completion without a `listThreads` refresh. Absent for
+   * shadow-tracked threads and for git threads where worktree creation
+   * failed (backend falls back to the main checkout).
+   */
+  worktreeStatus?: "isolated" | "main";
+  /**
+   * Absolute path the backend actually ran the agent in. For worktree
+   * threads this is the isolated checkout; otherwise the workspace
+   * path. Frontend uses this to resolve relative tool-use file paths
+   * before asking the backend for git status / diffs.
+   */
+  effectivePath?: string;
 }
 
 export interface ResumeThreadParams {
@@ -82,6 +97,20 @@ interface WorkspaceInfoWire {
 function decodeWorkspace(w: WorkspaceInfoWire): WorkspaceInfo {
   const { defaultAgent, ...rest } = w;
   return { ...rest, defaultAdapter: defaultAgent };
+}
+
+export interface MergeResult {
+  /**
+   * Successful: "merged" (two-parent commit) or "fast_forwarded" (HEAD
+   * advanced). "up_to_date" means the worktree had no new commits and
+   * was cleaned up anyway. "conflicts" means the main repo is untouched
+   * — user must resolve manually or pick Discard.
+   */
+  outcome: "merged" | "fast_forwarded" | "up_to_date" | "conflicts";
+  /** Resulting HEAD commit for merged/fast_forwarded. Null on conflicts. */
+  commit: string | null;
+  /** Conflicting file paths when outcome === "conflicts". */
+  files: string[];
 }
 
 export interface MemoryBackendStatus {
@@ -145,6 +174,15 @@ export const api = {
     call<string>("commit_changes", { workspacePath, message, files: files ?? null }),
   revertChanges: (workspacePath: string, threadId: string) =>
     call<void>("revert_changes", { workspacePath, threadId }),
+  /**
+   * Merge a thread's worktree branch back into the main repo's HEAD.
+   * Phase 2 only — requires the thread to have a persisted worktree.
+   * Backend returns the outcome so the UI can distinguish successful
+   * merges from conflicts (where the main repo is untouched and the
+   * user needs to pick Discard).
+   */
+  mergeToMain: (threadId: string, message?: string) =>
+    call<MergeResult>("merge_to_main", { threadId, message: message ?? null }),
   getChangedFiles: (workspacePath: string, threadId?: string) =>
     call<string[]>("get_changed_files", { workspacePath, threadId: threadId ?? null }),
   getFileDiff: (workspacePath: string, filePath: string, threadId?: string) =>

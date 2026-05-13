@@ -2157,6 +2157,41 @@ body {
   background: rgba(56, 139, 253, 0.1);
 }
 
+/* ─── Phase 2 merge-conflict inline notice ─── */
+
+.merge-conflict {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning-bg);
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  font-size: 12px;
+  color: var(--warning);
+}
+
+.merge-conflict-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.merge-conflict-files {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.merge-conflict-files li {
+  padding: 2px 0;
+}
+
+.merge-conflict-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 /* ─── Files changed ─── */
 
 .files-changed {

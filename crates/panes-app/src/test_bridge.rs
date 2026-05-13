@@ -193,10 +193,35 @@ async fn dispatch_command(
             let thread_id = mgr.start_thread(&workspace, prompt, &agent_name, context, model.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(mgr);
+
+            // Match the commands::start_thread return shape so Phase 2
+            // frontend fields (worktreeStatus for Merge/Discard UI,
+            // injected memory chips) work under the fullstack harness.
+            let tid = thread_id.clone();
+            let effective_path: Option<String> = state
+                .db
+                .execute(move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT worktree_path FROM threads WHERE id = ?1",
+                            rusqlite::params![tid],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .ok()
+                        .flatten())
+                })
+                .await
+                .ok()
+                .flatten();
+            let worktree_status = effective_path.as_ref().map(|_| "isolated".to_string());
+
             Ok(serde_json::json!({
                 "threadId": thread_id,
-                "memoryCount": 0,
-                "hasBriefing": false,
+                "injectedMemories": [],
+                "briefingPreview": null,
+                "worktreeStatus": worktree_status,
+                "effectivePath": effective_path,
             }))
         }
         "resume_thread" => {
@@ -251,12 +276,82 @@ async fn dispatch_command(
             let files: Option<Vec<String>> = args.get("files")
                 .and_then(|f| f.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+            let thread_id = args.get("threadId").and_then(|v| v.as_str());
             let expanded = crate::commands::expand_tilde(workspace_path);
-            let path = std::path::PathBuf::from(&expanded);
+            let default_path = std::path::PathBuf::from(&expanded);
+
+            // Phase 2: for worktree-tracked threads, commit inside the
+            // worktree, not the main checkout. Mirrors the production
+            // IPC translation in commands::commit_changes.
+            let path = if let Some(tid) = thread_id {
+                let mgr = state.session_manager.lock().await;
+                mgr.workspace_path_for_thread(tid, &default_path).await
+            } else {
+                default_path
+            };
+
             let hash = panes_core::git::commit(&path, message, files.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(Value::String(hash))
+        }
+        "merge_to_main" => {
+            let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();
+            let message = args.get("message").and_then(|v| v.as_str()).map(String::from);
+
+            let mgr = state.session_manager.lock().await;
+            let handle = mgr
+                .worktree_handle_for_thread(&thread_id)
+                .await
+                .ok_or_else(|| "no worktree found for this thread".to_string())?;
+            let repo_root = mgr
+                .repo_root_for_thread(&thread_id)
+                .await
+                .ok_or_else(|| "workspace path not found for merge".to_string())?;
+            drop(mgr);
+
+            let msg = message
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| format!("Merge worktree {}", &thread_id[..thread_id.len().min(8)]));
+
+            let handle_clone = handle.clone();
+            let repo_clone = repo_root.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                panes_core::worktree::merge_into_head(&repo_clone, &handle_clone, &msg)
+            })
+            .await
+            .map_err(|e| format!("merge task panicked: {e}"))?
+            .map_err(|e| format!("merge failed: {e}"))?;
+
+            let (outcome_str, commit, files) = match outcome {
+                panes_core::worktree::MergeOutcome::UpToDate => ("up_to_date".to_string(), None, vec![]),
+                panes_core::worktree::MergeOutcome::FastForwarded { commit } => {
+                    ("fast_forwarded".to_string(), Some(commit), vec![])
+                }
+                panes_core::worktree::MergeOutcome::Merged { commit } => {
+                    ("merged".to_string(), Some(commit), vec![])
+                }
+                panes_core::worktree::MergeOutcome::Conflicts { files } => {
+                    ("conflicts".to_string(), None, files)
+                }
+            };
+
+            if outcome_str != "conflicts" {
+                let handle_for_remove = handle.clone();
+                let repo_for_remove = repo_root.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    panes_core::worktree::remove(&repo_for_remove, &handle_for_remove)
+                })
+                .await;
+                let mgr = state.session_manager.lock().await;
+                mgr.clear_worktree_for_thread(&thread_id).await;
+            }
+
+            Ok(serde_json::json!({
+                "outcome": outcome_str,
+                "commit": commit,
+                "files": files,
+            }))
         }
         "revert_changes" => {
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
@@ -264,6 +359,28 @@ async fn dispatch_command(
             let expanded = crate::commands::expand_tilde(workspace_path);
             let path = std::path::PathBuf::from(&expanded);
             let mgr = state.session_manager.lock().await;
+
+            // Phase 2 worktree branch — matches commands::revert_changes_inner.
+            if let Some(handle) = mgr.worktree_handle_for_thread(&thread_id).await {
+                let repo_root = mgr
+                    .repo_root_for_thread(&thread_id)
+                    .await
+                    .ok_or_else(|| "workspace path not found for worktree discard".to_string())?;
+                drop(mgr);
+
+                let handle_clone = handle.clone();
+                tokio::task::spawn_blocking(move || {
+                    panes_core::worktree::remove(&repo_root, &handle_clone)
+                })
+                .await
+                .map_err(|e| format!("discard task panicked: {e}"))?
+                .map_err(|e| format!("worktree discard failed: {e}"))?;
+
+                let mgr = state.session_manager.lock().await;
+                mgr.clear_worktree_for_thread(&thread_id).await;
+                return Ok(Value::Null);
+            }
+
             let tracker = mgr
                 .tracker_for_thread(&thread_id)
                 .await
@@ -327,7 +444,8 @@ async fn dispatch_command(
         }
         "delete_thread" => {
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();
-            let shadow = state.session_manager.lock().await.shadow_tracker();
+            let mgr = state.session_manager.lock().await;
+            let shadow = mgr.shadow_tracker();
             if let Err(e) = shadow.delete_thread_data(&thread_id).await {
                 tracing::warn!(
                     error = %e,
@@ -335,6 +453,19 @@ async fn dispatch_command(
                     "failed to GC shadow data for deleted thread"
                 );
             }
+            // Worktree cleanup — mirror commands::delete_thread so the
+            // worktree dir + branch don't leak to startup recovery.
+            if let Some(handle) = mgr.worktree_handle_for_thread(&thread_id).await {
+                if let Some(repo_root) = mgr.repo_root_for_thread(&thread_id).await {
+                    let handle_clone = handle.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        panes_core::worktree::remove(&repo_root, &handle_clone)
+                    })
+                    .await;
+                }
+            }
+            drop(mgr);
+
             let tid_for_db = thread_id.clone();
             state.db.execute(move |conn| {
                 let tx = conn.unchecked_transaction()?;
@@ -358,16 +489,28 @@ async fn dispatch_command(
                     .collect();
                 Ok(ids)
             }).await.map_err(|e| e.to_string())?;
-            let shadow = state.session_manager.lock().await.shadow_tracker();
-            for tid in thread_ids {
-                if let Err(e) = shadow.delete_thread_data(&tid).await {
+            let mgr = state.session_manager.lock().await;
+            let shadow = mgr.shadow_tracker();
+            for tid in &thread_ids {
+                if let Err(e) = shadow.delete_thread_data(tid).await {
                     tracing::warn!(
                         error = %e,
                         thread_id = %tid,
                         "failed to GC shadow data during workspace removal"
                     );
                 }
+                // Clean up per-thread worktree. Matches commands::remove_workspace.
+                if let Some(handle) = mgr.worktree_handle_for_thread(tid).await {
+                    if let Some(repo_root) = mgr.repo_root_for_thread(tid).await {
+                        let handle_clone = handle.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            panes_core::worktree::remove(&repo_root, &handle_clone)
+                        })
+                        .await;
+                    }
+                }
             }
+            drop(mgr);
             state.db.execute(move |conn| {
                 let tx = conn.unchecked_transaction()?;
                 if panes_core::db::routine_tables_exist(conn) {
@@ -429,7 +572,7 @@ async fn dispatch_command(
         "get_changed_files" => {
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
             let expanded = crate::commands::expand_tilde(workspace_path);
-            let path = std::path::PathBuf::from(&expanded);
+            let default_path = std::path::PathBuf::from(&expanded);
             let thread_id = args.get("threadId").and_then(|v| v.as_str()).map(String::from);
             if let Some(tid) = thread_id {
                 let mgr = state.session_manager.lock().await;
@@ -437,6 +580,7 @@ async fn dispatch_command(
                     .tracker_for_thread(&tid)
                     .await
                     .map_err(|e| e.to_string())?;
+                let path = mgr.workspace_path_for_thread(&tid, &default_path).await;
                 drop(mgr);
                 let changed = tracker
                     .list_changed_files(&tid, &path)
@@ -455,7 +599,7 @@ async fn dispatch_command(
                     .collect();
                 return Ok(serde_json::to_value(lines).unwrap_or(Value::Array(vec![])));
             }
-            let files = panes_core::git::get_changed_files(&path)
+            let files = panes_core::git::get_changed_files(&default_path)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(files).unwrap_or(Value::Array(vec![])))
@@ -464,7 +608,7 @@ async fn dispatch_command(
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
             let file_path = args["filePath"].as_str().ok_or("missing filePath")?;
             let expanded = crate::commands::expand_tilde(workspace_path);
-            let path = std::path::PathBuf::from(&expanded);
+            let default_path = std::path::PathBuf::from(&expanded);
             let thread_id = args.get("threadId").and_then(|v| v.as_str()).map(String::from);
             if let Some(tid) = thread_id {
                 let mgr = state.session_manager.lock().await;
@@ -472,6 +616,7 @@ async fn dispatch_command(
                     .tracker_for_thread(&tid)
                     .await
                     .map_err(|e| e.to_string())?;
+                let path = mgr.workspace_path_for_thread(&tid, &default_path).await;
                 drop(mgr);
                 let file = std::path::PathBuf::from(file_path);
                 let diff = tracker
@@ -480,7 +625,7 @@ async fn dispatch_command(
                     .map_err(|e| e.to_string())?;
                 return Ok(Value::String(diff));
             }
-            let diff = panes_core::git::get_file_diff(&path, file_path)
+            let diff = panes_core::git::get_file_diff(&default_path, file_path)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(Value::String(diff))
@@ -492,7 +637,7 @@ async fn dispatch_command(
                 .and_then(|f| f.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
             let expanded = crate::commands::expand_tilde(workspace_path);
-            let path = std::path::PathBuf::from(&expanded);
+            let default_path = std::path::PathBuf::from(&expanded);
             let thread_id = args.get("threadId").and_then(|v| v.as_str()).map(String::from);
             if let Some(tid) = thread_id {
                 let mgr = state.session_manager.lock().await;
@@ -500,6 +645,7 @@ async fn dispatch_command(
                     .tracker_for_thread(&tid)
                     .await
                     .map_err(|e| e.to_string())?;
+                let path = mgr.workspace_path_for_thread(&tid, &default_path).await;
                 drop(mgr);
                 let file_bufs: Option<Vec<std::path::PathBuf>> = files
                     .as_ref()
@@ -510,7 +656,7 @@ async fn dispatch_command(
                     .map_err(|e| e.to_string())?;
                 return Ok(Value::String(diff));
             }
-            let diff = panes_core::git::get_workspace_diff(&path, files.as_deref())
+            let diff = panes_core::git::get_workspace_diff(&default_path, files.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(Value::String(diff))

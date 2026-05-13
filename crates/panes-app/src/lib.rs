@@ -84,9 +84,17 @@ pub fn run() {
     let cost_tracker = Arc::new(CostTracker::new());
 
     let shadow_blob_root = data_dir().join("shadow-blobs");
-    let mut session_manager = tauri::async_runtime::block_on(
-        SessionManager::new(cost_tracker.clone(), event_tx, db.clone(), shadow_blob_root),
-    );
+    // Phase 2 worktrees live under the data dir, keyed by thread id,
+    // alongside the shadow blobs. One root per install — worktrees for
+    // every workspace nest inside.
+    let worktrees_root = data_dir().join("worktrees");
+    let mut session_manager = tauri::async_runtime::block_on(SessionManager::new(
+        cost_tracker.clone(),
+        event_tx,
+        db.clone(),
+        shadow_blob_root,
+        worktrees_root,
+    ));
 
     let (broadcast_tx, _) = broadcast::channel::<ThreadEvent>(256);
 
@@ -197,6 +205,7 @@ pub fn run() {
             commands::set_thread_model,
             commands::commit_changes,
             commands::revert_changes,
+            commands::merge_to_main,
             commands::get_changed_files,
             commands::get_file_diff,
             commands::get_workspace_diff,

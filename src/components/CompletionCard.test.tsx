@@ -344,4 +344,109 @@ describe("CompletionCard", () => {
       mockedCopy.mockReset();
     });
   });
+
+  describe("worktree mode", () => {
+    it("renders 'Merge to main' only when worktreeStatus === 'isolated' and onMerge is supplied", () => {
+      const onMerge = vi.fn();
+      const { rerender } = render(
+        <CompletionCard {...baseProps} />,
+      );
+      expect(screen.queryByText(/Merge to main/i)).not.toBeInTheDocument();
+
+      rerender(
+        <CompletionCard
+          {...baseProps}
+          worktreeStatus="isolated"
+          onMerge={onMerge}
+        />,
+      );
+      expect(screen.getByText(/Merge to main/i)).toBeInTheDocument();
+    });
+
+    it("doesn't render Merge when worktreeStatus is isolated but no onMerge is supplied", () => {
+      render(<CompletionCard {...baseProps} worktreeStatus="isolated" />);
+      expect(screen.queryByText(/Merge to main/i)).not.toBeInTheDocument();
+    });
+
+    it("relabels 'Revert all' to 'Discard worktree' when isolated", () => {
+      render(
+        <CompletionCard {...baseProps} worktreeStatus="isolated" onMerge={vi.fn()} />,
+      );
+      expect(screen.getByText(/Discard worktree/i)).toBeInTheDocument();
+      expect(screen.queryByText(/Revert all/i)).not.toBeInTheDocument();
+    });
+
+    it("clicking Merge to main fires onMerge", async () => {
+      const onMerge = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <CompletionCard {...baseProps} worktreeStatus="isolated" onMerge={onMerge} />,
+      );
+      await user.click(screen.getByText(/Merge to main/i));
+      expect(onMerge).toHaveBeenCalledOnce();
+    });
+
+    it("renders merge conflict list when mergeError.files is non-empty", () => {
+      render(
+        <CompletionCard
+          {...baseProps}
+          worktreeStatus="isolated"
+          onMerge={vi.fn()}
+          mergeError={{
+            message: "Merge couldn't complete because of conflicts.",
+            files: ["src/main.rs", "README.md"],
+          }}
+        />,
+      );
+      expect(screen.getByText(/2 conflicting files/i)).toBeInTheDocument();
+      expect(screen.getByText("src/main.rs")).toBeInTheDocument();
+      expect(screen.getByText("README.md")).toBeInTheDocument();
+    });
+
+    it("does not render merge conflict block when mergeError is null", () => {
+      const { container } = render(
+        <CompletionCard {...baseProps} worktreeStatus="isolated" onMerge={vi.fn()} />,
+      );
+      expect(container.querySelector(".merge-conflict")).toBeNull();
+    });
+
+    it("renders a worktree-only action bar when isolated thread has no file changes", () => {
+      // Phase 2 gap fix: text-only worktree turns still need Merge/
+      // Discard buttons or the worktree orphans until startup recovery.
+      const onMerge = vi.fn();
+      const onRevert = vi.fn();
+      render(
+        <CompletionCard
+          {...baseProps}
+          hasFileChanges={false}
+          filesChanged={[]}
+          worktreeStatus="isolated"
+          onMerge={onMerge}
+          onRevert={onRevert}
+        />,
+      );
+      expect(screen.getByText(/Merge to main/i)).toBeInTheDocument();
+      expect(screen.getByText(/Discard worktree/i)).toBeInTheDocument();
+    });
+
+    it("does not render worktree-only bar for non-isolated threads with no file changes", () => {
+      render(<CompletionCard {...baseProps} hasFileChanges={false} filesChanged={[]} />);
+      expect(screen.queryByText(/Merge to main/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Discard worktree/i)).not.toBeInTheDocument();
+    });
+
+    it("singular conflict wording when exactly one file conflicts", () => {
+      render(
+        <CompletionCard
+          {...baseProps}
+          worktreeStatus="isolated"
+          onMerge={vi.fn()}
+          mergeError={{ message: "x", files: ["README.md"] }}
+        />,
+      );
+      expect(screen.getByText(/1 conflicting file/i)).toBeInTheDocument();
+      // Should NOT match "files" (plural)
+      expect(screen.queryByText(/conflicting files/i)).not.toBeInTheDocument();
+    });
+  });
 });

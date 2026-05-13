@@ -122,16 +122,39 @@ pub async fn remove_workspace(
         })
         .await
         .map_err(PanesError::from)?;
-    let shadow = session.lock().await.shadow_tracker();
-    for tid in thread_ids {
-        if let Err(e) = shadow.delete_thread_data(&tid).await {
+    let mgr = session.lock().await;
+    let shadow = mgr.shadow_tracker();
+    for tid in &thread_ids {
+        if let Err(e) = shadow.delete_thread_data(tid).await {
             tracing::warn!(
                 error = %e,
                 thread_id = %tid,
                 "failed to GC shadow data during workspace removal"
             );
         }
+        // Phase 2: clean up per-thread worktrees too. Without this,
+        // removing a workspace with outstanding worktrees leaks both
+        // the filesystem dirs and the panes/* branches until the next
+        // startup's orphan cleanup.
+        if let Some(handle) = mgr.worktree_handle_for_thread(tid).await {
+            if let Some(repo_root) = mgr.repo_root_for_thread(tid).await {
+                let handle_clone = handle.clone();
+                let tid_log = tid.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    panes_core::worktree::remove(&repo_root, &handle_clone)
+                })
+                .await;
+                if let Ok(Err(e)) = res {
+                    tracing::warn!(
+                        error = %e,
+                        thread_id = %tid_log,
+                        "failed to remove worktree during workspace removal",
+                    );
+                }
+            }
+        }
     }
+    drop(mgr);
 
     db.execute(move |conn| {
         let tx = conn.unchecked_transaction()?;
@@ -195,16 +218,32 @@ pub struct ThreadInfo {
     pub injected_briefing: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extracted_memories: Option<Vec<MemoryInfo>>,
+    /// "isolated" when the thread is running (or last ran) in its own git
+    /// worktree, "main" when it operated on the main checkout. Drives the
+    /// Merge/Discard UI on the completion card. Null for shadow-tracked
+    /// threads and legacy git threads predating the worktree column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_status: Option<String>,
+    /// Absolute filesystem path the thread's agent actually ran in. For
+    /// worktree threads this is the isolated checkout path; for shadow
+    /// or legacy git threads it's the workspace path. Frontend resolves
+    /// relative tool-use file paths against this when asking the
+    /// backend for git status / diffs, so Inspect / Commit work inside
+    /// the right checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_path: Option<String>,
 }
 
 /// Columns and row decoder shared between list_threads and list_all_threads.
 /// Keep them in sync — callers select this exact prefix.
-const THREAD_COLUMNS: &str = "id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id, tracker_kind, injected_memories, injected_briefing, extracted_memories";
+const THREAD_COLUMNS: &str = "id, workspace_id, prompt, status, summary, cost_usd, duration_ms, created_at, is_routine, routine_id, tracker_kind, injected_memories, injected_briefing, extracted_memories, worktree_path";
 
 fn decode_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
     let injected_json: Option<String> = row.get(11)?;
     let briefing: Option<String> = row.get(12)?;
     let extracted_json: Option<String> = row.get(13)?;
+    let worktree_path: Option<String> = row.get(14)?;
+    let effective_path = worktree_path.clone();
     Ok(ThreadInfo {
         id: row.get(0)?,
         workspace_id: row.get(1)?,
@@ -225,6 +264,8 @@ fn decode_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
         extracted_memories: extracted_json
             .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<MemoryInfo>>(s).ok()),
+        worktree_status: worktree_path.as_ref().map(|_| "isolated".to_string()),
+        effective_path,
     })
 }
 
@@ -325,6 +366,33 @@ pub async fn delete_thread(
         );
     }
 
+    // Phase 2: if the thread has a worktree, remove it before dropping
+    // the DB row. Otherwise the worktree directory + branch leak until
+    // the next startup's orphan cleanup catches them.
+    let mgr = session.lock().await;
+    if let Some(handle) = mgr.worktree_handle_for_thread(&thread_id).await {
+        if let Some(repo_root) = mgr.repo_root_for_thread(&thread_id).await {
+            drop(mgr);
+            let handle_clone = handle.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                panes_core::worktree::remove(&repo_root, &handle_clone)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("worktree remove panicked: {e}")))
+            {
+                tracing::warn!(
+                    error = %e,
+                    thread_id = %thread_id,
+                    "failed to remove worktree during thread delete",
+                );
+            }
+        } else {
+            drop(mgr);
+        }
+    } else {
+        drop(mgr);
+    }
+
     let tid_for_db = thread_id.clone();
     db.execute(move |conn| {
         let tx = conn.unchecked_transaction()?;
@@ -351,6 +419,16 @@ pub struct StartThreadResult {
     pub thread_id: String,
     pub injected_memories: Vec<MemoryInfo>,
     pub briefing_preview: Option<String>,
+    /// "isolated" when the backend created a per-thread git worktree.
+    /// Lets the frontend render the Merge/Discard UI on the completion
+    /// card without waiting for a `list_threads` refresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_status: Option<String>,
+    /// Absolute path the agent is actually running in (worktree path
+    /// for isolated threads; workspace path otherwise). Frontend
+    /// resolves relative tool-use file paths against this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_path: Option<String>,
 }
 
 #[tauri::command]
@@ -443,10 +521,33 @@ pub async fn start_thread(
         Ok(())
     }).await;
 
+    // Re-read the worktree flag from the DB — SessionManager sets it on
+    // git-tracked threads after the INSERT. The DB is the source of
+    // truth so we don't have to thread another channel from the session
+    // layer back up here.
+    let tid_for_worktree = thread_id.clone();
+    let effective_path: Option<String> = db
+        .execute(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT worktree_path FROM threads WHERE id = ?1",
+                    rusqlite::params![tid_for_worktree],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten())
+        })
+        .await
+        .ok()
+        .flatten();
+    let worktree_status = effective_path.as_ref().map(|_| "isolated".to_string());
+
     Ok(StartThreadResult {
         thread_id,
         injected_memories,
         briefing_preview,
+        worktree_status,
+        effective_path,
     })
 }
 
@@ -576,12 +677,44 @@ pub async fn commit_changes(
 /// command so unit tests can drive it with an `Arc<Mutex<SessionManager>>`
 /// without needing a live Tauri `State`. Routes through the
 /// thread's recorded tracker — git or shadow.
+///
+/// For Phase 2 worktree-backed threads, "revert" means throwing away
+/// the entire worktree: `worktree::remove` deletes the isolated
+/// checkout and its branch. The main repo checkout is never touched,
+/// so the old `git reset --hard` path is skipped in that case.
 pub(crate) async fn revert_changes_inner(
     session: &SessionState,
     workspace_path: &str,
     thread_id: &str,
 ) -> Result<(), PanesError> {
     let mgr = session.lock().await;
+
+    // Worktree path: discard the whole thing. The completion card's
+    // "Discard worktree" button lands here for git threads.
+    if let Some(handle) = mgr.worktree_handle_for_thread(thread_id).await {
+        let repo_root = mgr
+            .repo_root_for_thread(thread_id)
+            .await
+            .ok_or_else(|| PanesError::GitError {
+                message: "workspace path not found for worktree discard".to_string(),
+            })?;
+        drop(mgr);
+
+        let handle_clone = handle.clone();
+        tokio::task::spawn_blocking(move || panes_core::worktree::remove(&repo_root, &handle_clone))
+            .await
+            .map_err(|e| PanesError::GitError {
+                message: format!("discard task panicked: {e}"),
+            })?
+            .map_err(|e| PanesError::GitError {
+                message: format!("worktree discard failed: {e}"),
+            })?;
+
+        let mgr = session.lock().await;
+        mgr.clear_worktree_for_thread(thread_id).await;
+        return Ok(());
+    }
+
     let tracker = mgr.tracker_for_thread(thread_id).await?;
     drop(mgr);
 
@@ -604,6 +737,101 @@ pub async fn revert_changes(
     revert_changes_inner(session.inner(), &workspace_path, &thread_id).await
 }
 
+/// Result of merging a thread's worktree back into the main repo's HEAD.
+/// Mirrors `panes_core::worktree::MergeOutcome` but flattened for the
+/// frontend. The outcome string drives UI decisions — "merged" and
+/// "fast_forwarded" mean success (worktree is gone); "conflicts" means
+/// the user needs to pick Discard or resolve manually; "up_to_date" means
+/// nothing to merge.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResult {
+    pub outcome: String,
+    /// Resulting commit hash for fast-forward or normal merge. Null on
+    /// conflicts / up-to-date.
+    pub commit: Option<String>,
+    /// Conflicting file paths when outcome == "conflicts".
+    pub files: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn merge_to_main(
+    session: tauri::State<'_, SessionState>,
+    thread_id: String,
+    message: Option<String>,
+) -> Result<MergeResult, PanesError> {
+    let mgr = session.lock().await;
+    let handle = mgr
+        .worktree_handle_for_thread(&thread_id)
+        .await
+        .ok_or_else(|| PanesError::GitError {
+            message: "no worktree found for this thread — nothing to merge".to_string(),
+        })?;
+    let repo_root = mgr
+        .repo_root_for_thread(&thread_id)
+        .await
+        .ok_or_else(|| PanesError::GitError {
+            message: "workspace path not found for merge".to_string(),
+        })?;
+    drop(mgr);
+
+    let msg = message
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| format!("Merge worktree {}", &thread_id[..thread_id.len().min(8)]));
+
+    let handle_clone = handle.clone();
+    let repo_clone = repo_root.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        panes_core::worktree::merge_into_head(&repo_clone, &handle_clone, &msg)
+    })
+    .await
+    .map_err(|e| PanesError::GitError {
+        message: format!("merge task panicked: {e}"),
+    })?
+    .map_err(|e| PanesError::GitError {
+        message: format!("merge failed: {e}"),
+    })?;
+
+    let result = match outcome {
+        panes_core::worktree::MergeOutcome::UpToDate => MergeResult {
+            outcome: "up_to_date".to_string(),
+            commit: None,
+            files: vec![],
+        },
+        panes_core::worktree::MergeOutcome::FastForwarded { commit } => MergeResult {
+            outcome: "fast_forwarded".to_string(),
+            commit: Some(commit),
+            files: vec![],
+        },
+        panes_core::worktree::MergeOutcome::Merged { commit } => MergeResult {
+            outcome: "merged".to_string(),
+            commit: Some(commit),
+            files: vec![],
+        },
+        panes_core::worktree::MergeOutcome::Conflicts { files } => MergeResult {
+            outcome: "conflicts".to_string(),
+            commit: None,
+            files,
+        },
+    };
+
+    // On success (merged / fast-forwarded / up-to-date with nothing to do)
+    // remove the worktree and clear DB bookkeeping. On conflicts, leave
+    // the worktree intact so the user can inspect or discard.
+    if result.outcome != "conflicts" {
+        let handle_for_remove = handle.clone();
+        let repo_for_remove = repo_root.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            panes_core::worktree::remove(&repo_for_remove, &handle_for_remove)
+        })
+        .await;
+        let mgr = session.lock().await;
+        mgr.clear_worktree_for_thread(&thread_id).await;
+    }
+
+    Ok(result)
+}
+
 /// Inner impl — see `revert_changes_inner` rationale.
 pub(crate) async fn get_changed_files_inner(
     session: &SessionState,
@@ -611,7 +839,7 @@ pub(crate) async fn get_changed_files_inner(
     thread_id: Option<&str>,
 ) -> Result<Vec<String>, PanesError> {
     let expanded = expand_tilde(workspace_path);
-    let path = PathBuf::from(&expanded);
+    let default_path = PathBuf::from(&expanded);
 
     // When a thread_id is supplied, route via the tracker so non-git
     // workspaces get their shadow-tracked changes. Otherwise fall through
@@ -620,6 +848,11 @@ pub(crate) async fn get_changed_files_inner(
     if let Some(tid) = thread_id {
         let mgr = session.lock().await;
         let tracker = mgr.tracker_for_thread(tid).await?;
+        // Translate the logical workspace path to the per-thread worktree
+        // path when one is tracked. This is the whole point of the Phase 2
+        // IPC seam — frontend keeps sending workspace.path, backend reads
+        // the right checkout.
+        let path = mgr.workspace_path_for_thread(tid, &default_path).await;
         drop(mgr);
         let changed = tracker
             .list_changed_files(tid, &path)
@@ -642,7 +875,7 @@ pub(crate) async fn get_changed_files_inner(
             .collect());
     }
 
-    git::get_changed_files(&path)
+    git::get_changed_files(&default_path)
         .await
         .map_err(PanesError::from)
 }
@@ -663,11 +896,12 @@ pub(crate) async fn get_file_diff_inner(
     thread_id: Option<&str>,
 ) -> Result<String, PanesError> {
     let expanded = expand_tilde(workspace_path);
-    let path = PathBuf::from(&expanded);
+    let default_path = PathBuf::from(&expanded);
 
     if let Some(tid) = thread_id {
         let mgr = session.lock().await;
         let tracker = mgr.tracker_for_thread(tid).await?;
+        let path = mgr.workspace_path_for_thread(tid, &default_path).await;
         drop(mgr);
         let file = PathBuf::from(file_path);
         return tracker
@@ -678,7 +912,7 @@ pub(crate) async fn get_file_diff_inner(
             });
     }
 
-    git::get_file_diff(&path, file_path)
+    git::get_file_diff(&default_path, file_path)
         .await
         .map_err(PanesError::from)
 }
@@ -700,11 +934,12 @@ pub(crate) async fn get_workspace_diff_inner(
     thread_id: Option<&str>,
 ) -> Result<String, PanesError> {
     let expanded = expand_tilde(workspace_path);
-    let path = PathBuf::from(&expanded);
+    let default_path = PathBuf::from(&expanded);
 
     if let Some(tid) = thread_id {
         let mgr = session.lock().await;
         let tracker = mgr.tracker_for_thread(tid).await?;
+        let path = mgr.workspace_path_for_thread(tid, &default_path).await;
         drop(mgr);
         let file_bufs: Option<Vec<PathBuf>> =
             files.map(|fs| fs.iter().map(PathBuf::from).collect());
@@ -716,7 +951,7 @@ pub(crate) async fn get_workspace_diff_inner(
             });
     }
 
-    git::get_workspace_diff(&path, files)
+    git::get_workspace_diff(&default_path, files)
         .await
         .map_err(PanesError::from)
 }
@@ -1737,7 +1972,9 @@ mod tests {
                 tracker_kind TEXT,
                 injected_memories TEXT,
                 injected_briefing TEXT,
-                extracted_memories TEXT
+                extracted_memories TEXT,
+                worktree_path TEXT,
+                worktree_branch TEXT
             );
             CREATE TABLE events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2109,6 +2346,8 @@ Body text here
             injected_memories: None,
             injected_briefing: None,
             extracted_memories: None,
+            worktree_status: None,
+            effective_path: None,
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(json.contains("\"workspaceId\""));

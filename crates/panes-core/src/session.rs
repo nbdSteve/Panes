@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -21,6 +21,7 @@ use crate::version_tracker::{
     extract_file_path, is_file_write_tool, GitVersionTracker, ShadowVersionTracker, TrackerKind,
     VersionTracker,
 };
+use crate::worktree::{self, WorktreeHandle};
 
 #[derive(Debug)]
 pub enum GateDecision {
@@ -114,6 +115,21 @@ impl Drop for CostFinalizer {
 
 struct ActiveThread {
     workspace_id: String,
+    /// Path the thread's agent actually runs in. Equal to `workspace.path`
+    /// for shadow-tracked threads; equal to the worktree path for
+    /// git-tracked threads in Phase 2. All downstream operations
+    /// (diff, revert, get_changed_files, commit) must use this, not the
+    /// logical workspace path, or they'll read/write the wrong checkout.
+    effective_path: PathBuf,
+    /// Handle to the per-thread worktree for git-tracked threads.
+    /// None for shadow threads and for git threads created before the
+    /// worktrees migration.
+    worktree: Option<WorktreeHandle>,
+    /// Carried for lifecycle decisions (merge/discard UI is only valid
+    /// for git-tracked threads). Not every consumer reads it today but
+    /// stripping it would force redundant DB lookups later.
+    #[allow(dead_code)]
+    tracker_kind: TrackerKind,
     session: Box<dyn AgentSession>,
     snapshot: Option<git::SnapshotRef>,
     gate_tx: GateSender,
@@ -121,6 +137,10 @@ struct ActiveThread {
 
 pub struct SessionManager {
     active_threads: Arc<Mutex<HashMap<String, ActiveThread>>>,
+    /// Workspace ids with a thread actively reserving the one-thread-per-
+    /// workspace invariant. Phase 2 scopes this to shadow-tracked
+    /// workspaces only — git workspaces get per-thread worktrees so
+    /// concurrent threads are safe and never hit this map.
     reservations: Arc<Mutex<HashSet<String>>>,
     session_ids: Arc<Mutex<HashMap<String, String>>>,
     adapters: HashMap<String, Arc<dyn AgentAdapter>>,
@@ -130,6 +150,9 @@ pub struct SessionManager {
     pub validators: Arc<ValidatorRegistry>,
     git_tracker: Arc<GitVersionTracker>,
     shadow_tracker: Arc<ShadowVersionTracker>,
+    /// Root directory where per-thread worktrees live on disk. Each
+    /// concurrent git thread gets a subdirectory named by its thread id.
+    worktrees_root: PathBuf,
 }
 
 impl SessionManager {
@@ -138,6 +161,7 @@ impl SessionManager {
         event_tx: mpsc::UnboundedSender<ThreadEvent>,
         db: DbHandle,
         shadow_blob_root: PathBuf,
+        worktrees_root: PathBuf,
     ) -> Self {
         let session_ids = Self::load_session_ids(&db).await;
 
@@ -147,7 +171,7 @@ impl SessionManager {
                 .expect("failed to initialise shadow version tracker"),
         );
 
-        Self {
+        let mgr = Self {
             active_threads: Arc::new(Mutex::new(HashMap::new())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             session_ids: Arc::new(Mutex::new(session_ids)),
@@ -158,6 +182,95 @@ impl SessionManager {
             validators: Arc::new(ValidatorRegistry::with_builtins()),
             git_tracker,
             shadow_tracker,
+            worktrees_root,
+        };
+
+        // Best-effort crash recovery: any worktree directory under
+        // `worktrees_root` that has no matching row in `threads` was
+        // orphaned by a crashed prior run. `recover_stale_threads` in
+        // `db::initialize` has already flipped stale rows to `interrupted`
+        // — we leave those worktrees in place so the user can inspect
+        // them, and only prune the truly-dangling ones.
+        mgr.cleanup_orphan_worktrees().await;
+
+        mgr
+    }
+
+    /// Scan the worktrees root at startup and drop any subdirectory whose
+    /// name doesn't match a row in `threads`. Logs failures — never
+    /// propagates because cleanup must not block app startup.
+    async fn cleanup_orphan_worktrees(&self) {
+        let worktrees_root = self.worktrees_root.clone();
+        if !worktrees_root.exists() {
+            return;
+        }
+
+        // Build the set of known thread ids from the DB.
+        let known: HashSet<String> = match self
+            .db
+            .execute(|conn| {
+                let mut stmt = conn.prepare("SELECT id FROM threads")?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .filter_map(|r| r.ok())
+                    .collect::<HashSet<_>>();
+                Ok(rows)
+            })
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(error = %e, "worktree orphan scan: failed to read thread ids");
+                return;
+            }
+        };
+
+        let orphans = worktree::list_orphans(&worktrees_root, &known);
+        if orphans.is_empty() {
+            return;
+        }
+
+        // We don't know which workspace repo each orphan belongs to, so
+        // look it up from the DB. If the thread row is gone entirely
+        // (the user deleted it without us cleaning up), we can't prune
+        // the git branch — just drop the directory.
+        for orphan in orphans {
+            let repo_root = self
+                .db
+                .execute({
+                    let tid = orphan.thread_id.clone();
+                    move |conn| {
+                        Ok(conn
+                            .query_row(
+                                "SELECT w.path FROM workspaces w JOIN threads t ON t.workspace_id = w.id WHERE t.id = ?1",
+                                rusqlite::params![tid],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .ok())
+                    }
+                })
+                .await
+                .ok()
+                .flatten();
+
+            if let Some(repo) = repo_root {
+                if let Err(e) = worktree::prune_orphan(&PathBuf::from(repo), &orphan) {
+                    warn!(
+                        path = %orphan.path.display(),
+                        error = %e,
+                        "failed to prune orphan worktree",
+                    );
+                }
+            } else {
+                // No workspace info — just remove the directory.
+                if let Err(e) = std::fs::remove_dir_all(&orphan.path) {
+                    warn!(
+                        path = %orphan.path.display(),
+                        error = %e,
+                        "failed to remove dangling orphan directory",
+                    );
+                }
+            }
         }
     }
 
@@ -254,7 +367,18 @@ impl SessionManager {
             Some(agent_name.to_string())
         };
 
-        {
+        // Resolve tracker kind before taking the guard. For git-backed
+        // workspaces Phase 2 lifts the one-thread invariant (each thread
+        // gets its own worktree), so no reservation is needed. Shadow-
+        // backed workspaces keep the Phase 1 guard — file isolation is
+        // not possible without git.
+        let tracker_kind = if git::find_repo_root(&workspace.path).await.is_some() {
+            TrackerKind::Git
+        } else {
+            TrackerKind::Shadow
+        };
+
+        if tracker_kind == TrackerKind::Shadow {
             let active = self.active_threads.lock().await;
             let mut reserved = self.reservations.lock().await;
             if active.values().any(|t| t.workspace_id == workspace.id)
@@ -269,11 +393,11 @@ impl SessionManager {
         }
 
         let result = self
-            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref())
+            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref(), tracker_kind)
             .await
             .map_err(PanesError::from);
 
-        if result.is_err() {
+        if result.is_err() && tracker_kind == TrackerKind::Shadow {
             self.reservations.lock().await.remove(&workspace.id);
         }
 
@@ -289,18 +413,51 @@ impl SessionManager {
         context: SessionContext,
         model: Option<&str>,
         cli_agent: Option<&str>,
+        tracker_kind: TrackerKind,
     ) -> Result<String> {
-        // Detect tracker kind — git if the workspace resolves to a repo
-        // root, shadow otherwise. Pinned for the lifetime of the thread so
-        // a mid-thread `git init` can't rug-pull an active run.
-        let tracker_kind = if git::find_repo_root(&workspace.path).await.is_some() {
-            TrackerKind::Git
+        // Tracker kind was resolved in `start_thread` before the guard so
+        // we could skip the one-thread reservation for git workspaces.
+        // Pinned for the lifetime of the thread so a mid-thread `git init`
+        // can't rug-pull an active run.
+        let thread_id = Uuid::new_v4().to_string();
+
+        // Create the per-thread worktree for git-tracked threads. The
+        // agent spawns inside the worktree path, and every downstream
+        // file-system operation (snapshot, diff, revert) runs against it
+        // via `ActiveThread::effective_path`.
+        let worktree_handle = if tracker_kind == TrackerKind::Git {
+            let repo_root = workspace.path.clone();
+            let wt_root = self.worktrees_root.clone();
+            let tid = thread_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                worktree::create(&repo_root, &tid, &wt_root)
+            })
+            .await
+            {
+                Ok(Ok(handle)) => Some(handle),
+                Ok(Err(e)) => {
+                    warn!(
+                        error = %e,
+                        "failed to create worktree — falling back to main checkout",
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(error = %e, "worktree creation task panicked");
+                    None
+                }
+            }
         } else {
-            TrackerKind::Shadow
+            None
         };
 
+        let effective_path = worktree_handle
+            .as_ref()
+            .map(|h| h.path.clone())
+            .unwrap_or_else(|| workspace.path.clone());
+
         let snapshot = if tracker_kind == TrackerKind::Git {
-            match git::snapshot(&workspace.path).await {
+            match git::snapshot(&effective_path).await {
                 Ok(s) => Some(s),
                 Err(e) => {
                     warn!(error = %e, "failed to create git snapshot — continuing without rollback");
@@ -317,11 +474,11 @@ impl SessionManager {
             TrackerKind::Shadow => self.shadow_tracker.clone() as Arc<dyn VersionTracker>,
         };
 
-        let thread_id = Uuid::new_v4().to_string();
-
-        // Spawn agent session
+        // Spawn agent session inside the effective (worktree) path. This
+        // is the single place the adapter learns its cwd; from here on
+        // the agent's file edits land in the isolated checkout.
         let session = adapter
-            .spawn(&workspace.path, prompt, &context, model, cli_agent)
+            .spawn(&effective_path, prompt, &context, model, cli_agent)
             .await
             .context("failed to spawn agent session")?;
 
@@ -333,7 +490,8 @@ impl SessionManager {
             sids.insert(thread_id.clone(), session_id.clone());
         }
 
-        // Persist thread to SQLite
+        // Persist thread to SQLite (including worktree info so restart
+        // recovery can find and clean up orphaned worktrees).
         {
             let now = Utc::now().to_rfc3339();
             let snapshot_hash = snapshot.as_ref().map(|s| s.commit_hash.clone());
@@ -343,11 +501,15 @@ impl SessionManager {
             let p = prompt.to_string();
             let sid = session_id.clone();
             let kind = tracker_kind.as_str().to_string();
+            let wt_path = worktree_handle
+                .as_ref()
+                .map(|h| h.path.to_string_lossy().into_owned());
+            let wt_branch = worktree_handle.as_ref().map(|h| h.branch.clone());
             let _ = self.db.execute(move |conn| {
                 conn.execute(
-                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, tracker_kind, started_at, created_at)
-                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?8)",
-                    rusqlite::params![tid, wid, agent, p, sid, snapshot_hash, kind, now],
+                    "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, tracker_kind, worktree_path, worktree_branch, started_at, created_at)
+                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                    rusqlite::params![tid, wid, agent, p, sid, snapshot_hash, kind, wt_path, wt_branch, now],
                 )?;
                 Ok(())
             }).await;
@@ -360,6 +522,9 @@ impl SessionManager {
 
         let active_thread = ActiveThread {
             workspace_id: workspace.id.clone(),
+            effective_path: effective_path.clone(),
+            worktree: worktree_handle,
+            tracker_kind,
             session,
             snapshot,
             gate_tx: gate_tx.clone(),
@@ -368,7 +533,9 @@ impl SessionManager {
         {
             let mut active = self.active_threads.lock().await;
             active.insert(thread_id.clone(), active_thread);
-            self.reservations.lock().await.remove(&workspace.id);
+            if tracker_kind == TrackerKind::Shadow {
+                self.reservations.lock().await.remove(&workspace.id);
+            }
         }
 
         let event_stream = {
@@ -385,7 +552,10 @@ impl SessionManager {
         let db = self.db.clone();
         let validators = self.validators.clone();
         let workspace_id_owned = workspace.id.clone();
-        let workspace_path_owned = workspace.path.clone();
+        // Downstream consumers (validators, file-path extractors) operate
+        // against the worktree path, not the logical workspace path, so
+        // they see the same files the agent is editing.
+        let workspace_path_owned = effective_path.clone();
         let tracker_for_task = tracker.clone();
 
         tokio::spawn(async move {
@@ -434,6 +604,14 @@ impl SessionManager {
             Some(agent_name.to_string())
         };
 
+        // Read persisted tracker kind so we know whether to apply the
+        // shadow-only guard. Threads created before Phase 2 have the
+        // git tracker but no worktree_path; they still get per-thread
+        // worktree isolation on resume is not retrofitted — they
+        // continue in the main checkout. That's fine: they were already
+        // running there pre-upgrade.
+        let persisted_kind = self.tracker_kind_for_thread(thread_id).await;
+
         {
             let active = self.active_threads.lock().await;
             let mut reserved = self.reservations.lock().await;
@@ -443,27 +621,250 @@ impl SessionManager {
                     message: format!("thread {thread_id} is still active. Wait for it to complete first."),
                 });
             }
-            if active.iter().any(|(id, t)| t.workspace_id == workspace.id && id != thread_id)
-                || reserved.contains(&workspace.id)
-            {
-                return Err(PanesError::WorkspaceOccupied {
-                    workspace_id: workspace.id.clone(),
-                    message: "A thread is already running in this workspace. Wait for it to complete or cancel it first.".to_string(),
-                });
+            // Only enforce the one-thread guard when the resumed thread
+            // is shadow-tracked. Git-tracked threads resume into their
+            // own worktree and can coexist with other threads.
+            if persisted_kind == TrackerKind::Shadow {
+                if active.iter().any(|(id, t)| t.workspace_id == workspace.id && id != thread_id)
+                    || reserved.contains(&workspace.id)
+                {
+                    return Err(PanesError::WorkspaceOccupied {
+                        workspace_id: workspace.id.clone(),
+                        message: "A thread is already running in this workspace. Wait for it to complete or cancel it first.".to_string(),
+                    });
+                }
+                reserved.insert(workspace.id.clone());
             }
-            reserved.insert(workspace.id.clone());
         }
 
         let result = self
-            .resume_thread_inner(thread_id, workspace, prompt, adapter, model, cli_agent.as_deref())
+            .resume_thread_inner(thread_id, workspace, prompt, adapter, model, cli_agent.as_deref(), persisted_kind)
             .await
             .map_err(PanesError::from);
 
-        if result.is_err() {
+        if result.is_err() && persisted_kind == TrackerKind::Shadow {
             self.reservations.lock().await.remove(&workspace.id);
         }
 
         result
+    }
+
+    /// Resolve the effective (cwd) path for resuming a thread + the
+    /// worktree handle if one is persisted. Used by `resume_thread_inner`
+    /// to rehydrate the ActiveThread with the same worktree the thread
+    /// was previously running in.
+    async fn resolve_worktree_for_resume(
+        &self,
+        thread_id: &str,
+        workspace: &Workspace,
+    ) -> (PathBuf, Option<WorktreeHandle>) {
+        let tid = thread_id.to_string();
+        let row: Option<(Option<String>, Option<String>)> = self
+            .db
+            .execute(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT worktree_path, worktree_branch FROM threads WHERE id = ?1",
+                        rusqlite::params![tid],
+                        |r| {
+                            Ok((
+                                r.get::<_, Option<String>>(0)?,
+                                r.get::<_, Option<String>>(1)?,
+                            ))
+                        },
+                    )
+                    .ok())
+            })
+            .await
+            .ok()
+            .flatten();
+
+        match row {
+            Some((Some(path), Some(branch))) => {
+                let path_buf = PathBuf::from(&path);
+                if !path_buf.exists() {
+                    // Worktree directory was deleted out-of-band (user ran
+                    // `rm -rf` or `git worktree remove`). Fall back to the
+                    // main checkout rather than fail the resume.
+                    warn!(
+                        path = %path_buf.display(),
+                        "persisted worktree path missing on resume — falling back to main checkout",
+                    );
+                    return (workspace.path.clone(), None);
+                }
+                let handle = WorktreeHandle {
+                    path: path_buf.clone(),
+                    branch,
+                    base_commit: String::new(),
+                };
+                (path_buf, Some(handle))
+            }
+            _ => (workspace.path.clone(), None),
+        }
+    }
+
+    /// Read the workspace path for a thread straight from its workspaces
+    /// row. Used by the merge/discard path where we need the *repo root*
+    /// (the main checkout) not the per-thread worktree path.
+    pub async fn repo_root_for_thread(&self, thread_id: &str) -> Option<PathBuf> {
+        let tid = thread_id.to_string();
+        self.db
+            .execute(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT w.path FROM workspaces w JOIN threads t ON t.workspace_id = w.id WHERE t.id = ?1",
+                        rusqlite::params![tid],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok())
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(PathBuf::from)
+    }
+
+    /// Return the stored worktree handle for a given thread, reading the
+    /// active map first and falling back to the DB for completed threads.
+    pub async fn worktree_handle_for_thread(&self, thread_id: &str) -> Option<WorktreeHandle> {
+        {
+            let active = self.active_threads.lock().await;
+            if let Some(t) = active.get(thread_id) {
+                if let Some(h) = &t.worktree {
+                    return Some(h.clone());
+                }
+            }
+        }
+        let tid = thread_id.to_string();
+        let row: Option<(Option<String>, Option<String>)> = self
+            .db
+            .execute(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT worktree_path, worktree_branch FROM threads WHERE id = ?1",
+                        rusqlite::params![tid],
+                        |r| {
+                            Ok((
+                                r.get::<_, Option<String>>(0)?,
+                                r.get::<_, Option<String>>(1)?,
+                            ))
+                        },
+                    )
+                    .ok())
+            })
+            .await
+            .ok()
+            .flatten();
+        match row {
+            Some((Some(path), Some(branch))) => Some(WorktreeHandle {
+                path: PathBuf::from(path),
+                branch,
+                base_commit: String::new(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Clear the worktree bookkeeping for a thread after a successful
+    /// merge or discard. Nulls out the `threads.worktree_path` / branch
+    /// columns and removes the in-memory handle if any. Doesn't touch
+    /// the filesystem — `worktree::remove` already does that.
+    pub async fn clear_worktree_for_thread(&self, thread_id: &str) {
+        {
+            let mut active = self.active_threads.lock().await;
+            if let Some(t) = active.get_mut(thread_id) {
+                t.worktree = None;
+            }
+        }
+        let tid = thread_id.to_string();
+        let _ = self
+            .db
+            .execute(move |conn| {
+                conn.execute(
+                    "UPDATE threads SET worktree_path = NULL, worktree_branch = NULL WHERE id = ?1",
+                    rusqlite::params![tid],
+                )?;
+                Ok(())
+            })
+            .await;
+    }
+
+    /// Resolve the filesystem path a given thread's IPC operations should
+    /// target. For git threads with a live worktree, returns the worktree
+    /// path; otherwise returns `default_path` (typically the logical
+    /// workspace path the frontend sent).
+    ///
+    /// Called by the IPC layer for commit / revert / diff / changed-files
+    /// so the backend silently substitutes the right checkout — the
+    /// frontend keeps sending `workspace.path` and nothing else has to
+    /// know worktrees exist.
+    pub async fn workspace_path_for_thread(
+        &self,
+        thread_id: &str,
+        default_path: &Path,
+    ) -> PathBuf {
+        // First check the active map — cheapest hit, and the most common
+        // case (UI actions happen while a thread is still loaded).
+        {
+            let active = self.active_threads.lock().await;
+            if let Some(t) = active.get(thread_id) {
+                return t.effective_path.clone();
+            }
+        }
+        // Fall back to the DB — covers closed threads the user is still
+        // interacting with via Commit / Revert / Diff on the completion
+        // card.
+        let tid = thread_id.to_string();
+        let persisted: Option<String> = self
+            .db
+            .execute(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT worktree_path FROM threads WHERE id = ?1",
+                        rusqlite::params![tid],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten())
+            })
+            .await
+            .ok()
+            .flatten();
+
+        match persisted {
+            Some(p) => {
+                let buf = PathBuf::from(p);
+                if buf.exists() { buf } else { default_path.to_path_buf() }
+            }
+            None => default_path.to_path_buf(),
+        }
+    }
+
+    /// Read the persisted tracker kind for a thread. Falls back to Git
+    /// for legacy rows written before the `tracker_kind` column existed
+    /// — the column has a `NOT NULL DEFAULT 'git'` so this should be
+    /// rare but the fallback keeps us robust.
+    async fn tracker_kind_for_thread(&self, thread_id: &str) -> TrackerKind {
+        let tid = thread_id.to_string();
+        let kind_str: Option<String> = self
+            .db
+            .execute(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT tracker_kind FROM threads WHERE id = ?1",
+                        rusqlite::params![tid],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten())
+            })
+            .await
+            .ok()
+            .flatten();
+        match kind_str.as_deref() {
+            Some("shadow") => TrackerKind::Shadow,
+            _ => TrackerKind::Git,
+        }
     }
 
     async fn resume_thread_inner(
@@ -474,6 +875,7 @@ impl SessionManager {
         adapter: Arc<dyn AgentAdapter>,
         model: Option<&str>,
         cli_agent: Option<&str>,
+        tracker_kind: TrackerKind,
     ) -> Result<()> {
         let tracker = self
             .tracker_for_thread(thread_id)
@@ -487,8 +889,14 @@ impl SessionManager {
                 .with_context(|| format!("no session_id for thread {thread_id}"))?
         };
 
+        // For git-tracked threads resume into their persisted worktree
+        // path. Legacy rows without a worktree fall back to the main
+        // checkout (they were running there pre-Phase-2).
+        let (effective_path, worktree_handle) =
+            self.resolve_worktree_for_resume(thread_id, workspace).await;
+
         let session = adapter
-            .resume(&workspace.path, &claude_session_id, prompt, model, cli_agent)
+            .resume(&effective_path, &claude_session_id, prompt, model, cli_agent)
             .await
             .context("failed to resume agent session")?;
 
@@ -517,6 +925,9 @@ impl SessionManager {
 
         let active_thread = ActiveThread {
             workspace_id: workspace.id.clone(),
+            effective_path: effective_path.clone(),
+            worktree: worktree_handle,
+            tracker_kind,
             session,
             snapshot: None,
             gate_tx: gate_tx.clone(),
@@ -525,7 +936,9 @@ impl SessionManager {
         {
             let mut active = self.active_threads.lock().await;
             active.insert(thread_id.to_string(), active_thread);
-            self.reservations.lock().await.remove(&workspace.id);
+            if tracker_kind == TrackerKind::Shadow {
+                self.reservations.lock().await.remove(&workspace.id);
+            }
         }
 
         let event_stream = {
@@ -542,7 +955,7 @@ impl SessionManager {
         let db = self.db.clone();
         let validators = self.validators.clone();
         let workspace_id_owned = workspace.id.clone();
-        let workspace_path_owned = workspace.path.clone();
+        let workspace_path_owned = effective_path.clone();
         let tracker_for_task = tracker.clone();
 
         tokio::spawn(async move {
@@ -2307,6 +2720,106 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("already running in this workspace"));
 
         mgr.reject(&tid_c, &gate_id, "cleanup").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_git_workspace_allows_concurrent_threads() {
+        // Phase 2: for git-backed workspaces the one-thread-per-workspace
+        // guard is lifted because each thread gets its own worktree. Two
+        // concurrent threads in the same workspace must both start and
+        // each must have a distinct effective_path (the worktree path).
+        use tokio::process::Command;
+
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&ws_path)
+            .status()
+            .await
+            .unwrap();
+        Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"])
+            .current_dir(&ws_path)
+            .status()
+            .await
+            .unwrap();
+
+        let ws = Workspace {
+            id: "ws-git-concurrent".to_string(),
+            path: ws_path.clone(),
+            name: "git-concurrent".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
+        insert_workspace_row(&mgr, &ws).await;
+
+        let ctx1 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid_a = mgr
+            .start_thread(&ws, "first", "gate-test", ctx1, None)
+            .await
+            .unwrap();
+        let gate_a = wait_for_gate_event(&mut rx).await;
+
+        // Second concurrent thread in the SAME workspace must succeed.
+        let ctx2 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = mgr
+            .start_thread(&ws, "second", "gate-test", ctx2, None)
+            .await;
+        assert!(
+            result.is_ok(),
+            "git workspace must allow concurrent threads: {:?}",
+            result.as_ref().err().map(|e| e.to_string())
+        );
+        let tid_b = result.unwrap();
+        let gate_b = wait_for_gate_event(&mut rx).await;
+
+        // Both threads should have distinct worktree paths.
+        let (path_a, path_b) = {
+            let active = mgr.active_threads.lock().await;
+            let a = active.get(&tid_a).unwrap().effective_path.clone();
+            let b = active.get(&tid_b).unwrap().effective_path.clone();
+            (a, b)
+        };
+        assert_ne!(path_a, path_b, "concurrent threads must have distinct worktrees");
+        assert_ne!(path_a, ws_path, "thread A must not run in the main checkout");
+        assert_ne!(path_b, ws_path, "thread B must not run in the main checkout");
+
+        mgr.reject(&tid_a, &gate_a, "cleanup").await.unwrap();
+        mgr.reject(&tid_b, &gate_b, "cleanup").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_shadow_workspace_still_blocks_concurrent_threads() {
+        // Shadow-tracked (non-git) workspaces keep the Phase 1 invariant
+        // because file isolation isn't possible without git. This is the
+        // narrower version of the old guard test.
+        let (mut mgr, mut rx) = setup_session_manager().await;
+        mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
+
+        // make_workspace_with_id points into temp_dir().join(id) which
+        // is not initialized as a git repo, so tracker resolves to Shadow.
+        let ws = make_workspace_with_id("ws-shadow-concurrent");
+        insert_workspace_row(&mgr, &ws).await;
+
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid_a = mgr
+            .start_thread(&ws, "first", "gate-test", ctx, None)
+            .await
+            .unwrap();
+        let gate_a = wait_for_gate_event(&mut rx).await;
+
+        let ctx2 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let result = mgr
+            .start_thread(&ws, "second", "gate-test", ctx2, None)
+            .await;
+        assert!(result.is_err(), "shadow workspace must still block a concurrent start");
+        assert!(result.unwrap_err().to_string().contains("already running in this workspace"));
+
+        mgr.reject(&tid_a, &gate_a, "cleanup").await.unwrap();
     }
 
     #[tokio::test]

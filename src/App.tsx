@@ -102,6 +102,8 @@ function App() {
         injectedMemories?: import("./lib/api").MemoryInfo[];
         injectedBriefing?: string | null;
         extractedMemories?: import("./lib/api").MemoryInfo[];
+        worktreeStatus?: "isolated" | "main";
+        effectivePath?: string;
       }[];
 
       setThreads((prev) => {
@@ -120,6 +122,8 @@ function App() {
             injectedMemories: p.injectedMemories,
             injectedBriefing: p.injectedBriefing ?? null,
             extractedMemories: p.extractedMemories,
+            worktreeStatus: p.worktreeStatus,
+            effectivePath: p.effectivePath,
             createdAt: new Date(p.createdAt).getTime(),
           }));
         return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
@@ -363,6 +367,8 @@ function App() {
               status: "running",
               injectedMemories: result.injectedMemories,
               injectedBriefing: result.briefingPreview,
+              worktreeStatus: result.worktreeStatus,
+              effectivePath: result.effectivePath,
             } : t
           )
         );
