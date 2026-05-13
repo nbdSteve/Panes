@@ -370,6 +370,31 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
                   });
                 });
               } : undefined,
+              onResolveMerge: thread.worktreeStatus === "isolated" ? (strategy) => {
+                // User picked a whole-merge resolution after seeing the
+                // conflict list. Same outcome handling as onMerge, but
+                // the backend auto-resolves the conflicted files with
+                // the chosen side and commits — no more conflicts path.
+                setMergeError(null);
+                api.mergeToMain(thread.id, undefined, strategy).then((result) => {
+                  if (result.outcome === "conflicts") {
+                    // Shouldn't happen for prefer_ours/prefer_theirs —
+                    // but surface anything the backend returns so the
+                    // user isn't left with a silent failure.
+                    setMergeError({
+                      message: "Merge still conflicts after resolution.",
+                      files: result.files,
+                    });
+                  } else {
+                    onCompletionAction(thread.id, "committed");
+                  }
+                }).catch((e) => {
+                  setMergeError({
+                    message: e instanceof Error ? e.message : String(e),
+                    files: [],
+                  });
+                });
+              } : undefined,
               onSteer: (tid, toolUseId, text) => {
                 api.rejectGate(tid, toolUseId, `Steer: ${text}`).catch(console.error);
                 onQueueFollowUp(tid, text);
@@ -868,6 +893,11 @@ interface RenderCallbacks {
    * so CompletionCard falls back to the Commit/Revert UI.
    */
   onMerge?: () => void;
+  /**
+   * Option A conflict resolver. Fires when the user picks a
+   * whole-merge strategy from the conflict block.
+   */
+  onResolveMerge?: (strategy: "prefer_ours" | "prefer_theirs") => void;
   onSteer: (threadId: string, toolUseId: string, text: string) => void;
   onViewDiff: (filePath: string, completionIdx: number) => void;
   onSendFeedback: (completionIdx: number) => void;
@@ -1064,6 +1094,7 @@ function renderEvents(
             onRevert={callbacks.onRevert}
             onKeep={callbacks.onKeep}
             onMerge={callbacks.onMerge}
+            onResolveMerge={callbacks.onResolveMerge}
             worktreeStatus={worktreeStatus}
             mergeError={mergeError ?? null}
             onFileClick={(filePath) => callbacks.onViewDiff(filePath, completionIdx)}

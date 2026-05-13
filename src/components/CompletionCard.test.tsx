@@ -435,6 +435,45 @@ describe("CompletionCard", () => {
       expect(screen.queryByText(/Discard worktree/i)).not.toBeInTheDocument();
     });
 
+    it("renders 'Use yours' / 'Keep main' resolution buttons when onResolveMerge is wired", async () => {
+      const onResolve = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <CompletionCard
+          {...baseProps}
+          worktreeStatus="isolated"
+          onMerge={vi.fn()}
+          onResolveMerge={onResolve}
+          mergeError={{ message: "x", files: ["src/main.rs"] }}
+        />,
+      );
+
+      const useYours = screen.getByRole("button", { name: /Use yours/i });
+      const keepMain = screen.getByRole("button", { name: /Keep main/i });
+      expect(useYours).toBeInTheDocument();
+      expect(keepMain).toBeInTheDocument();
+
+      await user.click(useYours);
+      expect(onResolve).toHaveBeenLastCalledWith("prefer_theirs");
+
+      await user.click(keepMain);
+      expect(onResolve).toHaveBeenLastCalledWith("prefer_ours");
+    });
+
+    it("falls back to plain Discard hint when onResolveMerge is not wired", () => {
+      render(
+        <CompletionCard
+          {...baseProps}
+          worktreeStatus="isolated"
+          onMerge={vi.fn()}
+          mergeError={{ message: "x", files: ["README.md"] }}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: /Use yours/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Keep main/i })).not.toBeInTheDocument();
+      expect(screen.getByText(/Discard this worktree/i)).toBeInTheDocument();
+    });
+
     it("singular conflict wording when exactly one file conflicts", () => {
       render(
         <CompletionCard

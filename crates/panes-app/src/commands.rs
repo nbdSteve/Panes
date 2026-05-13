@@ -348,17 +348,19 @@ pub async fn list_all_threads(
     }).await.map_err(PanesError::from)
 }
 
-#[tauri::command]
-pub async fn delete_thread(
-    db: tauri::State<'_, DbState>,
-    session: tauri::State<'_, SessionState>,
-    thread_id: String,
+/// Inner implementation of `delete_thread` — split so unit tests can
+/// drive it with direct `SessionState` / `DbHandle` handles instead of
+/// Tauri's `State<'_, ...>` wrapper.
+pub(crate) async fn delete_thread_inner(
+    db: &DbState,
+    session: &SessionState,
+    thread_id: &str,
 ) -> Result<(), PanesError> {
     // Garbage-collect shadow state before dropping the thread row.
     // Shadow tracking is no-op for git threads, so it's cheap to run
     // unconditionally rather than branching on tracker_kind.
     let shadow = session.lock().await.shadow_tracker();
-    if let Err(e) = shadow.delete_thread_data(&thread_id).await {
+    if let Err(e) = shadow.delete_thread_data(thread_id).await {
         tracing::warn!(
             error = %e,
             thread_id = %thread_id,
@@ -370,8 +372,8 @@ pub async fn delete_thread(
     // the DB row. Otherwise the worktree directory + branch leak until
     // the next startup's orphan cleanup catches them.
     let mgr = session.lock().await;
-    if let Some(handle) = mgr.worktree_handle_for_thread(&thread_id).await {
-        if let Some(repo_root) = mgr.repo_root_for_thread(&thread_id).await {
+    if let Some(handle) = mgr.worktree_handle_for_thread(thread_id).await {
+        if let Some(repo_root) = mgr.repo_root_for_thread(thread_id).await {
             drop(mgr);
             let handle_clone = handle.clone();
             if let Err(e) = tokio::task::spawn_blocking(move || {
@@ -393,7 +395,7 @@ pub async fn delete_thread(
         drop(mgr);
     }
 
-    let tid_for_db = thread_id.clone();
+    let tid_for_db = thread_id.to_string();
     db.execute(move |conn| {
         let tx = conn.unchecked_transaction()?;
         tx.execute(
@@ -411,6 +413,15 @@ pub async fn delete_thread(
         tx.commit()?;
         Ok(())
     }).await.map_err(PanesError::from)
+}
+
+#[tauri::command]
+pub async fn delete_thread(
+    db: tauri::State<'_, DbState>,
+    session: tauri::State<'_, SessionState>,
+    thread_id: String,
+) -> Result<(), PanesError> {
+    delete_thread_inner(db.inner(), session.inner(), &thread_id).await
 }
 
 #[derive(Serialize)]
@@ -754,11 +765,19 @@ pub struct MergeResult {
     pub files: Vec<String>,
 }
 
+/// Merge a thread's worktree branch into the main repo's HEAD.
+///
+/// `strategy` is the Option A conflict resolution knob: accepts
+/// "auto" (default), "prefer_ours" (keep main's version of any
+/// conflicted file), or "prefer_theirs" (take the worktree version).
+/// Maps to the `MergeStrategy` enum in panes-core. Option B (per-file
+/// resolution + three-way diff editor) is a planned follow-up.
 #[tauri::command]
 pub async fn merge_to_main(
     session: tauri::State<'_, SessionState>,
     thread_id: String,
     message: Option<String>,
+    strategy: Option<String>,
 ) -> Result<MergeResult, PanesError> {
     let mgr = session.lock().await;
     let handle = mgr
@@ -779,10 +798,18 @@ pub async fn merge_to_main(
         .filter(|m| !m.trim().is_empty())
         .unwrap_or_else(|| format!("Merge worktree {}", &thread_id[..thread_id.len().min(8)]));
 
+    let merge_strategy = match strategy.as_deref() {
+        Some("prefer_ours") => panes_core::worktree::MergeStrategy::PreferOurs,
+        Some("prefer_theirs") => panes_core::worktree::MergeStrategy::PreferTheirs,
+        // "auto", None, or anything else falls back to Auto — the old
+        // behaviour that surfaces conflicts for user review.
+        _ => panes_core::worktree::MergeStrategy::Auto,
+    };
+
     let handle_clone = handle.clone();
     let repo_clone = repo_root.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        panes_core::worktree::merge_into_head(&repo_clone, &handle_clone, &msg)
+        panes_core::worktree::merge_with_strategy(&repo_clone, &handle_clone, &msg, merge_strategy)
     })
     .await
     .map_err(|e| PanesError::GitError {
@@ -3103,5 +3130,175 @@ Body text here
         let out = truncate_briefing(&s);
         assert!(out.ends_with('…'));
         assert_eq!(out.chars().count(), 501);
+    }
+
+    // ─── Phase 2 delete_thread worktree cleanup ────────────────────────
+
+    /// Initialise a bare-bones git repo at `path` so libgit2 can open it
+    /// and create worktrees off its HEAD.
+    fn init_git_repo_for_test(path: &std::path::Path) {
+        use std::process::Command;
+        let ok = |out: std::process::Output| {
+            assert!(
+                out.status.success(),
+                "git init step failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        ok(Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap());
+        ok(Command::new("git")
+            .args(["config", "user.email", "test@panes.local"])
+            .current_dir(path)
+            .output()
+            .unwrap());
+        ok(Command::new("git")
+            .args(["config", "user.name", "Panes Test"])
+            .current_dir(path)
+            .output()
+            .unwrap());
+        std::fs::write(path.join("README.md"), "hello\n").unwrap();
+        ok(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .output()
+            .unwrap());
+        ok(Command::new("git")
+            .args(["commit", "-q", "-m", "initial"])
+            .current_dir(path)
+            .output()
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_thread_removes_worktree_directory_and_branch() {
+        // Gap 5: delete_thread must call worktree::remove so the
+        // filesystem dir + panes/<id> branch don't leak to startup
+        // orphan recovery.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo_for_test(&repo_path);
+
+        let worktrees_root = tmp.path().join("worktrees");
+        let thread_id = "abcdef12-dead-beef-cafe-deadbeefcafe".to_string();
+
+        // Materialise the worktree directly via the module under test.
+        let handle = panes_core::worktree::create(
+            &repo_path,
+            &thread_id,
+            &worktrees_root,
+        )
+        .unwrap();
+        assert!(handle.path.exists(), "precondition: worktree dir created");
+        let branch = handle.branch.clone();
+
+        // Seed DB with workspace + thread rows reflecting the handle.
+        let (mgr, db, _rx) = test_support::test_session_manager().await;
+        let session: SessionState = StdArc::new(Mutex::new(mgr));
+
+        let repo_s = repo_path.to_string_lossy().to_string();
+        let wt_s = handle.path.to_string_lossy().to_string();
+        let branch_s = branch.clone();
+        let tid_s = thread_id.clone();
+        db.execute(move |conn| {
+            conn.execute(
+                "INSERT INTO workspaces (id, path, name, created_at) VALUES ('ws', ?1, 'ws', '2024-01-01')",
+                rusqlite::params![repo_s],
+            )?;
+            conn.execute(
+                "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, tracker_kind, worktree_path, worktree_branch, created_at) \
+                 VALUES (?1, 'ws', 'claude-code', 'completed', 'p', 'git', ?2, ?3, '2024-01-01')",
+                rusqlite::params![tid_s, wt_s, branch_s],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Act.
+        delete_thread_inner(&db, &session, &thread_id)
+            .await
+            .expect("delete should succeed");
+
+        // Worktree directory gone.
+        assert!(
+            !handle.path.exists(),
+            "worktree dir should be removed after delete_thread",
+        );
+
+        // Backing branch gone from the main repo. Check via `git branch
+        // --list` — avoids dragging git2 in as a dev-dep of panes-app
+        // just for the assertion.
+        let branches_out = std::process::Command::new("git")
+            .args(["branch", "--list"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        let branches = String::from_utf8_lossy(&branches_out.stdout);
+        assert!(
+            !branches.contains(&branch),
+            "panes/<short> branch should be deleted after delete_thread, got: {branches}",
+        );
+
+        // DB row gone.
+        let tid_check = thread_id.clone();
+        let row_count: i64 = db
+            .execute(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM threads WHERE id = ?1",
+                    rusqlite::params![tid_check],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(row_count, 0, "thread row should be deleted from DB");
+    }
+
+    #[tokio::test]
+    async fn delete_thread_with_no_worktree_is_still_clean() {
+        // Non-git threads have no worktree — delete_thread must still
+        // succeed without touching the git2 path (nothing to discard)
+        // and must still drop the DB row.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws_path).unwrap();
+
+        let (mgr, db, _rx) = test_support::test_session_manager().await;
+        let session: SessionState = StdArc::new(Mutex::new(mgr));
+
+        let ws_s = ws_path.to_string_lossy().to_string();
+        db.execute(move |conn| {
+            conn.execute(
+                "INSERT INTO workspaces (id, path, name, created_at) VALUES ('ws', ?1, 'ws', '2024-01-01')",
+                rusqlite::params![ws_s],
+            )?;
+            conn.execute(
+                "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, tracker_kind, created_at) \
+                 VALUES ('t-no-wt', 'ws', 'claude-code', 'completed', 'p', 'shadow', '2024-01-01')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        delete_thread_inner(&db, &session, "t-no-wt").await.unwrap();
+
+        let row_count: i64 = db
+            .execute(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM threads WHERE id = 't-no-wt'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(row_count, 0);
     }
 }

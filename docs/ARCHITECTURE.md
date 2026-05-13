@@ -1282,7 +1282,13 @@ Thread A completes:
 
 **Why git2 over CLI for worktrees:** Phase 1 uses CLI for sequential git operations (snapshot, revert, commit) — adequate when one thread at a time. Swarm execution makes git operations concurrent and conflict-prone: multiple worktree creates racing on lock files, merge conflict detection across N completed threads, changed-file overlap queries before merging. git2 provides structured error types, `repo.merge_analysis()`, `IndexConflict` entries, and in-process queries without per-worktree subprocess overhead. Phase 1 CLI calls can migrate to git2 later but don't need to.
 
-**Merge conflicts:** When merging worktree results back to main, conflicts are possible if multiple threads touch overlapping files. git2's three-way merge primitives and `IndexConflict` entries let Panes detect and surface conflicts structurally. User is offered: resolve manually, keep one side, or discard the conflicting thread's changes.
+**Merge conflicts:** When merging worktree results back to main, conflicts are possible if multiple threads touch overlapping files. git2's three-way merge primitives and `IndexConflict` entries let Panes detect and surface conflicts structurally.
+
+**Conflict resolution roadmap:**
+
+- **Option A (shipped):** whole-merge strategy picker. On conflict, Panes restores main's HEAD and surfaces the conflicting file list in the completion card. The user picks "Use yours" (worktree version wins) or "Keep main" (main's version wins); the engine re-runs the merge with the chosen side staging all conflicted files, then commits normally. Implemented in `worktree::MergeStrategy::{Auto, PreferOurs, PreferTheirs}` / `merge_with_strategy`. Discard (throw away the whole worktree) is always available as an escape hatch.
+
+- **Option B (planned follow-up):** per-file conflict resolution with a three-way diff editor. The merge stays in-progress on main's index (no post-conflict cleanup) while the user walks each conflicted file and picks a side — or edits the merge manually in the 3-way viewer. Adds new IPCs: `get_merge_conflicts`, `get_conflict_file_content(side)`, `resolve_conflict_file(strategy | content)`, `finalize_merge`, `abort_merge`. State needs to survive app restart (libgit2's `MERGE_HEAD` is the source of truth; startup recovery detects it and either offers to continue or auto-aborts). Scope: ~500-800 LOC backend + ~400-600 LOC frontend + new tests. The Option A IPC surface (`merge_to_main` + `strategy` parameter) is the ancestor of Option B's `finalize_merge` — their work is compatible, not throwaway.
 
 ### Swarm Execution: Beads + Worktrees Integrated Flow
 

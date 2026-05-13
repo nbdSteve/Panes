@@ -37,6 +37,12 @@ export interface CompletionCardProps {
   onRevert: () => void;
   onKeep: () => void;
   onMerge?: () => void;
+  /**
+   * Option A conflict resolver: user picks a whole-merge strategy
+   * after seeing the conflict file list. Wiring is optional so
+   * non-worktree callers don't have to pass a no-op.
+   */
+  onResolveMerge?: (strategy: "prefer_ours" | "prefer_theirs") => void;
   onFileClick?: (filePath: string) => void;
   onSendFeedback?: () => void;
 }
@@ -59,6 +65,7 @@ export default function CompletionCard({
   onRevert,
   onKeep,
   onMerge,
+  onResolveMerge,
   onFileClick,
   onSendFeedback,
 }: CompletionCardProps) {
@@ -263,9 +270,35 @@ export default function CompletionCard({
               <li key={f}>{f}</li>
             ))}
           </ul>
-          <div className="merge-conflict-hint">
-            Discard this worktree or resolve the conflicts manually before merging again.
-          </div>
+          {onResolveMerge ? (
+            <>
+              <div className="merge-conflict-hint">
+                Pick which side to keep for every conflicting file, or discard the worktree.
+              </div>
+              <div className="merge-conflict-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => onResolveMerge("prefer_theirs")}
+                  title="Keep the worktree's version of every conflicting file and complete the merge"
+                >
+                  Use yours
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => onResolveMerge("prefer_ours")}
+                  title="Keep main's version of every conflicting file and complete the merge"
+                >
+                  Keep main
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="merge-conflict-hint">
+              Discard this worktree or resolve the conflicts manually before merging again.
+            </div>
+          )}
         </div>
       )}
 

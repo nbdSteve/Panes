@@ -21,18 +21,34 @@ test.describe("Full-Stack: Git Commit", () => {
     // main repo HEAD.
     const mainHeadBefore = getHeadHash(wsPath);
 
+    // Snapshot pre-existing worktree dirs so we can identify THIS
+    // test's worktree after sendPrompt. The fullstack suite shares
+    // $PANES_DATA_DIR across tests so leftover worktrees are
+    // possible.
+    const worktreesRoot = join(getDataDir(), "worktrees");
+    const beforeWt = new Set(
+      existsSync(worktreesRoot) ? readdirSync(worktreesRoot) : [],
+    );
+
     await page.goto("/");
     await addWorkspace(page, wsPath);
     await sendPrompt(page, "edit some files");
 
     await waitForCompletion(page);
 
-    // Wait for the worktree to appear on disk and pick it up.
-    const worktreesRoot = join(getDataDir(), "worktrees");
     await expect
-      .poll(() => (existsSync(worktreesRoot) ? readdirSync(worktreesRoot).length : 0), { timeout: 5000 })
+      .poll(
+        () =>
+          existsSync(worktreesRoot)
+            ? readdirSync(worktreesRoot).filter((n) => !beforeWt.has(n)).length
+            : 0,
+        { timeout: 5000 },
+      )
       .toBeGreaterThanOrEqual(1);
-    const worktreeDir = join(worktreesRoot, readdirSync(worktreesRoot)[0]);
+    const worktreeDir = join(
+      worktreesRoot,
+      readdirSync(worktreesRoot).find((n) => !beforeWt.has(n))!,
+    );
 
     // Fake adapter writes happen async after Complete — wait for the
     // worktree to actually have pending edits before opening the diff.

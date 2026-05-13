@@ -50,6 +50,29 @@ pub enum MergeOutcome {
     Conflicts { files: Vec<String> },
 }
 
+/// Whole-merge conflict strategy for Option A of the Phase 2 resolution
+/// UX. When a three-way merge produces conflicts, callers can retry with
+/// a blanket preference for one side instead of aborting.
+///
+/// Option B (per-file resolution + 3-way diff viewer) is documented as
+/// future work in the Phase 2 follow-up plan; it'd build on this same
+/// IPC surface by adding conflict-inspection + per-file-resolve calls
+/// rather than picking a whole-merge side up front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeStrategy {
+    /// Classic three-way merge. On conflict, main is restored and the
+    /// outcome is `Conflicts { files }`. Caller is expected to surface
+    /// the list and ask the user which side to prefer.
+    Auto,
+    /// On conflict, keep the worktree's version of the conflicted file
+    /// (labelled "Use yours" in the UI — the worktree is the user's
+    /// side because they sent the prompt).
+    PreferTheirs,
+    /// On conflict, keep main's version of the conflicted file
+    /// (labelled "Keep main").
+    PreferOurs,
+}
+
 /// A worktree directory under `worktrees_root` with no matching active
 /// thread, discovered at startup. Used for crash recovery.
 #[derive(Debug, Clone)]
@@ -180,17 +203,35 @@ pub fn remove(repo_root: &Path, handle: &WorktreeHandle) -> Result<()> {
     Ok(())
 }
 
-/// Merge the worktree's branch back into the main repo's HEAD.
-///
-/// Fast-forward when possible, otherwise a two-parent merge commit. On
-/// conflict, the main repo is hard-reset to the pre-merge HEAD so it's
-/// never left half-merged. The caller is expected to call `remove(...)`
-/// on success; on `Conflicts`, the worktree is left intact so the user
-/// can inspect and discard.
+/// Merge the worktree's branch back into the main repo's HEAD with
+/// `MergeStrategy::Auto` — backwards-compatible wrapper around
+/// `merge_with_strategy` for callers that don't care about conflict
+/// resolution.
 pub fn merge_into_head(
     repo_root: &Path,
     handle: &WorktreeHandle,
     message: &str,
+) -> Result<MergeOutcome> {
+    merge_with_strategy(repo_root, handle, message, MergeStrategy::Auto)
+}
+
+/// Merge the worktree's branch back into the main repo's HEAD.
+///
+/// Fast-forward when possible, otherwise a two-parent merge commit. On
+/// conflict, behaviour depends on `strategy`:
+/// - `Auto`: the main repo is hard-reset to pre-merge HEAD and the
+///   outcome is `Conflicts { files }`. Caller expected to either retry
+///   with a different strategy or call `remove(handle)` to discard.
+/// - `PreferTheirs`: every conflicted file is replaced with the
+///   worktree-branch version and the merge commit is created normally.
+/// - `PreferOurs`: every conflicted file keeps main's version; a merge
+///   commit still records the worktree branch as a second parent so
+///   future merges see the history as merged.
+pub fn merge_with_strategy(
+    repo_root: &Path,
+    handle: &WorktreeHandle,
+    message: &str,
+    strategy: MergeStrategy,
 ) -> Result<MergeOutcome> {
     let repo = Repository::open(repo_root)
         .with_context(|| format!("failed to open repo at {}", repo_root.display()))?;
@@ -249,35 +290,62 @@ pub fn merge_into_head(
     let mut index = repo.index().context("failed to read index after merge")?;
 
     if index.has_conflicts() {
-        let mut conflicts: Vec<String> = Vec::new();
+        // Collect conflicted paths + the blob oids for each side so we
+        // can either (a) return them for an Auto-strategy retry, or
+        // (b) resolve each in-index for PreferOurs/PreferTheirs.
+        let mut conflicts: Vec<ConflictEntry> = Vec::new();
         if let Ok(iter) = index.conflicts() {
             for entry in iter.flatten() {
-                let any_name = entry
+                let path = entry
                     .our
                     .as_ref()
                     .or(entry.their.as_ref())
                     .or(entry.ancestor.as_ref())
                     .map(|e| String::from_utf8_lossy(&e.path).into_owned());
-                if let Some(p) = any_name {
-                    if !conflicts.contains(&p) {
-                        conflicts.push(p);
+                if let Some(p) = path {
+                    if !conflicts.iter().any(|c| c.path == p) {
+                        conflicts.push(ConflictEntry {
+                            path: p,
+                            our_oid: entry.our.as_ref().map(|e| e.id),
+                            their_oid: entry.their.as_ref().map(|e| e.id),
+                            our_mode: entry.our.as_ref().map(|e| e.mode),
+                            their_mode: entry.their.as_ref().map(|e| e.mode),
+                        });
                     }
                 }
             }
         }
 
-        // Restore main repo to pre-merge state so nothing's half-merged.
-        repo.cleanup_state()
-            .context("failed to clean up merge state")?;
-        let head_obj = repo
-            .find_object(pre_head_oid, None)
-            .context("failed to resolve pre-merge HEAD for reset")?;
-        let mut co = git2::build::CheckoutBuilder::new();
-        co.force();
-        repo.reset(&head_obj, ResetType::Hard, Some(&mut co))
-            .context("failed to hard-reset after conflict")?;
-
-        return Ok(MergeOutcome::Conflicts { files: conflicts });
+        match strategy {
+            MergeStrategy::Auto => {
+                // Restore main repo to pre-merge state so nothing's
+                // half-merged — the caller is expected to either retry
+                // with PreferOurs/PreferTheirs or call `remove`.
+                repo.cleanup_state()
+                    .context("failed to clean up merge state")?;
+                let head_obj = repo
+                    .find_object(pre_head_oid, None)
+                    .context("failed to resolve pre-merge HEAD for reset")?;
+                let mut co = git2::build::CheckoutBuilder::new();
+                co.force();
+                repo.reset(&head_obj, ResetType::Hard, Some(&mut co))
+                    .context("failed to hard-reset after conflict")?;
+                return Ok(MergeOutcome::Conflicts {
+                    files: conflicts.into_iter().map(|c| c.path).collect(),
+                });
+            }
+            MergeStrategy::PreferOurs | MergeStrategy::PreferTheirs => {
+                // Resolve each conflict in the index by staging the
+                // chosen side's blob. git2's `add` / `remove` API is
+                // enough here because we don't need to touch the
+                // working tree — `checkout_index` at the end syncs it.
+                for c in &conflicts {
+                    resolve_conflict_in_index(&mut index, c, strategy)
+                        .with_context(|| format!("failed to resolve conflict for {}", c.path))?;
+                }
+                index.write().context("failed to write resolved index")?;
+            }
+        }
     }
 
     // Clean merge — write a commit.
@@ -310,6 +378,73 @@ pub fn merge_into_head(
     Ok(MergeOutcome::Merged {
         commit: merge_commit.to_string(),
     })
+}
+
+/// In-memory view of one conflicted index entry at the moment the
+/// merge engine detected conflicts. We snapshot the blob oids so the
+/// resolution step can re-stage them without re-running merge analysis.
+struct ConflictEntry {
+    path: String,
+    our_oid: Option<git2::Oid>,
+    their_oid: Option<git2::Oid>,
+    our_mode: Option<u32>,
+    their_mode: Option<u32>,
+}
+
+/// Resolve a single conflicted path in the index by staging the blob
+/// from the chosen side and clearing the conflict markers. Does not
+/// touch the working tree — the caller runs `checkout_index` (via the
+/// `checkout_head` at the end of the merge) to sync files on disk.
+fn resolve_conflict_in_index(
+    index: &mut git2::Index,
+    c: &ConflictEntry,
+    strategy: MergeStrategy,
+) -> Result<()> {
+    let (chosen_oid, chosen_mode) = match strategy {
+        MergeStrategy::PreferOurs => (c.our_oid, c.our_mode),
+        MergeStrategy::PreferTheirs => (c.their_oid, c.their_mode),
+        MergeStrategy::Auto => {
+            return Err(anyhow!("resolve_conflict_in_index called with Auto"));
+        }
+    };
+
+    // Drop the three conflicting stage entries before inserting the
+    // resolved one. `remove_path` removes all stage entries for this
+    // path (ancestor + ours + theirs).
+    let path_bytes = c.path.as_bytes();
+    index
+        .remove_path(Path::new(&c.path))
+        .with_context(|| format!("failed to drop conflict entries for {}", c.path))?;
+
+    match (chosen_oid, chosen_mode) {
+        (Some(oid), Some(mode)) => {
+            // Stage the chosen side's blob.
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: oid,
+                flags: 0,
+                flags_extended: 0,
+                path: path_bytes.to_vec(),
+            };
+            index
+                .add(&entry)
+                .with_context(|| format!("failed to stage resolved blob for {}", c.path))?;
+        }
+        _ => {
+            // Chosen side didn't have this path (add/delete conflict).
+            // The `remove_path` above already dropped it — intentional
+            // "delete" outcome. Nothing more to stage.
+        }
+    }
+
+    Ok(())
 }
 
 /// Scan `worktrees_root` and return any directories whose name isn't in
@@ -555,6 +690,105 @@ mod tests {
             fs::read_to_string(repo.path().join("README.md")).unwrap(),
             "main version\n",
             "main working tree must be restored",
+        );
+    }
+
+    /// Set up a conflict scenario: repo with a worktree branch and main
+    /// branch both editing the same file with different content. Returns
+    /// the repo + worktree handle ready to merge.
+    fn setup_conflict(repo: &TempDir, roots: &TempDir) -> WorktreeHandle {
+        init_repo(repo.path());
+        let h = create(repo.path(), "conflict-thread-id", roots.path()).unwrap();
+
+        fs::write(h.path.join("README.md"), "worktree version\n").unwrap();
+        Command::new("git")
+            .args(["-c", "user.email=t@x.com", "-c", "user.name=T", "commit", "-q", "-am", "wt"])
+            .current_dir(&h.path)
+            .output()
+            .unwrap();
+
+        fs::write(repo.path().join("README.md"), "main version\n").unwrap();
+        Command::new("git")
+            .args(["-c", "user.email=t@x.com", "-c", "user.name=T", "commit", "-q", "-am", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        h
+    }
+
+    #[test]
+    fn merge_with_strategy_prefer_theirs_takes_worktree_version() {
+        // Option A: user picks "Use yours" in the conflict UI. The
+        // engine stages the worktree (theirs) blob and commits the
+        // merge — main's README ends up with the worktree content.
+        let repo = TempDir::new().unwrap();
+        let roots = TempDir::new().unwrap();
+        let h = setup_conflict(&repo, &roots);
+
+        let outcome =
+            merge_with_strategy(repo.path(), &h, "merge: prefer yours", MergeStrategy::PreferTheirs)
+                .unwrap();
+        match outcome {
+            MergeOutcome::Merged { .. } => {}
+            other => panic!("expected Merged, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(repo.path().join("README.md")).unwrap(),
+            "worktree version\n",
+            "main should now hold the worktree's content",
+        );
+
+        // Main HEAD advanced — there's a new merge commit with two parents.
+        let r = Repository::open(repo.path()).unwrap();
+        let head_commit = r.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head_commit.parent_count(), 2, "merge commit should have 2 parents");
+    }
+
+    #[test]
+    fn merge_with_strategy_prefer_ours_keeps_main_version() {
+        // Option A: user picks "Keep main" in the conflict UI. The
+        // engine stages main's blob and commits the merge — main's
+        // README keeps its content but the history records the merge.
+        let repo = TempDir::new().unwrap();
+        let roots = TempDir::new().unwrap();
+        let h = setup_conflict(&repo, &roots);
+
+        let outcome =
+            merge_with_strategy(repo.path(), &h, "merge: keep main", MergeStrategy::PreferOurs)
+                .unwrap();
+        match outcome {
+            MergeOutcome::Merged { .. } => {}
+            other => panic!("expected Merged, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(repo.path().join("README.md")).unwrap(),
+            "main version\n",
+            "main should keep its own content",
+        );
+
+        let r = Repository::open(repo.path()).unwrap();
+        let head_commit = r.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head_commit.parent_count(), 2, "merge commit should have 2 parents");
+    }
+
+    #[test]
+    fn merge_into_head_default_is_auto_and_still_conflicts() {
+        // Regression: the old `merge_into_head` wrapper must still
+        // behave identically — callers that haven't adopted the
+        // strategy API get Auto semantics (bail on conflict).
+        let repo = TempDir::new().unwrap();
+        let roots = TempDir::new().unwrap();
+        let h = setup_conflict(&repo, &roots);
+
+        let outcome = merge_into_head(repo.path(), &h, "auto").unwrap();
+        assert!(matches!(outcome, MergeOutcome::Conflicts { .. }));
+        assert_eq!(
+            fs::read_to_string(repo.path().join("README.md")).unwrap(),
+            "main version\n",
+            "Auto must restore main working tree on conflict",
         );
     }
 

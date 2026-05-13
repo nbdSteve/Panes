@@ -2192,6 +2192,12 @@ body {
   font-size: 11px;
 }
 
+.merge-conflict-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 /* ─── Files changed ─── */
 
 .files-changed {

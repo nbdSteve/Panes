@@ -179,10 +179,29 @@ export const api = {
    * Phase 2 only — requires the thread to have a persisted worktree.
    * Backend returns the outcome so the UI can distinguish successful
    * merges from conflicts (where the main repo is untouched and the
-   * user needs to pick Discard).
+   * user needs to pick a resolution strategy or Discard).
+   *
+   * `strategy` drives the Option A conflict flow:
+   * - undefined / "auto": standard merge; returns outcome=conflicts
+   *   if the branches collide so the UI can prompt the user.
+   * - "prefer_theirs": keep the worktree version of any conflicted
+   *   file (user clicked "Use yours").
+   * - "prefer_ours": keep main's version of any conflicted file
+   *   (user clicked "Keep main").
+   *
+   * Per-file resolution + three-way diff is Option B, documented as a
+   * planned follow-up.
    */
-  mergeToMain: (threadId: string, message?: string) =>
-    call<MergeResult>("merge_to_main", { threadId, message: message ?? null }),
+  mergeToMain: (
+    threadId: string,
+    message?: string,
+    strategy?: "auto" | "prefer_ours" | "prefer_theirs",
+  ) =>
+    call<MergeResult>("merge_to_main", {
+      threadId,
+      message: message ?? null,
+      strategy: strategy ?? null,
+    }),
   getChangedFiles: (workspacePath: string, threadId?: string) =>
     call<string[]>("get_changed_files", { workspacePath, threadId: threadId ?? null }),
   getFileDiff: (workspacePath: string, filePath: string, threadId?: string) =>

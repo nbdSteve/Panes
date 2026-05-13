@@ -298,6 +298,7 @@ async fn dispatch_command(
         "merge_to_main" => {
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();
             let message = args.get("message").and_then(|v| v.as_str()).map(String::from);
+            let strategy_str = args.get("strategy").and_then(|v| v.as_str()).map(String::from);
 
             let mgr = state.session_manager.lock().await;
             let handle = mgr
@@ -314,10 +315,16 @@ async fn dispatch_command(
                 .filter(|m| !m.trim().is_empty())
                 .unwrap_or_else(|| format!("Merge worktree {}", &thread_id[..thread_id.len().min(8)]));
 
+            let merge_strategy = match strategy_str.as_deref() {
+                Some("prefer_ours") => panes_core::worktree::MergeStrategy::PreferOurs,
+                Some("prefer_theirs") => panes_core::worktree::MergeStrategy::PreferTheirs,
+                _ => panes_core::worktree::MergeStrategy::Auto,
+            };
+
             let handle_clone = handle.clone();
             let repo_clone = repo_root.clone();
             let outcome = tokio::task::spawn_blocking(move || {
-                panes_core::worktree::merge_into_head(&repo_clone, &handle_clone, &msg)
+                panes_core::worktree::merge_with_strategy(&repo_clone, &handle_clone, &msg, merge_strategy)
             })
             .await
             .map_err(|e| format!("merge task panicked: {e}"))?
