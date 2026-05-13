@@ -2088,6 +2088,44 @@ body {
   flex-shrink: 0;
 }
 
+.completion-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.completion-copy-btn:hover {
+  background: var(--bg-card);
+  border-color: var(--border-hover);
+  color: var(--text-secondary);
+}
+
+.completion-copy-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+  color: var(--text-secondary);
+}
+
+.completion-copy-btn.copied {
+  color: var(--success);
+  border-color: var(--success-bg);
+}
+
+.completion-copy-btn.failed {
+  color: var(--error);
+  border-color: var(--error-bg);
+}
+
 .completion-card .completion-actions {
   display: flex;
   gap: 8px;

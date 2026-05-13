@@ -1,8 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import CompletionCard from "./CompletionCard";
 import type { CompletionCardProps } from "./CompletionCard";
+import { copyTextToClipboard } from "../lib/clipboard";
+
+vi.mock("../lib/clipboard", () => ({
+  copyTextToClipboard: vi.fn(),
+}));
+
+const mockedCopy = vi.mocked(copyTextToClipboard);
 
 const baseProps: CompletionCardProps = {
   summary: "Implemented feature X",
@@ -288,6 +295,53 @@ describe("CompletionCard", () => {
     it("does not show feedback sent badge when feedbackSentCount is 0", () => {
       render(<CompletionCard {...baseProps} feedbackSentCount={0} />);
       expect(screen.queryByText(/Feedback sent/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("copy button", () => {
+    it("renders a copy button when summary is present", () => {
+      render(<CompletionCard {...baseProps} />);
+      expect(
+        screen.getByRole("button", { name: /copy response to clipboard/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("does not render copy button when summary is empty", () => {
+      render(<CompletionCard {...baseProps} summary="" />);
+      expect(
+        screen.queryByRole("button", { name: /copy response to clipboard/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("copies the summary via the clipboard helper and shows a copied state", async () => {
+      mockedCopy.mockResolvedValue(true);
+      const user = userEvent.setup();
+
+      render(<CompletionCard {...baseProps} summary="the full response body" />);
+      const btn = screen.getByRole("button", { name: /copy response to clipboard/i });
+      await user.click(btn);
+
+      await waitFor(() => {
+        expect(mockedCopy).toHaveBeenCalledWith("the full response body");
+        expect(btn).toHaveAttribute("title", "Copied");
+      });
+      expect(btn.className).toContain("copied");
+      mockedCopy.mockReset();
+    });
+
+    it("surfaces a failed state when the clipboard helper returns false", async () => {
+      mockedCopy.mockResolvedValue(false);
+      const user = userEvent.setup();
+
+      render(<CompletionCard {...baseProps} summary="nope" />);
+      const btn = screen.getByRole("button", { name: /copy response to clipboard/i });
+      await user.click(btn);
+
+      await waitFor(() => {
+        expect(btn).toHaveAttribute("title", "Copy failed");
+      });
+      expect(btn.className).toContain("failed");
+      mockedCopy.mockReset();
     });
   });
 });
