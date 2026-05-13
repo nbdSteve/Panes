@@ -181,23 +181,49 @@ fn looks_like_local_path(s: &str) -> bool {
     core.chars().any(|c| c == '/' || c == '.')
 }
 
-/// Common source/config/document extensions treated as path evidence.
-/// Extensions must be 1-6 chars, all ASCII lowercase letters or digits,
-/// and contain at least one letter — pure-digit "extensions" like `.3`
-/// are version-number fragments, not file extensions.
+/// Whitelist of file extensions the validator treats as path evidence.
+///
+/// A broad "any 1-6 lowercase letters" rule was too generous — agents
+/// routinely emit dotted code identifiers like `Document.render` where
+/// `render` satisfied that rule and produced a false positive. We instead
+/// enumerate real source/config/doc/data extensions. Additions should be
+/// extensions that are both (a) likely to appear as citations in agent
+/// output and (b) unlikely to collide with English words used as method
+/// names or properties.
+const KNOWN_EXTENSIONS: &[&str] = &[
+    // Rust / build
+    "rs", "toml", "lock",
+    // JS / TS
+    "js", "jsx", "ts", "tsx", "mjs", "cjs",
+    // Python
+    "py", "pyi", "ipynb",
+    // Web / styles
+    "html", "htm", "css", "scss", "sass", "less", "vue", "svelte", "astro",
+    // Data / schema
+    "json", "xml", "yml", "yaml", "csv", "tsv", "jsonl", "ndjson",
+    "graphql", "gql", "proto", "sql",
+    // Docs
+    "md", "mdx", "txt", "rst", "adoc",
+    // C family
+    "c", "h", "cpp", "cc", "cxx", "hpp", "hh",
+    // JVM / .NET
+    "java", "kt", "kts", "scala", "groovy", "cs", "fs", "fsx",
+    // Other languages
+    "go", "mod", "sum", "rb", "erb", "php", "swift", "m", "mm",
+    "dart", "lua", "elm", "ex", "exs", "erl", "clj", "cljs", "edn",
+    "hs", "ml", "mli", "nim", "zig", "cr", "r",
+    // Shell / config
+    "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+    "ini", "conf", "cfg", "env",
+    // Media / binary (commonly cited)
+    "svg", "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf",
+];
+
+/// Pure-digit "extensions" like `.3` are version-number fragments, not file
+/// extensions. The whitelist already excludes those, but we keep the
+/// function boundary so callers can read cleanly.
 fn looks_like_extension(ext: &str) -> bool {
-    if ext.is_empty() || ext.len() > 6 {
-        return false;
-    }
-    let mut has_letter = false;
-    for b in ext.bytes() {
-        if b.is_ascii_lowercase() {
-            has_letter = true;
-        } else if !b.is_ascii_digit() {
-            return false;
-        }
-    }
-    has_letter
+    KNOWN_EXTENSIONS.contains(&ext)
 }
 
 /// True if the token is specific enough to plausibly be a filesystem path,
@@ -221,13 +247,17 @@ fn is_path_like(s: &str) -> bool {
         return false;
     }
 
-    // Any path-prefix sigil is strong evidence.
+    // Any path-prefix sigil is strong evidence — but only if there's
+    // actual content after it. Bare `/`, `//`, `./`, `../` are either
+    // code-comment fragments or directory shorthand without a target and
+    // must not be treated as file citations.
     if s.starts_with('/')
         || s.starts_with("./")
         || s.starts_with("../")
         || s.starts_with("~/")
     {
-        return true;
+        let has_non_separator = s.chars().any(|c| c != '/' && c != '.' && c != '~');
+        return has_non_separator;
     }
 
     // Last segment with a plausible extension.
@@ -620,5 +650,95 @@ mod tests {
         // Source file extensions are conventionally lowercase. Accepting
         // uppercase would re-enable false positives from acronyms.
         assert!(!is_path_like("e.G"));
+    }
+
+    // ─── further false-positive regressions seen in real agent output ────
+
+    #[test]
+    fn is_path_like_rejects_bare_slashes() {
+        // `//` was being reported as "escapes workspace" because the old
+        // starts_with('/') rule accepted slash-only tokens. Comment
+        // markers in backticked code like `// TODO` get stripped of
+        // backticks by the bare-path tokenizer and arrive here as `//`.
+        assert!(!is_path_like("/"));
+        assert!(!is_path_like("//"));
+        assert!(!is_path_like("///"));
+        assert!(!is_path_like("./"));
+        assert!(!is_path_like("../"));
+        assert!(!is_path_like("~/"));
+    }
+
+    #[test]
+    fn is_path_like_rejects_camel_case_dotted_identifiers() {
+        // Class-method references like `Document.render` or chained access
+        // like `Document.renderDocument.render` used to match the lenient
+        // "1-6 lowercase letters" extension rule. We now require a known
+        // file extension, so these correctly stay prose.
+        assert!(!is_path_like("Document.render"));
+        assert!(!is_path_like("Document.renderDocument.render"));
+        assert!(!is_path_like("Component.props"));
+        assert!(!is_path_like("service.handler"));
+    }
+
+    #[tokio::test]
+    async fn bare_slashes_in_prose_do_not_trigger_findings() {
+        // Full end-to-end case from a production report: a `//`-style
+        // comment fragment showed up as "referenced path escapes
+        // workspace: //".
+        let tmp = TempDir::new().unwrap();
+        let v = CitationValidator::default();
+        let ctx = ctx_for(&tmp, json!({}));
+        let event = complete("Consider replacing // with a real comment style.");
+        let report = v.validate(&event, &ctx).await;
+        assert_eq!(
+            report.outcome,
+            panes_events::ValidationOutcome::Pass,
+            "bare // must not be treated as a path; got: {:?}",
+            report.findings,
+        );
+    }
+
+    #[tokio::test]
+    async fn code_identifier_chains_do_not_trigger_findings() {
+        // End-to-end regression for `Document.renderDocument.render` being
+        // flagged as "referenced path does not exist".
+        let tmp = TempDir::new().unwrap();
+        let v = CitationValidator::default();
+        let ctx = ctx_for(&tmp, json!({}));
+        let event = complete(
+            "Override Document.renderDocument.render to customize SSR output.",
+        );
+        let report = v.validate(&event, &ctx).await;
+        assert_eq!(
+            report.outcome,
+            panes_events::ValidationOutcome::Pass,
+            "dotted code identifiers must not be flagged as missing paths; got: {:?}",
+            report.findings,
+        );
+    }
+
+    #[test]
+    fn known_extension_whitelist_accepts_real_source_files() {
+        // Counter-check: the tightened extension whitelist must still
+        // accept ordinary source/config/doc paths.
+        assert!(is_path_like("src/main.rs"));
+        assert!(is_path_like("README.md"));
+        assert!(is_path_like("package.json"));
+        assert!(is_path_like("styles.css"));
+        assert!(is_path_like("Cargo.toml"));
+        assert!(is_path_like("index.ts"));
+        assert!(is_path_like("App.tsx"));
+        assert!(is_path_like("requirements.txt"));
+    }
+
+    #[test]
+    fn unknown_extensions_are_rejected() {
+        // The whitelist is deliberately conservative: if an extension
+        // isn't on the list, treat the token as prose. A missed real
+        // extension is an easy follow-up; a false positive on a method
+        // name wrecks user trust.
+        assert!(!is_path_like("Document.render"));
+        assert!(!is_path_like("Widget.mount"));
+        assert!(!is_path_like("handler.invoke"));
     }
 }
