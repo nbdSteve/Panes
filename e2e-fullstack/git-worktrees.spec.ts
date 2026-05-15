@@ -26,6 +26,11 @@ test.describe("Full-Stack: Git Worktrees", () => {
   });
 
   test("two concurrent threads in a git workspace each get their own worktree", async ({ page }) => {
+    // Snapshot existing worktrees before this test creates any — other
+    // tests in the same app instance may have already populated the dir.
+    const worktreesRoot = join(getDataDir(), "worktrees");
+    const baseline = existsSync(worktreesRoot) ? readdirSync(worktreesRoot) : [];
+
     await page.goto("/");
     await addWorkspace(page, wsPath);
 
@@ -55,18 +60,18 @@ test.describe("Full-Stack: Git Worktrees", () => {
     // worktree. Poll the data dir because thread #2 starts spawning
     // async after the UI send. Worktrees stick around post-completion
     // until the user picks Merge/Discard, so the dir count is stable.
-    const worktreesRoot = join(getDataDir(), "worktrees");
     await expect
       .poll(
-        () => (existsSync(worktreesRoot) ? readdirSync(worktreesRoot).length : 0),
+        () => (existsSync(worktreesRoot) ? readdirSync(worktreesRoot).length : 0) - baseline.length,
         { timeout: 30_000 },
       )
       .toBeGreaterThanOrEqual(2);
 
-    // Each worktree dir is named by thread id and must contain the
-    // checked-out working tree (README.md from createGitWorkspace).
-    const worktrees = readdirSync(worktreesRoot);
-    for (const wt of worktrees) {
+    // Only check newly created worktrees from this test — they must
+    // contain the checked-out working tree (README.md from createGitWorkspace).
+    const allWorktrees = readdirSync(worktreesRoot);
+    const newWorktrees = allWorktrees.filter(wt => !baseline.includes(wt));
+    for (const wt of newWorktrees) {
       expect(
         existsSync(join(worktreesRoot, wt, "README.md")),
         `worktree ${wt} missing checked-out files`,

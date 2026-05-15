@@ -406,6 +406,27 @@ pub(crate) async fn find_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Initialize a new git repo with all existing files committed.
+/// Returns the repo root path on success.
+pub(crate) async fn init_repo(dir: &Path) -> Result<PathBuf> {
+    run_git(dir, &["init", "-q"]).await.context("git init failed")?;
+    // Stage everything so worktrees see the same files as the main
+    // checkout. Respects any existing .gitignore in the directory.
+    run_git(dir, &["add", "."]).await.context("git add failed")?;
+    run_git(
+        dir,
+        &[
+            "-c", "user.email=panes@local",
+            "-c", "user.name=Panes",
+            "commit", "-q", "--allow-empty", "-m", "panes: auto-init for worktree isolation",
+        ],
+    )
+    .await
+    .context("initial commit failed")?;
+    info!(path = %dir.display(), "auto-initialized git repo for worktree isolation");
+    Ok(dir.to_path_buf())
+}
+
 pub async fn list_git_repos(workspace_path: &Path) -> Result<Vec<String>> {
     if is_git_repo(workspace_path).await {
         return Ok(vec![String::new()]);

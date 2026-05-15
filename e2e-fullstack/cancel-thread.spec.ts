@@ -16,8 +16,11 @@ test.describe("Full-Stack: Cancel Thread", () => {
     await addWorkspace(page, wsPath);
     await sendPrompt(page, "slow task please");
 
+    // Wait until the thread is mid-run (tool events flowing) before
+    // clicking stop — auto-init may add startup latency.
+    await page.locator(".tool-group").first().waitFor({ timeout: 15_000 });
     await page.locator(".btn-stop").waitFor({ timeout: 10_000 });
     await page.click(".btn-stop");
-    await expect(page.locator("text=Cancelled")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator("text=Cancelled")).toBeVisible({ timeout: 10_000 });
   });
 });

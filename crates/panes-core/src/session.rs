@@ -367,39 +367,24 @@ impl SessionManager {
             Some(agent_name.to_string())
         };
 
-        // Resolve tracker kind before taking the guard. For git-backed
-        // workspaces Phase 2 lifts the one-thread invariant (each thread
-        // gets its own worktree), so no reservation is needed. Shadow-
-        // backed workspaces keep the Phase 1 guard — file isolation is
-        // not possible without git.
-        let tracker_kind = if git::find_repo_root(&workspace.path).await.is_some() {
-            TrackerKind::Git
-        } else {
-            TrackerKind::Shadow
+        // Resolve the actual repo root (may differ from workspace.path if
+        // the workspace is a subdirectory of a repo). For non-git dirs,
+        // auto-init so every workspace gets worktree isolation.
+        let repo_root = match git::find_repo_root(&workspace.path).await {
+            Some(root) => root,
+            None => {
+                git::init_repo(&workspace.path)
+                    .await
+                    .map_err(|e| PanesError::Internal {
+                        message: format!("failed to auto-init git for worktree isolation: {e}"),
+                    })?
+            }
         };
 
-        if tracker_kind == TrackerKind::Shadow {
-            let active = self.active_threads.lock().await;
-            let mut reserved = self.reservations.lock().await;
-            if active.values().any(|t| t.workspace_id == workspace.id)
-                || reserved.contains(&workspace.id)
-            {
-                return Err(PanesError::WorkspaceOccupied {
-                    workspace_id: workspace.id.clone(),
-                    message: "A thread is already running in this workspace. Wait for it to complete or cancel it first.".to_string(),
-                });
-            }
-            reserved.insert(workspace.id.clone());
-        }
-
         let result = self
-            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref(), tracker_kind)
+            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref(), &repo_root)
             .await
             .map_err(PanesError::from);
-
-        if result.is_err() && tracker_kind == TrackerKind::Shadow {
-            self.reservations.lock().await.remove(&workspace.id);
-        }
 
         result
     }
@@ -413,66 +398,45 @@ impl SessionManager {
         context: SessionContext,
         model: Option<&str>,
         cli_agent: Option<&str>,
-        tracker_kind: TrackerKind,
+        repo_root: &Path,
     ) -> Result<String> {
-        // Tracker kind was resolved in `start_thread` before the guard so
-        // we could skip the one-thread reservation for git workspaces.
-        // Pinned for the lifetime of the thread so a mid-thread `git init`
-        // can't rug-pull an active run.
+        let tracker_kind = TrackerKind::Git;
         let thread_id = Uuid::new_v4().to_string();
 
-        // Create the per-thread worktree for git-tracked threads. The
-        // agent spawns inside the worktree path, and every downstream
-        // file-system operation (snapshot, diff, revert) runs against it
-        // via `ActiveThread::effective_path`.
-        let worktree_handle = if tracker_kind == TrackerKind::Git {
-            let repo_root = workspace.path.clone();
+        // Create the per-thread worktree. The repo root may differ from
+        // workspace.path (e.g. workspace is a subdirectory of the repo).
+        // Failure is fatal — without a worktree there's no file isolation,
+        // and multiple threads would silently race in the main checkout.
+        let worktree_handle = {
+            let repo_root = repo_root.to_path_buf();
             let wt_root = self.worktrees_root.clone();
             let tid = thread_id.clone();
-            match tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 worktree::create(&repo_root, &tid, &wt_root)
             })
             .await
-            {
-                Ok(Ok(handle)) => Some(handle),
-                Ok(Err(e)) => {
-                    warn!(
-                        error = %e,
-                        "failed to create worktree — falling back to main checkout",
-                    );
-                    None
-                }
-                Err(e) => {
-                    warn!(error = %e, "worktree creation task panicked");
-                    None
-                }
+            .context("worktree creation task panicked")?
+            .context("failed to create worktree")?
+        };
+
+        // Map workspace subdirectory into the worktree. If workspace is
+        // /repo/packages/foo and repo root is /repo, the effective path
+        // becomes <worktree>/packages/foo so the agent sees the same
+        // relative structure.
+        let effective_path = match workspace.path.strip_prefix(repo_root) {
+            Ok(rel) if !rel.as_os_str().is_empty() => worktree_handle.path.join(rel),
+            _ => worktree_handle.path.clone(),
+        };
+
+        let snapshot = match git::snapshot(&effective_path).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!(error = %e, "failed to create git snapshot — continuing without rollback");
+                None
             }
-        } else {
-            None
         };
 
-        let effective_path = worktree_handle
-            .as_ref()
-            .map(|h| h.path.clone())
-            .unwrap_or_else(|| workspace.path.clone());
-
-        let snapshot = if tracker_kind == TrackerKind::Git {
-            match git::snapshot(&effective_path).await {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    warn!(error = %e, "failed to create git snapshot — continuing without rollback");
-                    None
-                }
-            }
-        } else {
-            info!(workspace = %workspace.path.display(), "non-git workspace — using shadow version tracker");
-            None
-        };
-
-        let tracker: Arc<dyn VersionTracker> = match tracker_kind {
-            TrackerKind::Git => self.git_tracker.clone() as Arc<dyn VersionTracker>,
-            TrackerKind::Shadow => self.shadow_tracker.clone() as Arc<dyn VersionTracker>,
-        };
+        let tracker: Arc<dyn VersionTracker> = self.git_tracker.clone() as Arc<dyn VersionTracker>;
 
         // Spawn agent session inside the effective (worktree) path. This
         // is the single place the adapter learns its cwd; from here on
@@ -501,10 +465,8 @@ impl SessionManager {
             let p = prompt.to_string();
             let sid = session_id.clone();
             let kind = tracker_kind.as_str().to_string();
-            let wt_path = worktree_handle
-                .as_ref()
-                .map(|h| h.path.to_string_lossy().into_owned());
-            let wt_branch = worktree_handle.as_ref().map(|h| h.branch.clone());
+            let wt_path = Some(worktree_handle.path.to_string_lossy().into_owned());
+            let wt_branch = Some(worktree_handle.branch.clone());
             let _ = self.db.execute(move |conn| {
                 conn.execute(
                     "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, tracker_kind, worktree_path, worktree_branch, started_at, created_at)
@@ -523,7 +485,7 @@ impl SessionManager {
         let active_thread = ActiveThread {
             workspace_id: workspace.id.clone(),
             effective_path: effective_path.clone(),
-            worktree: worktree_handle,
+            worktree: Some(worktree_handle),
             tracker_kind,
             session,
             snapshot,
@@ -533,9 +495,6 @@ impl SessionManager {
         {
             let mut active = self.active_threads.lock().await;
             active.insert(thread_id.clone(), active_thread);
-            if tracker_kind == TrackerKind::Shadow {
-                self.reservations.lock().await.remove(&workspace.id);
-            }
         }
 
         let event_stream = {
@@ -681,23 +640,30 @@ impl SessionManager {
 
         match row {
             Some((Some(path), Some(branch))) => {
-                let path_buf = PathBuf::from(&path);
-                if !path_buf.exists() {
-                    // Worktree directory was deleted out-of-band (user ran
-                    // `rm -rf` or `git worktree remove`). Fall back to the
-                    // main checkout rather than fail the resume.
+                let wt_root = PathBuf::from(&path);
+                if !wt_root.exists() {
                     warn!(
-                        path = %path_buf.display(),
+                        path = %wt_root.display(),
                         "persisted worktree path missing on resume — falling back to main checkout",
                     );
                     return (workspace.path.clone(), None);
                 }
                 let handle = WorktreeHandle {
-                    path: path_buf.clone(),
+                    path: wt_root.clone(),
                     branch,
                     base_commit: String::new(),
                 };
-                (path_buf, Some(handle))
+                // Map workspace subdirectory into the worktree, same as
+                // start_thread_inner. The repo root is the worktree's
+                // parent repo — resolve via find_repo_root on workspace.
+                let effective = match git::find_repo_root(&workspace.path).await {
+                    Some(repo_root) => match workspace.path.strip_prefix(&repo_root) {
+                        Ok(rel) if !rel.as_os_str().is_empty() => wt_root.join(rel),
+                        _ => wt_root,
+                    },
+                    None => wt_root,
+                };
+                (effective, Some(handle))
             }
             _ => (workspace.path.clone(), None),
         }
@@ -1504,14 +1470,16 @@ mod tests {
         (mgr, rx)
     }
 
-    fn make_workspace() -> Workspace {
-        Workspace {
+    fn make_workspace() -> (tempfile::TempDir, Workspace) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
             id: "ws-test".to_string(),
-            path: std::env::temp_dir(),
+            path: tmp.path().to_path_buf(),
             name: "test-workspace".to_string(),
             default_agent: None,
             budget_cap: None,
-        }
+        };
+        (tmp, ws)
     }
 
     async fn wait_for_thread_cleanup(mgr: &SessionManager, thread_id: &str, timeout_ms: u64) {
@@ -1552,7 +1520,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_thread_unknown_agent() {
         let (mgr, _rx) = setup_session_manager().await;
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let result = mgr.start_thread(&ws, "hello", "nonexistent-agent", ctx, None).await;
         assert!(result.is_err());
@@ -1562,7 +1530,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_thread_empty_agent_name_rejected() {
         let (mgr, _rx) = setup_session_manager().await;
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let result = mgr.start_thread(&ws, "hello", "", ctx, None).await;
         assert!(result.is_err());
@@ -1572,7 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn test_resume_thread_empty_agent_name_rejected() {
         let (mgr, _rx) = setup_session_manager().await;
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         let result = mgr.resume_thread("t1", &ws, "hello", "", None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown agent"));
@@ -1609,7 +1577,7 @@ mod tests {
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -1646,7 +1614,7 @@ mod tests {
         }
         mgr.register_adapter(Arc::new(NamedFake(adapter)));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -1683,14 +1651,16 @@ mod tests {
             .unwrap();
     }
 
-    fn make_workspace_with_budget(cap: Option<f64>) -> Workspace {
-        Workspace {
+    fn make_workspace_with_budget(cap: Option<f64>) -> (tempfile::TempDir, Workspace) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
             id: "ws-test".to_string(),
-            path: std::env::temp_dir(),
+            path: tmp.path().to_path_buf(),
             name: "test-workspace".to_string(),
             default_agent: None,
             budget_cap: cap,
-        }
+        };
+        (tmp, ws)
     }
 
     async fn query_thread_status(mgr: &SessionManager, thread_id: &str) -> String {
@@ -2053,7 +2023,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         // Start a thread first so we have a stored session_id
@@ -2085,7 +2055,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         let result = mgr.resume_thread("no-such-thread", &ws, "prompt", "fake", None).await;
         assert!(result.is_err());
         assert!(
@@ -2097,7 +2067,7 @@ mod tests {
     #[tokio::test]
     async fn test_resume_thread_unknown_agent() {
         let (mgr, _rx) = setup_session_manager().await;
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         let result = mgr.resume_thread("t1", &ws, "prompt", "nonexistent-agent", None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown agent"));
@@ -2118,7 +2088,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace_with_budget(Some(0.001));
+        let (_tmp, ws) = make_workspace_with_budget(Some(0.001));
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2148,7 +2118,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace_with_budget(Some(10.0));
+        let (_tmp, ws) = make_workspace_with_budget(Some(10.0));
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2176,7 +2146,7 @@ mod tests {
         let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2208,7 +2178,7 @@ mod tests {
         let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2269,7 +2239,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2372,7 +2342,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2420,7 +2390,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2456,7 +2426,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2478,7 +2448,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace_with_budget(Some(0.001));
+        let (_tmp, ws) = make_workspace_with_budget(Some(0.001));
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2504,7 +2474,7 @@ mod tests {
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2552,7 +2522,7 @@ mod tests {
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2571,7 +2541,7 @@ mod tests {
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2589,7 +2559,7 @@ mod tests {
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2610,7 +2580,7 @@ mod tests {
         let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2635,34 +2605,55 @@ mod tests {
     // One-thread-per-workspace guard tests
     // ---------------------------------------------------------------
 
-    fn make_workspace_with_id(id: &str) -> Workspace {
-        Workspace {
+    fn make_workspace_with_id(id: &str) -> (tempfile::TempDir, Workspace) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
             id: id.to_string(),
-            path: std::env::temp_dir().join(id),
+            path: tmp.path().to_path_buf(),
             name: format!("test-{id}"),
             default_agent: None,
             budget_cap: None,
-        }
+        };
+        (tmp, ws)
     }
 
     #[tokio::test]
-    async fn test_start_blocks_second_start_same_workspace() {
+    async fn test_start_auto_inits_git_and_allows_concurrent() {
+        // Non-git workspaces now get auto-initialized with git so that
+        // concurrent threads can use worktree isolation.
         let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        let ws = make_workspace_with_id("ws-guard-1");
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            id: "ws-auto-init".to_string(),
+            path: tmp.path().to_path_buf(),
+            name: "auto-init".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
         insert_workspace_row(&mgr, &ws).await;
 
-        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let _tid_a = mgr.start_thread(&ws, "first", "gate-test", ctx, None).await.unwrap();
-        let _gate_id = wait_for_gate_event(&mut rx).await;
+        // Directory exists but is NOT a git repo yet.
+        assert!(!tmp.path().join(".git").exists());
 
+        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
+        let tid_a = mgr.start_thread(&ws, "first", "gate-test", ctx, None).await.unwrap();
+        let gate_a = wait_for_gate_event(&mut rx).await;
+
+        // After first start, git should have been auto-initialized.
+        assert!(tmp.path().join(".git").exists());
+
+        // Second concurrent start must succeed (worktree isolation).
         let ctx2 = SessionContext { briefing: None, memories: vec![], budget_cap: None };
         let result = mgr.start_thread(&ws, "second", "gate-test", ctx2, None).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already running in this workspace"));
+        assert!(result.is_ok(), "auto-init workspace must allow concurrent threads: {:?}",
+            result.as_ref().err().map(|e| e.to_string()));
+        let tid_b = result.unwrap();
+        let gate_b = wait_for_gate_event(&mut rx).await;
 
-        mgr.reject(&_tid_a, &_gate_id, "cleanup").await.unwrap();
+        mgr.reject(&tid_a, &gate_a, "cleanup").await.unwrap();
+        mgr.reject(&tid_b, &gate_b, "cleanup").await.unwrap();
     }
 
     #[tokio::test]
@@ -2670,8 +2661,22 @@ mod tests {
         let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        let ws1 = make_workspace_with_id("ws-guard-2a");
-        let ws2 = make_workspace_with_id("ws-guard-2b");
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        let ws1 = Workspace {
+            id: "ws-guard-2a".to_string(),
+            path: tmp1.path().to_path_buf(),
+            name: "test-2a".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
+        let ws2 = Workspace {
+            id: "ws-guard-2b".to_string(),
+            path: tmp2.path().to_path_buf(),
+            name: "test-2b".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
         insert_workspace_row(&mgr, &ws1).await;
         insert_workspace_row(&mgr, &ws2).await;
 
@@ -2691,7 +2696,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resume_blocks_if_other_thread_active() {
+    async fn test_resume_allowed_while_other_thread_active() {
+        // With auto-init, all workspaces are git-tracked and get worktree
+        // isolation. Resuming thread A while thread C is active should work.
         let (mut mgr, mut rx) = setup_session_manager().await;
 
         let fake = FakeAdapter::new(FakeScenario::TextOnly {
@@ -2700,7 +2707,14 @@ mod tests {
         mgr.register_adapter(Arc::new(fake));
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        let ws = make_workspace_with_id("ws-guard-3");
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            id: "ws-guard-3".to_string(),
+            path: tmp.path().to_path_buf(),
+            name: "test-guard-3".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
         insert_workspace_row(&mgr, &ws).await;
 
         // Start and complete thread A
@@ -2714,11 +2728,12 @@ mod tests {
         let tid_c = mgr.start_thread(&ws, "risky", "gate-test", ctx2, None).await.unwrap();
         let gate_id = wait_for_gate_event(&mut rx).await;
 
-        // Try to resume thread A while C is active — should fail
+        // Resume thread A while C is active — should succeed with worktree isolation
         let result = mgr.resume_thread(&tid_a, &ws, "follow up", "fake", None).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already running in this workspace"));
+        assert!(result.is_ok(), "git-tracked resume should succeed with worktree isolation: {:?}",
+            result.as_ref().err().map(|e| e.to_string()));
 
+        let _ = collect_events_until_done(&mut rx).await;
         mgr.reject(&tid_c, &gate_id, "cleanup").await.unwrap();
     }
 
@@ -2793,16 +2808,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shadow_workspace_still_blocks_concurrent_threads() {
-        // Shadow-tracked (non-git) workspaces keep the Phase 1 invariant
-        // because file isolation isn't possible without git. This is the
-        // narrower version of the old guard test.
+    async fn test_formerly_non_git_workspace_allows_concurrent_via_auto_init() {
+        // Workspaces without git are auto-initialized on first thread
+        // start, so a second concurrent start succeeds via worktree isolation.
         let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        // make_workspace_with_id points into temp_dir().join(id) which
-        // is not initialized as a git repo, so tracker resolves to Shadow.
-        let ws = make_workspace_with_id("ws-shadow-concurrent");
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            id: "ws-auto-concurrent".to_string(),
+            path: tmp.path().to_path_buf(),
+            name: "auto-concurrent".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2816,10 +2835,13 @@ mod tests {
         let result = mgr
             .start_thread(&ws, "second", "gate-test", ctx2, None)
             .await;
-        assert!(result.is_err(), "shadow workspace must still block a concurrent start");
-        assert!(result.unwrap_err().to_string().contains("already running in this workspace"));
+        assert!(result.is_ok(), "auto-init workspace must allow concurrent threads: {:?}",
+            result.as_ref().err().map(|e| e.to_string()));
+        let tid_b = result.unwrap();
+        let gate_b = wait_for_gate_event(&mut rx).await;
 
         mgr.reject(&tid_a, &gate_a, "cleanup").await.unwrap();
+        mgr.reject(&tid_b, &gate_b, "cleanup").await.unwrap();
     }
 
     #[tokio::test]
@@ -2830,7 +2852,14 @@ mod tests {
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace_with_id("ws-guard-4");
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            id: "ws-guard-4".to_string(),
+            path: tmp.path().to_path_buf(),
+            name: "test-guard-4".to_string(),
+            default_agent: None,
+            budget_cap: None,
+        };
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2856,7 +2885,7 @@ mod tests {
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2874,7 +2903,7 @@ mod tests {
         let (mut mgr, mut rx) = setup_session_manager().await;
         mgr.register_adapter(Arc::new(gate_test_adapter::GateTestAdapter));
 
-        let ws = make_workspace_with_id("ws-double-approve");
+        let (_tmp, ws) = make_workspace_with_id("ws-double-approve");
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -2900,7 +2929,7 @@ mod tests {
         }).with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
 
         let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
@@ -3199,10 +3228,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_records_pre_edit_on_write_tool_in_non_git_workspace() {
+    async fn thread_auto_inits_git_for_non_git_workspace() {
+        // Previously non-git workspaces used a shadow tracker. Now they
+        // get auto-initialized with git so all threads are git-tracked.
         let (mut mgr, mut rx) = setup_session_manager().await;
 
-        // Non-git workspace under a fresh tmpdir.
         let tmp = tempfile::tempdir().unwrap();
         let ws_path = tmp.path().to_path_buf();
         std::fs::write(ws_path.join("existing.txt"), b"original").unwrap();
@@ -3235,20 +3265,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Drain until Complete so persist_event + hook has run for all tool
-        // requests before we query.
         while let Some(te) = rx.recv().await {
             if matches!(te.event, AgentEvent::Complete { .. }) {
                 break;
             }
         }
 
-        assert_eq!(thread_tracker_kind(&mgr, &thread_id).await, "shadow");
-        assert_eq!(shadow_edit_count(&mgr, &thread_id).await, 2);
-
-        // Sanity: the tracker resolves to a shadow tracker.
-        let tracker = mgr.tracker_for_thread(&thread_id).await.unwrap();
-        assert_eq!(tracker.kind(), TrackerKind::Shadow);
+        assert_eq!(thread_tracker_kind(&mgr, &thread_id).await, "git");
+        assert!(ws_path.join(".git").exists(), "git should have been auto-initialized");
     }
 
     #[tokio::test]
@@ -3323,7 +3347,7 @@ mod tests {
         // flow) rather than silently falling back to a shadow tracker
         // that has no recorded state for them.
         let (mgr, _rx) = setup_session_manager().await;
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
         mgr.db
             .execute(|conn| {
@@ -3361,7 +3385,7 @@ mod tests {
         // (hand-edited DB, future migration bug), we still land on git
         // rather than panicking or returning the wrong tracker.
         let (mgr, _rx) = setup_session_manager().await;
-        let ws = make_workspace();
+        let (_tmp, ws) = make_workspace();
         insert_workspace_row(&mgr, &ws).await;
         mgr.db
             .execute(|conn| {
@@ -3390,15 +3414,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumed_thread_continues_shadow_recording() {
-        // start_thread and resume_thread run through different code paths
-        // (start constructs the tracker from workspace detection; resume
-        // looks it up from the DB via tracker_for_thread). Regressions in
-        // the resume path would silently stop recording pre-edits for
-        // continued threads — invisible until a user hits Revert. This
-        // test starts a thread in a non-git workspace, lets it run to
-        // completion (recording 2 shadow_edits rows), resumes it, and
-        // verifies the second run adds its own shadow_edits rows.
+    async fn resumed_legacy_shadow_thread_continues_shadow_recording() {
+        // Legacy threads (created before auto-init) have tracker_kind =
+        // 'shadow'. Resuming them must still use the shadow tracker and
+        // record pre-edits. We simulate this by inserting the thread row
+        // directly with tracker_kind = 'shadow' and a fake session_id,
+        // then resuming.
         let (mut mgr, mut rx) = setup_session_manager().await;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3412,88 +3433,66 @@ mod tests {
         };
         insert_workspace_row(&mgr, &ws).await;
 
-        let first_files = vec![
-            ws_path.join("first_a.txt").to_string_lossy().to_string(),
-            ws_path.join("first_b.txt").to_string_lossy().to_string(),
+        let thread_id = "legacy-shadow-t1".to_string();
+        let session_id = "fake-session-1".to_string();
+
+        // Insert a legacy shadow thread row directly.
+        {
+            let tid = thread_id.clone();
+            let sid = session_id.clone();
+            mgr.db
+                .execute(move |conn| {
+                    conn.execute(
+                        "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, tracker_kind, created_at) \
+                         VALUES (?1, 'ws-resume', 'fake', 'completed', 'legacy', ?2, 'shadow', '2024-01-01')",
+                        rusqlite::params![tid, sid],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+
+        // Pre-seed the session_id mapping so resume_thread can find it.
+        {
+            let mut sids = mgr.session_ids.lock().await;
+            sids.insert(thread_id.clone(), session_id.clone());
+        }
+
+        let resume_files = vec![
+            ws_path.join("resumed.txt").to_string_lossy().to_string(),
         ];
         let adapter = FakeAdapter::new(FakeScenario::FileEdit {
-            files: first_files,
-            response: "first".to_string(),
+            files: resume_files.clone(),
+            response: "resumed".to_string(),
         })
         .with_delay(0);
         mgr.register_adapter(Arc::new(adapter));
 
-        let ctx = SessionContext { briefing: None, memories: vec![], budget_cap: None };
-        let thread_id = mgr
-            .start_thread(&ws, "edit first batch", "fake", ctx, None)
+        mgr.resume_thread(&thread_id, &ws, "edit resumed", "fake", None)
             .await
             .unwrap();
-
         let _ = collect_events_until_done(&mut rx).await;
         wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
         assert_eq!(
             shadow_edit_count(&mgr, &thread_id).await,
-            2,
-            "first run should record two rows"
+            1,
+            "resumed shadow thread should record pre-edit"
         );
 
-        // Re-register the adapter with a new scenario for the second
-        // run — FakeAdapter is single-scenario, so we swap out the
-        // registration. tracker_for_thread still returns shadow (the
-        // thread row pins that at start).
-        let second_files = vec![
-            ws_path.join("second_c.txt").to_string_lossy().to_string(),
-        ];
-        let adapter = FakeAdapter::new(FakeScenario::FileEdit {
-            files: second_files.clone(),
-            response: "second".to_string(),
-        })
-        .with_delay(0);
-        mgr.register_adapter(Arc::new(adapter));
-
-        mgr.resume_thread(&thread_id, &ws, "edit second batch", "fake", None)
-            .await
-            .unwrap();
-        let _ = collect_events_until_done(&mut rx).await;
-        wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
-
-        // Now 3 rows total: 2 from first run + 1 from resumed run.
-        assert_eq!(
-            shadow_edit_count(&mgr, &thread_id).await,
-            3,
-            "resumed run should add a third row"
-        );
-
-        // And the new file's row is specifically present.
-        let tid = thread_id.clone();
-        let second_rel = second_files[0].clone();
-        let has_row: i64 = mgr
-            .db
-            .execute(move |conn| {
-                Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM shadow_edits WHERE thread_id = ?1 AND file_path = ?2",
-                    rusqlite::params![tid, second_rel],
-                    |row| row.get(0),
-                )?)
-            })
-            .await
-            .unwrap();
-        assert_eq!(has_row, 1, "resumed-run file should be recorded");
+        let tracker = mgr.tracker_for_thread(&thread_id).await.unwrap();
+        assert_eq!(tracker.kind(), TrackerKind::Shadow);
     }
 
     #[tokio::test]
     async fn rejected_gated_write_does_not_appear_as_changed_file() {
-        // Pre-edit recording happens on ToolRequest, BEFORE the user's
-        // gate decision. For a gated write that the user rejects, the
-        // shadow row exists (tombstone) but the file on disk never
-        // changes — so `list_changed_files` must filter it out
-        // (pre == current == empty) and the UI's post-thread "changes
-        // detected" banner stays correct. Regressions here produce
-        // phantom entries in the diff pane after rejected gates.
+        // A rejected gated write never touches disk, so the file must not
+        // appear in the changed-files list. With git-backed worktrees
+        // (the default since auto-init), rejected writes are isolated in
+        // the worktree and discarded on cleanup.
         let (mut mgr, mut rx) = setup_session_manager().await;
 
-        // Non-git workspace — we want the shadow tracker.
         let tmp = tempfile::tempdir().unwrap();
         let ws_path = tmp.path().to_path_buf();
         let target_file = ws_path.join("doomed.txt");
@@ -3523,16 +3522,11 @@ mod tests {
         let _ = collect_events_until_done(&mut rx).await;
         wait_for_thread_cleanup(&mgr, &thread_id, 2000).await;
 
-        // The hook ran on ToolRequest — a row must exist.
-        assert_eq!(
-            shadow_edit_count(&mgr, &thread_id).await,
-            1,
-            "pre-edit hook should have recorded the tombstone"
-        );
-
-        // File was never actually written (we rejected). The tracker
-        // must NOT surface this as a change.
+        // File was never actually written (we rejected).
         assert!(!target_file.exists(), "rejected write should not touch disk");
+
+        // Git tracker: rejected write never lands in the worktree's
+        // committed state, so changed_files is empty.
         let tracker = mgr.tracker_for_thread(&thread_id).await.unwrap();
         let changed = tracker.list_changed_files(&thread_id, &ws_path).await.unwrap();
         assert!(
