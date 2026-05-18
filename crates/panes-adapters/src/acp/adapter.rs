@@ -698,10 +698,29 @@ fn build_stream(
                 }
             };
 
-            let translated = {
+            let (translated, auto_approvals) = {
                 let mut ctx = shared.ctx.lock().await;
-                ctx.translate(&msg)
+                let evts = ctx.translate(&msg);
+                let approvals: Vec<_> = ctx.auto_approve_queue.drain(..).collect();
+                (evts, approvals)
             };
+
+            // Send auto-approve responses back to the backend before
+            // yielding the events so kiro-cli can proceed immediately.
+            if !auto_approvals.is_empty() {
+                let mut guard = shared.transport.lock().await;
+                if let Some(transport) = guard.as_mut() {
+                    for action in auto_approvals {
+                        let _ = transport.send_response(
+                            &action.request_id,
+                            serde_json::json!({
+                                "outcome": { "outcome": "selected", "optionId": action.option_id }
+                            }),
+                        ).await;
+                    }
+                }
+            }
+
             for ev in translated {
                 let is_complete = matches!(ev, AgentEvent::Complete { .. });
                 yield ev;

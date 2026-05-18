@@ -99,6 +99,14 @@ pub(crate) struct PendingPermission {
     pub options: Vec<PermissionOption>,
 }
 
+/// An auto-approve action queued by the translator for the stream loop to
+/// send back to the backend without user interaction.
+#[derive(Debug, Clone)]
+pub(crate) struct AutoApproveAction {
+    pub request_id: Value,
+    pub option_id: String,
+}
+
 /// Translator state for a single ACP session.
 #[derive(Debug, Default)]
 pub(crate) struct TranslationContext {
@@ -106,6 +114,10 @@ pub(crate) struct TranslationContext {
     /// Pending permission requests keyed by tool_call_id. The adapter layer
     /// reads these when the user approves/rejects.
     pending_permissions: HashMap<String, PendingPermission>,
+    /// Permission requests that were auto-approved (risk <= Medium). The
+    /// stream loop drains this after each translate() call and sends the
+    /// approve response directly to the backend.
+    pub(crate) auto_approve_queue: Vec<AutoApproveAction>,
     /// Last emitted text chunk and when. Used for coalescing.
     last_text: Option<(String, Instant)>,
     /// req_id of the currently in-flight session/prompt — Complete emits when
@@ -304,19 +316,44 @@ impl TranslationContext {
             })
             .unwrap_or_default();
 
-        // Record the ACP request id + options so approve()/reject() can respond.
-        if let Some(id) = msg.id.clone() {
-            self.pending_permissions.insert(
-                tool_call_id.clone(),
-                PendingPermission {
-                    request_id: id,
-                    options,
-                },
-            );
+        // Auto-approve Medium and below: queue the approve response for the
+        // stream loop to send, and emit the ToolRequest with needs_approval=false
+        // so it doesn't trigger the gate in SessionManager.
+        let auto_approve = risk_level <= RiskLevel::Medium;
+
+        if auto_approve {
+            if let Some(id) = msg.id.clone() {
+                let option_id = options
+                    .iter()
+                    .find(|o| matches!(o.kind.as_str(), "allow_once" | "allow" | "allow_always"))
+                    .map(|o| o.id.clone())
+                    .or_else(|| options.first().map(|o| o.id.clone()));
+                if let Some(oid) = option_id {
+                    tracing::info!(
+                        tool = %kind,
+                        risk = ?risk_level,
+                        "auto-approving ACP permission request",
+                    );
+                    self.auto_approve_queue.push(AutoApproveAction {
+                        request_id: id,
+                        option_id: oid,
+                    });
+                }
+            }
+        } else {
+            // High/Critical: store for manual approve/reject via the gate UI.
+            if let Some(id) = msg.id.clone() {
+                self.pending_permissions.insert(
+                    tool_call_id.clone(),
+                    PendingPermission {
+                        request_id: id,
+                        options,
+                    },
+                );
+            }
         }
 
-        // Also record this as a pending tool so a subsequent tool_call_update
-        // can emit a ToolResult with proper duration.
+        // Record as a pending tool so tool_call_update emits a ToolResult.
         let sub_agent = detect_sub_agent_dispatch(&kind, &raw_input);
         self.pending_tools.insert(
             tool_call_id.clone(),
@@ -328,7 +365,6 @@ impl TranslationContext {
         );
 
         let mut events = Vec::new();
-        // Flush buffered text before the gate event so ordering matches the UI.
         if let Some((text, _)) = self.last_text.take() {
             events.push(AgentEvent::Text { text });
         }
@@ -337,7 +373,7 @@ impl TranslationContext {
             tool_name: kind,
             description: title,
             input: raw_input,
-            needs_approval: true,
+            needs_approval: !auto_approve,
             risk_level,
         });
         events
@@ -890,22 +926,43 @@ mod tests {
     }
 
     #[test]
-    fn request_permission_with_deny_option_is_captured() {
+    fn request_permission_high_risk_stores_for_manual_approval() {
         let mut ctx = TranslationContext::new();
         let perm = msg(
             r#"{"jsonrpc":"2.0","id":"uuid-2","method":"session/request_permission","params":{
-                "toolCall":{"toolCallId":"tc-d","kind":"edit","title":"x","rawInput":{}},
+                "toolCall":{"toolCallId":"tc-d","kind":"delete","title":"x","rawInput":{}},
                 "options":[
                     {"optionId":"approve","name":"Approve","kind":"allow_always"},
                     {"optionId":"stop","name":"Reject","kind":"reject"}
                 ]
             }}"#,
         );
-        let _ = ctx.translate(&perm);
+        let events = ctx.translate(&perm);
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolRequest { needs_approval: true, .. })));
+        assert!(ctx.auto_approve_queue.is_empty());
         let pending = ctx.take_permission("tc-d").expect("stored");
         assert_eq!(pending.options.len(), 2);
         assert!(pending.options.iter().any(|o| o.kind == "allow_always" && o.id == "approve"));
         assert!(pending.options.iter().any(|o| o.kind == "reject" && o.id == "stop"));
+    }
+
+    #[test]
+    fn request_permission_medium_risk_is_auto_approved() {
+        let mut ctx = TranslationContext::new();
+        let perm = msg(
+            r#"{"jsonrpc":"2.0","id":"uuid-3","method":"session/request_permission","params":{
+                "toolCall":{"toolCallId":"tc-e","kind":"edit","title":"edit file","rawInput":{}},
+                "options":[
+                    {"optionId":"allow","name":"Allow","kind":"allow_once"},
+                    {"optionId":"deny","name":"Deny","kind":"reject"}
+                ]
+            }}"#,
+        );
+        let events = ctx.translate(&perm);
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolRequest { needs_approval: false, .. })));
+        assert!(ctx.take_permission("tc-e").is_none(), "should not be stored for manual approval");
+        assert_eq!(ctx.auto_approve_queue.len(), 1);
+        assert_eq!(ctx.auto_approve_queue[0].option_id, "allow");
     }
 
     #[test]

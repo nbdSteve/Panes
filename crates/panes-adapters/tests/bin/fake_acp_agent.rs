@@ -123,8 +123,8 @@ fn main() {
                             &mut stdout,
                             &perm_id,
                             "tc-1",
-                            "edit",
-                            "rewrite main.rs",
+                            "delete",
+                            "delete main.rs",
                             json!({"path": "/tmp/main.rs"}),
                         );
                         // Next inbound message should be the client's
@@ -146,8 +146,8 @@ fn main() {
                             "params": {
                                 "toolCall": {
                                     "toolCallId": "tc-custom",
-                                    "kind": "edit",
-                                    "title": "custom",
+                                    "kind": "delete",
+                                    "title": "custom delete",
                                     "rawInput": {}
                                 },
                                 "options": [
@@ -298,9 +298,9 @@ fn main() {
                                 &mut stdout,
                                 &perm_id,
                                 "tc-2",
-                                "execute",
-                                "run the second step",
-                                json!({"command": "echo step-2"}),
+                                "delete",
+                                "delete the second file",
+                                json!({"path": "/tmp/step-2"}),
                             );
                             two_gates_second_issued = true;
                             // Put the prompt id back so the next approval
