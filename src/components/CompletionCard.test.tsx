@@ -421,6 +421,7 @@ describe("CompletionCard", () => {
           hasFileChanges={false}
           filesChanged={[]}
           worktreeStatus="isolated"
+          worktreeHasCommits={true}
           onMerge={onMerge}
           onRevert={onRevert}
         />,

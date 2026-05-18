@@ -92,6 +92,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
   // on the completion card. Reset on thread switch via the `key` prop
   // `App.tsx` already sets on ThreadView.
   const [mergeError, setMergeError] = useState<{ message: string; files: string[] } | null>(null);
+  const [worktreeHasCommits, setWorktreeHasCommits] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const [cardFiles, setCardFiles] = useState<Record<number, RepoFileStatus[]>>({});
   const [diffView, setDiffViewLocal] = useState<{ completionIdx: number; initialFile?: string } | null>(
@@ -162,6 +163,14 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
         .catch(() => setDiffRaw(""));
     }
   }, [diffView, diffRaw, cardFiles, workspace.path, thread?.id]);
+
+  useEffect(() => {
+    if (thread?.worktreeStatus === "isolated" && (thread.status === "complete" || thread.status === "error" || thread.status === "interrupted")) {
+      api.worktreeHasCommits(thread.id).then(setWorktreeHasCommits).catch(() => setWorktreeHasCommits(false));
+    } else {
+      setWorktreeHasCommits(false);
+    }
+  }, [thread?.id, thread?.worktreeStatus, thread?.status]);
 
   // Broadcast only when the selection actually changes. We intentionally
   // exclude onConfigChange from the dep array — the parent inlines it as an
@@ -357,10 +366,6 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
                       files: result.files,
                     });
                   } else {
-                    // Success — the backend removed the worktree and cleared
-                    // its bookkeeping; the thread's worktreeStatus will fall
-                    // off on the next listThreads refresh. Treat this as
-                    // equivalent to Commit for the completion-action badge.
                     onCompletionAction(thread.id, "committed");
                   }
                 }).catch((e) => {
@@ -416,7 +421,7 @@ export default function ThreadView({ workspace, thread, adapters, agents, listsL
                 onResumeThread(thread.id, feedbackPrompt);
                 onMarkFeedbackSent(thread.id, completionIdx, comments.length);
               },
-            }, showCost, thread.worktreeStatus, mergeError)}
+            }, showCost, thread.worktreeStatus, worktreeHasCommits, mergeError)}
 
             {(thread.status === "complete" || thread.status === "error" || thread.status === "interrupted") &&
               (thread.extractedMemories !== undefined || thread.extractedMemoriesError !== undefined) && (
@@ -915,6 +920,7 @@ function renderEvents(
   callbacks: RenderCallbacks,
   showCost?: boolean,
   worktreeStatus?: "isolated" | "main",
+  worktreeHasCommits?: boolean,
   mergeError?: { message: string; files: string[] } | null,
 ) {
   let segmentHasWrites = false;
@@ -1096,6 +1102,7 @@ function renderEvents(
             onMerge={callbacks.onMerge}
             onResolveMerge={callbacks.onResolveMerge}
             worktreeStatus={worktreeStatus}
+            worktreeHasCommits={worktreeHasCommits}
             mergeError={mergeError ?? null}
             onFileClick={(filePath) => callbacks.onViewDiff(filePath, completionIdx)}
             onSendFeedback={commentCount > 0 ? () => callbacks.onSendFeedback(completionIdx) : undefined}

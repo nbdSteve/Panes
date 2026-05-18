@@ -31,6 +31,11 @@ export interface CompletionCardProps {
    * keeps the Phase 1 Commit/Revert/Keep UI.
    */
   worktreeStatus?: "isolated" | "main";
+  /** True when the worktree branch has commits ahead of main. Used to
+   *  hide "Merge to main" in the no-file-changes fallback when the
+   *  worktree has nothing to merge. The main action bar (with Inspect)
+   *  always shows Merge since file changes imply pending work. */
+  worktreeHasCommits?: boolean;
   /** Transient error shown inline when a merge attempt conflicted. */
   mergeError?: { message: string; files: string[] } | null;
   onInspect: () => void;
@@ -60,6 +65,7 @@ export default function CompletionCard({
   commentCount,
   feedbackSentCount,
   worktreeStatus,
+  worktreeHasCommits,
   mergeError,
   onInspect,
   onRevert,
@@ -242,15 +248,17 @@ export default function CompletionCard({
           changes. Without this, a text-only agent turn in a worktree
           leaves the worktree orphaned until startup recovery because
           the main action bar (above) requires hasFileChanges. */}
-      {isIsolated && !hasFileChanges && !completionAction && onMerge && (
+      {isIsolated && !hasFileChanges && !completionAction && (
         <div className="completion-actions">
-          <button className="btn btn-primary btn-sm" onClick={onMerge}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
-              <path d="M6 21V9a9 9 0 0 0 9 9" />
-            </svg>
-            Merge to main
-          </button>
+          {onMerge && worktreeHasCommits && (
+            <button className="btn btn-primary btn-sm" onClick={onMerge}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+                <path d="M6 21V9a9 9 0 0 0 9 9" />
+              </svg>
+              Merge to main
+            </button>
+          )}
           <button className="btn btn-danger btn-sm" onClick={onRevert}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />

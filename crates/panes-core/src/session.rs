@@ -23,6 +23,22 @@ use crate::version_tracker::{
 };
 use crate::worktree::{self, WorktreeHandle};
 
+/// Describes the git layout of a workspace, used to decide whether
+/// worktree isolation is possible. Extensibility point for future
+/// multi-repo worktree support (the `MultiRepo` variant).
+#[derive(Debug, Clone)]
+enum WorkspaceLayout {
+    /// Workspace root is inside a single git repo (or was auto-init'd
+    /// into one). Worktree isolation works normally.
+    SingleRepo { repo_root: PathBuf },
+    /// Workspace root is NOT a git repo, but contains nested git repos
+    /// (e.g. a Brazil workspace with `src/PackageA/`, `src/PackageB/`).
+    /// Worktree isolation is skipped for now — agents run directly in
+    /// the workspace. Future: create per-repo worktrees and stitch
+    /// them together.
+    MultiRepo { nested_repos: Vec<PathBuf> },
+}
+
 #[derive(Debug)]
 pub enum GateDecision {
     Continue,
@@ -367,28 +383,48 @@ impl SessionManager {
             Some(agent_name.to_string())
         };
 
-        // Resolve the actual repo root (may differ from workspace.path if
-        // the workspace is a subdirectory of a repo). For non-git dirs,
-        // auto-init so every workspace gets worktree isolation.
-        let repo_root = match git::find_repo_root(&workspace.path).await {
-            Some(root) => root,
+        let layout = match git::find_repo_root(&workspace.path).await {
+            Some(root) => WorkspaceLayout::SingleRepo { repo_root: root },
             None => {
-                git::init_repo(&workspace.path)
-                    .await
-                    .map_err(|e| PanesError::Internal {
-                        message: format!("failed to auto-init git for worktree isolation: {e}"),
-                    })?
+                let nested = git::find_git_repos(&workspace.path).await;
+                if nested.is_empty() {
+                    // No git at all — auto-init so worktree isolation works.
+                    let root = git::init_repo(&workspace.path)
+                        .await
+                        .map_err(|e| PanesError::Internal {
+                            message: format!("failed to auto-init git for worktree isolation: {e}"),
+                        })?;
+                    WorkspaceLayout::SingleRepo { repo_root: root }
+                } else {
+                    WorkspaceLayout::MultiRepo { nested_repos: nested }
+                }
             }
         };
 
-        let result = self
-            .start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref(), &repo_root)
-            .await
-            .map_err(PanesError::from);
+        let result = match &layout {
+            WorkspaceLayout::SingleRepo { repo_root } => {
+                self.start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref(), Some(repo_root))
+                    .await
+                    .map_err(PanesError::from)
+            }
+            WorkspaceLayout::MultiRepo { nested_repos } => {
+                info!(
+                    workspace = %workspace.path.display(),
+                    repos = nested_repos.len(),
+                    "multi-repo workspace — skipping worktree isolation",
+                );
+                self.start_thread_inner(workspace, prompt, agent_name, adapter, context, model, cli_agent.as_deref(), None)
+                    .await
+                    .map_err(PanesError::from)
+            }
+        };
 
         result
     }
 
+    /// `repo_root` is `Some` for single-repo workspaces (worktree isolation
+    /// enabled) and `None` for multi-repo workspaces (agents run directly
+    /// in the workspace — no isolation yet).
     async fn start_thread_inner(
         &self,
         workspace: &Workspace,
@@ -398,34 +434,30 @@ impl SessionManager {
         context: SessionContext,
         model: Option<&str>,
         cli_agent: Option<&str>,
-        repo_root: &Path,
+        repo_root: Option<&Path>,
     ) -> Result<String> {
         let tracker_kind = TrackerKind::Git;
         let thread_id = Uuid::new_v4().to_string();
 
-        // Create the per-thread worktree. The repo root may differ from
-        // workspace.path (e.g. workspace is a subdirectory of the repo).
-        // Failure is fatal — without a worktree there's no file isolation,
-        // and multiple threads would silently race in the main checkout.
-        let worktree_handle = {
-            let repo_root = repo_root.to_path_buf();
-            let wt_root = self.worktrees_root.clone();
-            let tid = thread_id.clone();
-            tokio::task::spawn_blocking(move || {
-                worktree::create(&repo_root, &tid, &wt_root)
-            })
-            .await
-            .context("worktree creation task panicked")?
-            .context("failed to create worktree")?
-        };
-
-        // Map workspace subdirectory into the worktree. If workspace is
-        // /repo/packages/foo and repo root is /repo, the effective path
-        // becomes <worktree>/packages/foo so the agent sees the same
-        // relative structure.
-        let effective_path = match workspace.path.strip_prefix(repo_root) {
-            Ok(rel) if !rel.as_os_str().is_empty() => worktree_handle.path.join(rel),
-            _ => worktree_handle.path.clone(),
+        let (worktree_handle, effective_path) = if let Some(repo_root) = repo_root {
+            let handle = {
+                let repo_root = repo_root.to_path_buf();
+                let wt_root = self.worktrees_root.clone();
+                let tid = thread_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    worktree::create(&repo_root, &tid, &wt_root)
+                })
+                .await
+                .context("worktree creation task panicked")?
+                .context("failed to create worktree")?
+            };
+            let epath = match workspace.path.strip_prefix(repo_root) {
+                Ok(rel) if !rel.as_os_str().is_empty() => handle.path.join(rel),
+                _ => handle.path.clone(),
+            };
+            (Some(handle), epath)
+        } else {
+            (None, workspace.path.clone())
         };
 
         let snapshot = match git::snapshot(&effective_path).await {
@@ -438,9 +470,6 @@ impl SessionManager {
 
         let tracker: Arc<dyn VersionTracker> = self.git_tracker.clone() as Arc<dyn VersionTracker>;
 
-        // Spawn agent session inside the effective (worktree) path. This
-        // is the single place the adapter learns its cwd; from here on
-        // the agent's file edits land in the isolated checkout.
         let session = adapter
             .spawn(&effective_path, prompt, &context, model, cli_agent)
             .await
@@ -448,14 +477,11 @@ impl SessionManager {
 
         let session_id = session.init().session_id.clone();
 
-        // Store the claude session_id for resume
         {
             let mut sids = self.session_ids.lock().await;
             sids.insert(thread_id.clone(), session_id.clone());
         }
 
-        // Persist thread to SQLite (including worktree info so restart
-        // recovery can find and clean up orphaned worktrees).
         {
             let now = Utc::now().to_rfc3339();
             let snapshot_hash = snapshot.as_ref().map(|s| s.commit_hash.clone());
@@ -465,8 +491,8 @@ impl SessionManager {
             let p = prompt.to_string();
             let sid = session_id.clone();
             let kind = tracker_kind.as_str().to_string();
-            let wt_path = Some(worktree_handle.path.to_string_lossy().into_owned());
-            let wt_branch = Some(worktree_handle.branch.clone());
+            let wt_path = worktree_handle.as_ref().map(|h| h.path.to_string_lossy().into_owned());
+            let wt_branch = worktree_handle.as_ref().map(|h| h.branch.clone());
             let _ = self.db.execute(move |conn| {
                 conn.execute(
                     "INSERT INTO threads (id, workspace_id, agent_type, status, prompt, session_id, snapshot_ref, tracker_kind, worktree_path, worktree_branch, started_at, created_at)
@@ -485,7 +511,7 @@ impl SessionManager {
         let active_thread = ActiveThread {
             workspace_id: workspace.id.clone(),
             effective_path: effective_path.clone(),
-            worktree: Some(worktree_handle),
+            worktree: worktree_handle,
             tracker_kind,
             session,
             snapshot,

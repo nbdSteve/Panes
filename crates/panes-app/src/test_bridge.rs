@@ -360,6 +360,29 @@ async fn dispatch_command(
                 "files": files,
             }))
         }
+        "worktree_has_commits" => {
+            let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();
+
+            let mgr = state.session_manager.lock().await;
+            let handle = match mgr.worktree_handle_for_thread(&thread_id).await {
+                Some(h) => h,
+                None => return Ok(Value::Bool(false)),
+            };
+            let repo_root = match mgr.repo_root_for_thread(&thread_id).await {
+                Some(r) => r,
+                None => return Ok(Value::Bool(false)),
+            };
+            drop(mgr);
+
+            let has = tokio::task::spawn_blocking(move || {
+                panes_core::worktree::has_commits(&repo_root, &handle)
+            })
+            .await
+            .map_err(|e| format!("has_commits task panicked: {e}"))?
+            .map_err(|e| format!("has_commits check failed: {e}"))?;
+
+            Ok(Value::Bool(has))
+        }
         "revert_changes" => {
             let workspace_path = args["workspacePath"].as_str().ok_or("missing workspacePath")?;
             let thread_id = args["threadId"].as_str().ok_or("missing threadId")?.to_string();

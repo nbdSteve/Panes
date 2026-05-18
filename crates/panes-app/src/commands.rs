@@ -859,6 +859,32 @@ pub async fn merge_to_main(
     Ok(result)
 }
 
+#[tauri::command]
+pub async fn worktree_has_commits(
+    session: tauri::State<'_, SessionState>,
+    thread_id: String,
+) -> Result<bool, PanesError> {
+    let mgr = session.lock().await;
+    let handle = match mgr.worktree_handle_for_thread(&thread_id).await {
+        Some(h) => h,
+        None => return Ok(false),
+    };
+    let repo_root = match mgr.repo_root_for_thread(&thread_id).await {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+    drop(mgr);
+
+    tokio::task::spawn_blocking(move || panes_core::worktree::has_commits(&repo_root, &handle))
+        .await
+        .map_err(|e| PanesError::GitError {
+            message: format!("has_commits task panicked: {e}"),
+        })?
+        .map_err(|e| PanesError::GitError {
+            message: format!("has_commits check failed: {e}"),
+        })
+}
+
 /// Inner impl — see `revert_changes_inner` rationale.
 pub(crate) async fn get_changed_files_inner(
     session: &SessionState,

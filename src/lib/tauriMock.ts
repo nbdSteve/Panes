@@ -570,9 +570,10 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return null;
 
     case "merge_to_main":
-      // Default success outcome; tests that need a conflict can shadow
-      // this case via their own mock setup before invoke.
       return { outcome: "fast_forwarded", commit: "mock-merge-commit", files: [] };
+
+    case "worktree_has_commits":
+      return true;
 
     case "add_workspace": {
       const ws: MockWorkspace = {

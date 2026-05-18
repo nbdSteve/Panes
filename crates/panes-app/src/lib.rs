@@ -206,6 +206,7 @@ pub fn run() {
             commands::commit_changes,
             commands::revert_changes,
             commands::merge_to_main,
+            commands::worktree_has_commits,
             commands::get_changed_files,
             commands::get_file_diff,
             commands::get_workspace_diff,

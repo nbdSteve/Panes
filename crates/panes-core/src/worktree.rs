@@ -447,6 +447,28 @@ fn resolve_conflict_in_index(
     Ok(())
 }
 
+/// Check whether a worktree branch has any commits ahead of the main
+/// repo's HEAD. Returns `false` when the branch is at the same commit
+/// as HEAD (i.e. `merge_analysis` would say "up to date").
+pub fn has_commits(repo_root: &Path, handle: &WorktreeHandle) -> Result<bool> {
+    let repo = Repository::open(repo_root)
+        .with_context(|| format!("failed to open repo at {}", repo_root.display()))?;
+    let branch = repo
+        .find_branch(&handle.branch, BranchType::Local)
+        .with_context(|| format!("branch {} not found", handle.branch))?;
+    let branch_commit = branch
+        .get()
+        .peel_to_commit()
+        .with_context(|| format!("branch {} has no commit", handle.branch))?;
+    let annotated = repo
+        .find_annotated_commit(branch_commit.id())
+        .context("failed to annotate branch commit")?;
+    let (analysis, _) = repo
+        .merge_analysis(&[&annotated])
+        .context("merge analysis failed")?;
+    Ok(!analysis.is_up_to_date())
+}
+
 /// Scan `worktrees_root` and return any directories whose name isn't in
 /// `known_thread_ids`. Used at startup to clean up after crashes.
 pub fn list_orphans(

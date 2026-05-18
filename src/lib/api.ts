@@ -202,6 +202,8 @@ export const api = {
       message: message ?? null,
       strategy: strategy ?? null,
     }),
+  worktreeHasCommits: (threadId: string) =>
+    call<boolean>("worktree_has_commits", { threadId }),
   getChangedFiles: (workspacePath: string, threadId?: string) =>
     call<string[]>("get_changed_files", { workspacePath, threadId: threadId ?? null }),
   getFileDiff: (workspacePath: string, filePath: string, threadId?: string) =>

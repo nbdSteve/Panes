@@ -156,7 +156,7 @@ fn should_skip_dir(name: &str) -> bool {
     name.starts_with('.') && name != ".git" || SKIP_DIRS.contains(&name)
 }
 
-async fn find_git_repos(workspace_path: &Path) -> Vec<PathBuf> {
+pub async fn find_git_repos(workspace_path: &Path) -> Vec<PathBuf> {
     let mut repos = Vec::new();
     let Ok(mut entries) = tokio::fs::read_dir(workspace_path).await else {
         return repos;
